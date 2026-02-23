@@ -11,6 +11,7 @@ dependencies = [
     "jax[cuda13]>=0.8.2",
     "jaxtyping>=0.3.5",
     "matplotlib>=3.10.8",
+    "mummy-maze-parser",
     "optax>=0.2.6",
 ]
 
@@ -62,3 +63,6 @@ possibly-unresolved-reference = "error"
 [tool.vulture]
 paths = ["src"]
 min_confidence = 60
+
+[tool.uv.sources]
+mummy-maze-parser = { git = "https://github.com/jonahshader/mummy-maze-parser" }
