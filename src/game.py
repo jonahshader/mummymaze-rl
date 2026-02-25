@@ -232,6 +232,7 @@ def step(state: GameState, action: int) -> GameState:
     return state
 
   # 1. Player movement
+  prev_player = state.player
   if action != ACTION_WAIT:
     if _can_move(state, state.player[0], state.player[1], action):
       dr, dc = _direction_delta(action)
@@ -248,11 +249,15 @@ def step(state: GameState, action: int) -> GameState:
     state.alive = False
     return state
 
-  # 4. Key/gate toggle from player
-  if state.key_pos is not None and state.player == state.key_pos:
-    _toggle_gate(state)
+  # 4. Key/gate toggle from player entering key cell
+  if state.key_pos is not None:
+    if state.player == state.key_pos and prev_player != state.key_pos:
+      _toggle_gate(state)
 
   # 5. Move enemies
+  old_mummies = list(state.mummies)
+  old_scorpions = list(state.scorpions)
+
   new_mummies: list[tuple[int, int]] = []
   for mr, mc in state.mummies:
     # Mummies get 2 steps
@@ -269,10 +274,13 @@ def step(state: GameState, action: int) -> GameState:
   state.mummies = new_mummies
   state.scorpions = new_scorpions
 
-  # 5b. Key/gate toggle from enemies entering key cell
+  # 5b. Key/gate toggle from enemies entering key cell (only on entry)
   if state.key_pos is not None:
-    for pos in state.mummies + state.scorpions:
-      if pos == state.key_pos:
+    for i, pos in enumerate(state.mummies):
+      if pos == state.key_pos and old_mummies[i] != state.key_pos:
+        _toggle_gate(state)
+    for i, pos in enumerate(state.scorpions):
+      if pos == state.key_pos and old_scorpions[i] != state.key_pos:
         _toggle_gate(state)
 
   # 6. Resolve enemy-enemy collisions
