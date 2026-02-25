@@ -118,12 +118,13 @@ def _render(stdscr: curses.window, state: GameState) -> None:
   # Gate (rendered on south wall edge of the gate's cell)
   if state.gate_wall is not None:
     gr, gc = state.gate_wall  # h_walls index: (row+1, col)
-    if state.gate_open:
-      grid[gr * 2][gc * 2 + 1] = "g"
-      colors[gr * 2][gc * 2 + 1] = _COL_GATE_OPEN
-    else:
+    wall_present = state.h_walls[gr][gc]
+    if wall_present:
       grid[gr * 2][gc * 2 + 1] = "G"
       colors[gr * 2][gc * 2 + 1] = _COL_GATE_CLOSED
+    else:
+      grid[gr * 2][gc * 2 + 1] = "g"
+      colors[gr * 2][gc * 2 + 1] = _COL_GATE_OPEN
 
   # Scorpions
   for sr, sc in state.scorpions:
@@ -147,6 +148,27 @@ def _render(stdscr: curses.window, state: GameState) -> None:
     for c in range(min(w, max_x - 1)):
       try:
         stdscr.addch(r + 1, c + 1, grid[r][c], curses.color_pair(colors[r][c]))
+      except curses.error:
+        pass
+
+  # Legend (right of maze)
+  legend_x = w + 3
+  legend: list[tuple[str, int]] = [
+    ("P Player", _COL_PLAYER),
+    ("M Mummy", _COL_MUMMY),
+    ("S Scorpion", _COL_SCORPION),
+    ("T Trap", _COL_TRAP),
+    ("X Exit", _COL_EXIT),
+    ("K Key", _COL_KEY),
+    ("G Gate (closed)", _COL_GATE_CLOSED),
+    ("g Gate (open)", _COL_GATE_OPEN),
+  ]
+  for i, (text, col) in enumerate(legend):
+    y = i + 1
+    if y < max_y - 2 and legend_x + len(text) < max_x:
+      try:
+        stdscr.addch(y, legend_x, text[0], curses.color_pair(col))
+        stdscr.addstr(y, legend_x + 1, text[1:], curses.color_pair(_COL_STATUS))
       except curses.error:
         pass
 
