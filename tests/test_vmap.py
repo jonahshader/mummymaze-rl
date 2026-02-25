@@ -219,7 +219,7 @@ def _get_banks() -> dict[int, LevelBank]:
   """Load level banks once across all tests."""
   global _banks_cache  # noqa: PLW0603
   if _banks_cache is None:
-    _banks_cache = load_all_levels(Path(DAT_DIR))
+    _banks_cache, _ = load_all_levels(Path(DAT_DIR))
   return _banks_cache
 
 

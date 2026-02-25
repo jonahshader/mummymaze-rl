@@ -272,7 +272,7 @@ def load_all_levels(
   dat_dir: Path,
   val_fraction: float = 0.1,
   seed: int = 42,
-) -> dict[int, LevelBank]:
+) -> tuple[dict[int, LevelBank], dict[int, list[tuple[str, int]]]]:
   """Load all .dat files, deduplicate, bin by grid_size, train/val split.
 
   Args:
@@ -281,7 +281,10 @@ def load_all_levels(
     seed: Random seed for reproducible train/val splits.
 
   Returns:
-    Dict mapping grid_size -> LevelBank.
+    Tuple of (banks, sources) where:
+      banks: dict mapping grid_size -> LevelBank.
+      sources: dict mapping grid_size -> list of (file_stem, sublevel_idx)
+        aligned with bank indices (before train/val shuffle).
   """
   if parse_file is None:
     msg = "mummy-maze-parser is required. Install with: uv add mummy-maze-parser"
@@ -289,6 +292,7 @@ def load_all_levels(
 
   # Collect all unique levels binned by grid_size (numpy-only, no JAX overhead)
   bins: dict[int, list[dict[str, object]]] = {}
+  sources: dict[int, list[tuple[str, int]]] = {}
   seen: dict[int, set[bytes]] = {}
 
   dat_files = sorted(dat_dir.glob("B-*.dat"))
@@ -296,17 +300,19 @@ def load_all_levels(
     parsed = parse_file(dat_path)
     if parsed is None:
       continue
-    for sublevel in parsed.sublevels:
+    for sub_idx, sublevel in enumerate(parsed.sublevels):
       gs, level_np = _load_level_np(sublevel, parsed.header)
       fp = _np_fingerprint(level_np)
 
       if gs not in bins:
         bins[gs] = []
+        sources[gs] = []
         seen[gs] = set()
 
       if fp not in seen[gs]:
         seen[gs].add(fp)
         bins[gs].append(level_np)
+        sources[gs].append((dat_path.stem, sub_idx))
 
   # Build banks
   rng = jax.random.key(seed)
@@ -315,4 +321,4 @@ def load_all_levels(
     rng, sub_rng = jax.random.split(rng)
     banks[gs] = _build_bank(gs, bins[gs], val_fraction, sub_rng)
 
-  return banks
+  return banks, sources
