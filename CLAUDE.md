@@ -1,6 +1,13 @@
 # CLAUDE.md
 
-This document contains useful information for new Claude Code instances regarding the mummymaze-rl project.
+Training an RL agent to play Mummy Maze Deluxe using JAX. See `IDEAS.md` for goals and research directions.
+
+## Project Structure
+
+- `src/game.py` — Pure Python game engine (mutable, reference implementation)
+- `src/env/` — JAX port (immutable pytrees, jit/vmap compatible). Both engines must agree.
+- `grid_size` is the only trace-time constant. Everything else is runtime arrays for vmap across different levels.
+- Key/gate toggle fires on **entry** only (entity moves onto key cell), not while standing on it.
 
 ## Development Practices
 
