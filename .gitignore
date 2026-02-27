@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Joblib solver cache
+.cache/
+
 # C solver build artifacts
 csolver/build/
 
