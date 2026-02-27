@@ -427,7 +427,7 @@ wheels = [
 [[package]]
 name = "mummy-maze-parser"
 version = "0.1.0"
-source = { git = "https://github.com/jonahshader/mummy-maze-parser#16d3e8ea3a7ad79e2af3c40d0721210d17806a57" }
+source = { git = "https://github.com/jonahshader/mummy-maze-parser#a3c2f812d7107475f6eeadf73259efc70634428b" }
 
 [[package]]
 name = "mummymaze-rl"
