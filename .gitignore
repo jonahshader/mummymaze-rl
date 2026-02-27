@@ -12,5 +12,5 @@ wheels/
 # C solver build artifacts
 csolver/build/
 
-# Game data (copyrighted)
-mazes/
+# Game data (private repo only)
+# mazes/
