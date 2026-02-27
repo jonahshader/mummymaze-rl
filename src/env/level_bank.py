@@ -134,6 +134,10 @@ def _load_level_np(sublevel: object, header: object) -> tuple[int, dict[str, obj
   h_walls = np.array(sublevel.h_walls, dtype=np.bool_)  # type: ignore[union-attr]
   v_walls = np.array(sublevel.v_walls, dtype=np.bool_)  # type: ignore[union-attr]
 
+  # .dat files store walls without the gate wall. Gate starts closed (wall present).
+  if gate_wall is not None:
+    h_walls[gate_wall[0], gate_wall[1]] = True
+
   mummy_arr = np.zeros((MAX_MUMMIES, 2), dtype=np.int32)
   mummy_alive = np.zeros(MAX_MUMMIES, dtype=np.bool_)
   for i, (mr, mc) in enumerate(mummies[:MAX_MUMMIES]):
