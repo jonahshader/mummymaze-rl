@@ -9,5 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
+# C solver build artifacts
+csolver/build/
+
 # Game data (copyrighted)
 mazes/
