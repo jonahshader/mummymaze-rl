@@ -1,0 +1,3264 @@
+{
+  "badmaps": [
+    {
+      "file": "B-17",
+      "sublevel": 4
+    },
+    {
+      "file": "B-17",
+      "sublevel": 11
+    },
+    {
+      "file": "B-17",
+      "sublevel": 23
+    },
+    {
+      "file": "B-17",
+      "sublevel": 42
+    },
+    {
+      "file": "B-17",
+      "sublevel": 46
+    },
+    {
+      "file": "B-17",
+      "sublevel": 52
+    },
+    {
+      "file": "B-17",
+      "sublevel": 55
+    },
+    {
+      "file": "B-17",
+      "sublevel": 61
+    },
+    {
+      "file": "B-17",
+      "sublevel": 69
+    },
+    {
+      "file": "B-17",
+      "sublevel": 70
+    },
+    {
+      "file": "B-18",
+      "sublevel": 1
+    },
+    {
+      "file": "B-18",
+      "sublevel": 3
+    },
+    {
+      "file": "B-18",
+      "sublevel": 5
+    },
+    {
+      "file": "B-18",
+      "sublevel": 6
+    },
+    {
+      "file": "B-18",
+      "sublevel": 8
+    },
+    {
+      "file": "B-18",
+      "sublevel": 10
+    },
+    {
+      "file": "B-18",
+      "sublevel": 19
+    },
+    {
+      "file": "B-18",
+      "sublevel": 23
+    },
+    {
+      "file": "B-18",
+      "sublevel": 27
+    },
+    {
+      "file": "B-18",
+      "sublevel": 32
+    },
+    {
+      "file": "B-18",
+      "sublevel": 40
+    },
+    {
+      "file": "B-18",
+      "sublevel": 41
+    },
+    {
+      "file": "B-18",
+      "sublevel": 48
+    },
+    {
+      "file": "B-18",
+      "sublevel": 52
+    },
+    {
+      "file": "B-18",
+      "sublevel": 63
+    },
+    {
+      "file": "B-18",
+      "sublevel": 66
+    },
+    {
+      "file": "B-18",
+      "sublevel": 67
+    },
+    {
+      "file": "B-18",
+      "sublevel": 86
+    },
+    {
+      "file": "B-19",
+      "sublevel": 5
+    },
+    {
+      "file": "B-19",
+      "sublevel": 8
+    },
+    {
+      "file": "B-19",
+      "sublevel": 26
+    },
+    {
+      "file": "B-19",
+      "sublevel": 34
+    },
+    {
+      "file": "B-19",
+      "sublevel": 35
+    },
+    {
+      "file": "B-19",
+      "sublevel": 41
+    },
+    {
+      "file": "B-19",
+      "sublevel": 48
+    },
+    {
+      "file": "B-19",
+      "sublevel": 49
+    },
+    {
+      "file": "B-19",
+      "sublevel": 51
+    },
+    {
+      "file": "B-19",
+      "sublevel": 55
+    },
+    {
+      "file": "B-19",
+      "sublevel": 61
+    },
+    {
+      "file": "B-19",
+      "sublevel": 62
+    },
+    {
+      "file": "B-19",
+      "sublevel": 71
+    },
+    {
+      "file": "B-19",
+      "sublevel": 79
+    },
+    {
+      "file": "B-19",
+      "sublevel": 82
+    },
+    {
+      "file": "B-20",
+      "sublevel": 8
+    },
+    {
+      "file": "B-20",
+      "sublevel": 10
+    },
+    {
+      "file": "B-20",
+      "sublevel": 30
+    },
+    {
+      "file": "B-20",
+      "sublevel": 32
+    },
+    {
+      "file": "B-20",
+      "sublevel": 52
+    },
+    {
+      "file": "B-20",
+      "sublevel": 54
+    },
+    {
+      "file": "B-20",
+      "sublevel": 74
+    },
+    {
+      "file": "B-20",
+      "sublevel": 76
+    },
+    {
+      "file": "B-20",
+      "sublevel": 96
+    },
+    {
+      "file": "B-20",
+      "sublevel": 98
+    },
+    {
+      "file": "B-21",
+      "sublevel": 2
+    },
+    {
+      "file": "B-21",
+      "sublevel": 4
+    },
+    {
+      "file": "B-21",
+      "sublevel": 12
+    },
+    {
+      "file": "B-21",
+      "sublevel": 18
+    },
+    {
+      "file": "B-21",
+      "sublevel": 21
+    },
+    {
+      "file": "B-21",
+      "sublevel": 25
+    },
+    {
+      "file": "B-21",
+      "sublevel": 27
+    },
+    {
+      "file": "B-21",
+      "sublevel": 31
+    },
+    {
+      "file": "B-21",
+      "sublevel": 37
+    },
+    {
+      "file": "B-21",
+      "sublevel": 39
+    },
+    {
+      "file": "B-21",
+      "sublevel": 42
+    },
+    {
+      "file": "B-21",
+      "sublevel": 50
+    },
+    {
+      "file": "B-21",
+      "sublevel": 53
+    },
+    {
+      "file": "B-21",
+      "sublevel": 56
+    },
+    {
+      "file": "B-21",
+      "sublevel": 61
+    },
+    {
+      "file": "B-21",
+      "sublevel": 71
+    },
+    {
+      "file": "B-21",
+      "sublevel": 72
+    },
+    {
+      "file": "B-21",
+      "sublevel": 83
+    },
+    {
+      "file": "B-21",
+      "sublevel": 86
+    },
+    {
+      "file": "B-21",
+      "sublevel": 87
+    },
+    {
+      "file": "B-21",
+      "sublevel": 90
+    },
+    {
+      "file": "B-21",
+      "sublevel": 95
+    },
+    {
+      "file": "B-22",
+      "sublevel": 8
+    },
+    {
+      "file": "B-22",
+      "sublevel": 10
+    },
+    {
+      "file": "B-22",
+      "sublevel": 30
+    },
+    {
+      "file": "B-22",
+      "sublevel": 32
+    },
+    {
+      "file": "B-22",
+      "sublevel": 52
+    },
+    {
+      "file": "B-22",
+      "sublevel": 54
+    },
+    {
+      "file": "B-22",
+      "sublevel": 74
+    },
+    {
+      "file": "B-22",
+      "sublevel": 76
+    },
+    {
+      "file": "B-22",
+      "sublevel": 96
+    },
+    {
+      "file": "B-22",
+      "sublevel": 98
+    },
+    {
+      "file": "B-23",
+      "sublevel": 4
+    },
+    {
+      "file": "B-23",
+      "sublevel": 6
+    },
+    {
+      "file": "B-23",
+      "sublevel": 17
+    },
+    {
+      "file": "B-23",
+      "sublevel": 19
+    },
+    {
+      "file": "B-23",
+      "sublevel": 30
+    },
+    {
+      "file": "B-23",
+      "sublevel": 32
+    },
+    {
+      "file": "B-23",
+      "sublevel": 43
+    },
+    {
+      "file": "B-23",
+      "sublevel": 45
+    },
+    {
+      "file": "B-23",
+      "sublevel": 56
+    },
+    {
+      "file": "B-23",
+      "sublevel": 58
+    },
+    {
+      "file": "B-23",
+      "sublevel": 69
+    },
+    {
+      "file": "B-23",
+      "sublevel": 71
+    },
+    {
+      "file": "B-23",
+      "sublevel": 82
+    },
+    {
+      "file": "B-23",
+      "sublevel": 84
+    },
+    {
+      "file": "B-23",
+      "sublevel": 95
+    },
+    {
+      "file": "B-23",
+      "sublevel": 97
+    },
+    {
+      "file": "B-24",
+      "sublevel": 0
+    },
+    {
+      "file": "B-24",
+      "sublevel": 29
+    },
+    {
+      "file": "B-24",
+      "sublevel": 43
+    },
+    {
+      "file": "B-24",
+      "sublevel": 49
+    },
+    {
+      "file": "B-24",
+      "sublevel": 70
+    },
+    {
+      "file": "B-24",
+      "sublevel": 75
+    },
+    {
+      "file": "B-24",
+      "sublevel": 80
+    },
+    {
+      "file": "B-24",
+      "sublevel": 83
+    },
+    {
+      "file": "B-24",
+      "sublevel": 96
+    },
+    {
+      "file": "B-50",
+      "sublevel": 18
+    },
+    {
+      "file": "B-50",
+      "sublevel": 20
+    },
+    {
+      "file": "B-50",
+      "sublevel": 40
+    },
+    {
+      "file": "B-50",
+      "sublevel": 59
+    },
+    {
+      "file": "B-50",
+      "sublevel": 73
+    },
+    {
+      "file": "B-50",
+      "sublevel": 81
+    },
+    {
+      "file": "B-50",
+      "sublevel": 85
+    },
+    {
+      "file": "B-51",
+      "sublevel": 17
+    },
+    {
+      "file": "B-51",
+      "sublevel": 23
+    },
+    {
+      "file": "B-51",
+      "sublevel": 83
+    },
+    {
+      "file": "B-52",
+      "sublevel": 1
+    },
+    {
+      "file": "B-52",
+      "sublevel": 27
+    },
+    {
+      "file": "B-52",
+      "sublevel": 51
+    },
+    {
+      "file": "B-52",
+      "sublevel": 65
+    },
+    {
+      "file": "B-52",
+      "sublevel": 77
+    },
+    {
+      "file": "B-52",
+      "sublevel": 94
+    },
+    {
+      "file": "B-53",
+      "sublevel": 2
+    },
+    {
+      "file": "B-53",
+      "sublevel": 34
+    },
+    {
+      "file": "B-53",
+      "sublevel": 52
+    },
+    {
+      "file": "B-53",
+      "sublevel": 59
+    },
+    {
+      "file": "B-53",
+      "sublevel": 63
+    },
+    {
+      "file": "B-53",
+      "sublevel": 64
+    },
+    {
+      "file": "B-53",
+      "sublevel": 80
+    },
+    {
+      "file": "B-53",
+      "sublevel": 87
+    },
+    {
+      "file": "B-53",
+      "sublevel": 95
+    },
+    {
+      "file": "B-53",
+      "sublevel": 96
+    },
+    {
+      "file": "B-54",
+      "sublevel": 0
+    },
+    {
+      "file": "B-54",
+      "sublevel": 4
+    },
+    {
+      "file": "B-54",
+      "sublevel": 9
+    },
+    {
+      "file": "B-54",
+      "sublevel": 20
+    },
+    {
+      "file": "B-54",
+      "sublevel": 22
+    },
+    {
+      "file": "B-54",
+      "sublevel": 27
+    },
+    {
+      "file": "B-54",
+      "sublevel": 69
+    },
+    {
+      "file": "B-54",
+      "sublevel": 72
+    },
+    {
+      "file": "B-54",
+      "sublevel": 74
+    },
+    {
+      "file": "B-54",
+      "sublevel": 86
+    },
+    {
+      "file": "B-54",
+      "sublevel": 96
+    },
+    {
+      "file": "B-55",
+      "sublevel": 2
+    },
+    {
+      "file": "B-55",
+      "sublevel": 34
+    },
+    {
+      "file": "B-55",
+      "sublevel": 52
+    },
+    {
+      "file": "B-55",
+      "sublevel": 59
+    },
+    {
+      "file": "B-55",
+      "sublevel": 63
+    },
+    {
+      "file": "B-55",
+      "sublevel": 64
+    },
+    {
+      "file": "B-55",
+      "sublevel": 80
+    },
+    {
+      "file": "B-55",
+      "sublevel": 87
+    },
+    {
+      "file": "B-55",
+      "sublevel": 95
+    },
+    {
+      "file": "B-55",
+      "sublevel": 96
+    },
+    {
+      "file": "B-56",
+      "sublevel": 0
+    },
+    {
+      "file": "B-56",
+      "sublevel": 9
+    },
+    {
+      "file": "B-56",
+      "sublevel": 15
+    },
+    {
+      "file": "B-56",
+      "sublevel": 58
+    },
+    {
+      "file": "B-56",
+      "sublevel": 75
+    },
+    {
+      "file": "B-56",
+      "sublevel": 82
+    },
+    {
+      "file": "B-57",
+      "sublevel": 0
+    },
+    {
+      "file": "B-57",
+      "sublevel": 4
+    },
+    {
+      "file": "B-57",
+      "sublevel": 10
+    },
+    {
+      "file": "B-57",
+      "sublevel": 21
+    },
+    {
+      "file": "B-57",
+      "sublevel": 24
+    },
+    {
+      "file": "B-57",
+      "sublevel": 29
+    },
+    {
+      "file": "B-57",
+      "sublevel": 40
+    },
+    {
+      "file": "B-57",
+      "sublevel": 49
+    },
+    {
+      "file": "B-57",
+      "sublevel": 55
+    },
+    {
+      "file": "B-57",
+      "sublevel": 61
+    },
+    {
+      "file": "B-57",
+      "sublevel": 76
+    },
+    {
+      "file": "B-57",
+      "sublevel": 83
+    },
+    {
+      "file": "B-57",
+      "sublevel": 88
+    },
+    {
+      "file": "B-83",
+      "sublevel": 74
+    },
+    {
+      "file": "B-84",
+      "sublevel": 32
+    },
+    {
+      "file": "B-85",
+      "sublevel": 48
+    },
+    {
+      "file": "B-85",
+      "sublevel": 71
+    },
+    {
+      "file": "B-86",
+      "sublevel": 29
+    },
+    {
+      "file": "B-88",
+      "sublevel": 29
+    },
+    {
+      "file": "B-89",
+      "sublevel": 47
+    },
+    {
+      "file": "B-6",
+      "sublevel": 24
+    },
+    {
+      "file": "B-6",
+      "sublevel": 48
+    },
+    {
+      "file": "B-6",
+      "sublevel": 97
+    },
+    {
+      "file": "B-7",
+      "sublevel": 73
+    },
+    {
+      "file": "B-9",
+      "sublevel": 0
+    },
+    {
+      "file": "B-9",
+      "sublevel": 3
+    },
+    {
+      "file": "B-9",
+      "sublevel": 6
+    },
+    {
+      "file": "B-9",
+      "sublevel": 9
+    },
+    {
+      "file": "B-9",
+      "sublevel": 10
+    },
+    {
+      "file": "B-9",
+      "sublevel": 13
+    },
+    {
+      "file": "B-9",
+      "sublevel": 14
+    },
+    {
+      "file": "B-9",
+      "sublevel": 15
+    },
+    {
+      "file": "B-9",
+      "sublevel": 18
+    },
+    {
+      "file": "B-9",
+      "sublevel": 22
+    },
+    {
+      "file": "B-9",
+      "sublevel": 23
+    },
+    {
+      "file": "B-9",
+      "sublevel": 24
+    },
+    {
+      "file": "B-9",
+      "sublevel": 27
+    },
+    {
+      "file": "B-9",
+      "sublevel": 30
+    },
+    {
+      "file": "B-9",
+      "sublevel": 32
+    },
+    {
+      "file": "B-9",
+      "sublevel": 33
+    },
+    {
+      "file": "B-9",
+      "sublevel": 35
+    },
+    {
+      "file": "B-9",
+      "sublevel": 36
+    },
+    {
+      "file": "B-9",
+      "sublevel": 37
+    },
+    {
+      "file": "B-9",
+      "sublevel": 39
+    },
+    {
+      "file": "B-9",
+      "sublevel": 41
+    },
+    {
+      "file": "B-9",
+      "sublevel": 42
+    },
+    {
+      "file": "B-9",
+      "sublevel": 43
+    },
+    {
+      "file": "B-9",
+      "sublevel": 44
+    },
+    {
+      "file": "B-9",
+      "sublevel": 47
+    },
+    {
+      "file": "B-9",
+      "sublevel": 48
+    },
+    {
+      "file": "B-9",
+      "sublevel": 49
+    },
+    {
+      "file": "B-9",
+      "sublevel": 50
+    },
+    {
+      "file": "B-9",
+      "sublevel": 52
+    },
+    {
+      "file": "B-9",
+      "sublevel": 53
+    },
+    {
+      "file": "B-9",
+      "sublevel": 55
+    },
+    {
+      "file": "B-9",
+      "sublevel": 57
+    },
+    {
+      "file": "B-9",
+      "sublevel": 59
+    },
+    {
+      "file": "B-9",
+      "sublevel": 60
+    },
+    {
+      "file": "B-9",
+      "sublevel": 64
+    },
+    {
+      "file": "B-9",
+      "sublevel": 65
+    },
+    {
+      "file": "B-9",
+      "sublevel": 66
+    },
+    {
+      "file": "B-9",
+      "sublevel": 67
+    },
+    {
+      "file": "B-9",
+      "sublevel": 69
+    },
+    {
+      "file": "B-9",
+      "sublevel": 73
+    },
+    {
+      "file": "B-9",
+      "sublevel": 74
+    },
+    {
+      "file": "B-9",
+      "sublevel": 75
+    },
+    {
+      "file": "B-9",
+      "sublevel": 76
+    },
+    {
+      "file": "B-9",
+      "sublevel": 80
+    },
+    {
+      "file": "B-9",
+      "sublevel": 82
+    },
+    {
+      "file": "B-9",
+      "sublevel": 84
+    },
+    {
+      "file": "B-9",
+      "sublevel": 85
+    },
+    {
+      "file": "B-9",
+      "sublevel": 89
+    },
+    {
+      "file": "B-9",
+      "sublevel": 90
+    },
+    {
+      "file": "B-9",
+      "sublevel": 91
+    },
+    {
+      "file": "B-9",
+      "sublevel": 92
+    },
+    {
+      "file": "B-9",
+      "sublevel": 94
+    },
+    {
+      "file": "B-9",
+      "sublevel": 95
+    },
+    {
+      "file": "B-9",
+      "sublevel": 98
+    },
+    {
+      "file": "B-10",
+      "sublevel": 82
+    },
+    {
+      "file": "B-11",
+      "sublevel": 12
+    },
+    {
+      "file": "B-11",
+      "sublevel": 18
+    },
+    {
+      "file": "B-11",
+      "sublevel": 64
+    },
+    {
+      "file": "B-11",
+      "sublevel": 66
+    },
+    {
+      "file": "B-12",
+      "sublevel": 50
+    },
+    {
+      "file": "B-12",
+      "sublevel": 66
+    },
+    {
+      "file": "B-13",
+      "sublevel": 10
+    },
+    {
+      "file": "B-13",
+      "sublevel": 11
+    },
+    {
+      "file": "B-13",
+      "sublevel": 17
+    },
+    {
+      "file": "B-13",
+      "sublevel": 29
+    },
+    {
+      "file": "B-13",
+      "sublevel": 52
+    },
+    {
+      "file": "B-13",
+      "sublevel": 55
+    },
+    {
+      "file": "B-14",
+      "sublevel": 12
+    },
+    {
+      "file": "B-14",
+      "sublevel": 14
+    },
+    {
+      "file": "B-14",
+      "sublevel": 18
+    },
+    {
+      "file": "B-14",
+      "sublevel": 21
+    },
+    {
+      "file": "B-14",
+      "sublevel": 59
+    },
+    {
+      "file": "B-14",
+      "sublevel": 64
+    },
+    {
+      "file": "B-14",
+      "sublevel": 66
+    },
+    {
+      "file": "B-15",
+      "sublevel": 18
+    },
+    {
+      "file": "B-15",
+      "sublevel": 64
+    },
+    {
+      "file": "B-15",
+      "sublevel": 66
+    },
+    {
+      "file": "B-15",
+      "sublevel": 73
+    },
+    {
+      "file": "B-16",
+      "sublevel": 13
+    },
+    {
+      "file": "B-16",
+      "sublevel": 16
+    },
+    {
+      "file": "B-16",
+      "sublevel": 52
+    },
+    {
+      "file": "B-16",
+      "sublevel": 53
+    },
+    {
+      "file": "B-16",
+      "sublevel": 94
+    },
+    {
+      "file": "B-16",
+      "sublevel": 95
+    },
+    {
+      "file": "B-17",
+      "sublevel": 13
+    },
+    {
+      "file": "B-17",
+      "sublevel": 40
+    },
+    {
+      "file": "B-17",
+      "sublevel": 43
+    },
+    {
+      "file": "B-17",
+      "sublevel": 48
+    },
+    {
+      "file": "B-17",
+      "sublevel": 51
+    },
+    {
+      "file": "B-17",
+      "sublevel": 80
+    },
+    {
+      "file": "B-18",
+      "sublevel": 12
+    },
+    {
+      "file": "B-18",
+      "sublevel": 26
+    },
+    {
+      "file": "B-19",
+      "sublevel": 19
+    },
+    {
+      "file": "B-19",
+      "sublevel": 93
+    },
+    {
+      "file": "B-20",
+      "sublevel": 35
+    },
+    {
+      "file": "B-20",
+      "sublevel": 57
+    },
+    {
+      "file": "B-21",
+      "sublevel": 16
+    },
+    {
+      "file": "B-21",
+      "sublevel": 28
+    },
+    {
+      "file": "B-21",
+      "sublevel": 29
+    },
+    {
+      "file": "B-21",
+      "sublevel": 40
+    },
+    {
+      "file": "B-21",
+      "sublevel": 60
+    },
+    {
+      "file": "B-21",
+      "sublevel": 77
+    },
+    {
+      "file": "B-24",
+      "sublevel": 1
+    },
+    {
+      "file": "B-24",
+      "sublevel": 6
+    },
+    {
+      "file": "B-24",
+      "sublevel": 8
+    },
+    {
+      "file": "B-24",
+      "sublevel": 11
+    },
+    {
+      "file": "B-24",
+      "sublevel": 12
+    },
+    {
+      "file": "B-24",
+      "sublevel": 15
+    },
+    {
+      "file": "B-24",
+      "sublevel": 16
+    },
+    {
+      "file": "B-24",
+      "sublevel": 18
+    },
+    {
+      "file": "B-24",
+      "sublevel": 21
+    },
+    {
+      "file": "B-24",
+      "sublevel": 23
+    },
+    {
+      "file": "B-24",
+      "sublevel": 36
+    },
+    {
+      "file": "B-24",
+      "sublevel": 38
+    },
+    {
+      "file": "B-24",
+      "sublevel": 44
+    },
+    {
+      "file": "B-24",
+      "sublevel": 53
+    },
+    {
+      "file": "B-24",
+      "sublevel": 55
+    },
+    {
+      "file": "B-24",
+      "sublevel": 57
+    },
+    {
+      "file": "B-24",
+      "sublevel": 60
+    },
+    {
+      "file": "B-24",
+      "sublevel": 63
+    },
+    {
+      "file": "B-24",
+      "sublevel": 66
+    },
+    {
+      "file": "B-24",
+      "sublevel": 71
+    },
+    {
+      "file": "B-24",
+      "sublevel": 79
+    },
+    {
+      "file": "B-24",
+      "sublevel": 81
+    },
+    {
+      "file": "B-24",
+      "sublevel": 82
+    },
+    {
+      "file": "B-24",
+      "sublevel": 86
+    },
+    {
+      "file": "B-24",
+      "sublevel": 89
+    },
+    {
+      "file": "B-24",
+      "sublevel": 91
+    },
+    {
+      "file": "B-24",
+      "sublevel": 93
+    },
+    {
+      "file": "B-24",
+      "sublevel": 94
+    },
+    {
+      "file": "B-24",
+      "sublevel": 95
+    },
+    {
+      "file": "B-25",
+      "sublevel": 10
+    },
+    {
+      "file": "B-25",
+      "sublevel": 30
+    },
+    {
+      "file": "B-25",
+      "sublevel": 49
+    },
+    {
+      "file": "B-25",
+      "sublevel": 58
+    },
+    {
+      "file": "B-25",
+      "sublevel": 61
+    },
+    {
+      "file": "B-25",
+      "sublevel": 76
+    },
+    {
+      "file": "B-25",
+      "sublevel": 83
+    },
+    {
+      "file": "B-25",
+      "sublevel": 86
+    },
+    {
+      "file": "B-25",
+      "sublevel": 94
+    },
+    {
+      "file": "B-26",
+      "sublevel": 16
+    },
+    {
+      "file": "B-26",
+      "sublevel": 40
+    },
+    {
+      "file": "B-26",
+      "sublevel": 79
+    },
+    {
+      "file": "B-26",
+      "sublevel": 82
+    },
+    {
+      "file": "B-28",
+      "sublevel": 0
+    },
+    {
+      "file": "B-28",
+      "sublevel": 3
+    },
+    {
+      "file": "B-28",
+      "sublevel": 7
+    },
+    {
+      "file": "B-28",
+      "sublevel": 8
+    },
+    {
+      "file": "B-28",
+      "sublevel": 13
+    },
+    {
+      "file": "B-28",
+      "sublevel": 16
+    },
+    {
+      "file": "B-28",
+      "sublevel": 22
+    },
+    {
+      "file": "B-28",
+      "sublevel": 23
+    },
+    {
+      "file": "B-28",
+      "sublevel": 24
+    },
+    {
+      "file": "B-28",
+      "sublevel": 26
+    },
+    {
+      "file": "B-28",
+      "sublevel": 29
+    },
+    {
+      "file": "B-28",
+      "sublevel": 31
+    },
+    {
+      "file": "B-28",
+      "sublevel": 32
+    },
+    {
+      "file": "B-28",
+      "sublevel": 34
+    },
+    {
+      "file": "B-28",
+      "sublevel": 37
+    },
+    {
+      "file": "B-28",
+      "sublevel": 42
+    },
+    {
+      "file": "B-28",
+      "sublevel": 43
+    },
+    {
+      "file": "B-28",
+      "sublevel": 46
+    },
+    {
+      "file": "B-28",
+      "sublevel": 56
+    },
+    {
+      "file": "B-28",
+      "sublevel": 59
+    },
+    {
+      "file": "B-28",
+      "sublevel": 60
+    },
+    {
+      "file": "B-28",
+      "sublevel": 61
+    },
+    {
+      "file": "B-28",
+      "sublevel": 63
+    },
+    {
+      "file": "B-28",
+      "sublevel": 66
+    },
+    {
+      "file": "B-28",
+      "sublevel": 67
+    },
+    {
+      "file": "B-28",
+      "sublevel": 70
+    },
+    {
+      "file": "B-28",
+      "sublevel": 72
+    },
+    {
+      "file": "B-28",
+      "sublevel": 75
+    },
+    {
+      "file": "B-28",
+      "sublevel": 77
+    },
+    {
+      "file": "B-28",
+      "sublevel": 78
+    },
+    {
+      "file": "B-28",
+      "sublevel": 81
+    },
+    {
+      "file": "B-28",
+      "sublevel": 86
+    },
+    {
+      "file": "B-28",
+      "sublevel": 87
+    },
+    {
+      "file": "B-28",
+      "sublevel": 88
+    },
+    {
+      "file": "B-28",
+      "sublevel": 89
+    },
+    {
+      "file": "B-28",
+      "sublevel": 91
+    },
+    {
+      "file": "B-28",
+      "sublevel": 92
+    },
+    {
+      "file": "B-28",
+      "sublevel": 93
+    },
+    {
+      "file": "B-28",
+      "sublevel": 94
+    },
+    {
+      "file": "B-28",
+      "sublevel": 96
+    },
+    {
+      "file": "B-28",
+      "sublevel": 97
+    },
+    {
+      "file": "B-29",
+      "sublevel": 7
+    },
+    {
+      "file": "B-29",
+      "sublevel": 14
+    },
+    {
+      "file": "B-29",
+      "sublevel": 58
+    },
+    {
+      "file": "B-29",
+      "sublevel": 64
+    },
+    {
+      "file": "B-29",
+      "sublevel": 66
+    },
+    {
+      "file": "B-30",
+      "sublevel": 23
+    },
+    {
+      "file": "B-30",
+      "sublevel": 34
+    },
+    {
+      "file": "B-30",
+      "sublevel": 61
+    },
+    {
+      "file": "B-30",
+      "sublevel": 63
+    },
+    {
+      "file": "B-31",
+      "sublevel": 87
+    },
+    {
+      "file": "B-35",
+      "sublevel": 56
+    },
+    {
+      "file": "B-36",
+      "sublevel": 3
+    },
+    {
+      "file": "B-36",
+      "sublevel": 94
+    },
+    {
+      "file": "B-37",
+      "sublevel": 19
+    },
+    {
+      "file": "B-37",
+      "sublevel": 85
+    },
+    {
+      "file": "B-38",
+      "sublevel": 29
+    },
+    {
+      "file": "B-38",
+      "sublevel": 55
+    },
+    {
+      "file": "B-39",
+      "sublevel": 1
+    },
+    {
+      "file": "B-40",
+      "sublevel": 5
+    },
+    {
+      "file": "B-40",
+      "sublevel": 8
+    },
+    {
+      "file": "B-40",
+      "sublevel": 90
+    },
+    {
+      "file": "B-41",
+      "sublevel": 42
+    },
+    {
+      "file": "B-41",
+      "sublevel": 83
+    },
+    {
+      "file": "B-41",
+      "sublevel": 86
+    },
+    {
+      "file": "B-42",
+      "sublevel": 91
+    },
+    {
+      "file": "B-43",
+      "sublevel": 7
+    },
+    {
+      "file": "B-43",
+      "sublevel": 11
+    },
+    {
+      "file": "B-43",
+      "sublevel": 51
+    },
+    {
+      "file": "B-44",
+      "sublevel": 67
+    },
+    {
+      "file": "B-46",
+      "sublevel": 46
+    },
+    {
+      "file": "B-47",
+      "sublevel": 13
+    },
+    {
+      "file": "B-48",
+      "sublevel": 13
+    },
+    {
+      "file": "B-48",
+      "sublevel": 93
+    },
+    {
+      "file": "B-50",
+      "sublevel": 88
+    },
+    {
+      "file": "B-51",
+      "sublevel": 65
+    },
+    {
+      "file": "B-51",
+      "sublevel": 96
+    },
+    {
+      "file": "B-52",
+      "sublevel": 23
+    },
+    {
+      "file": "B-52",
+      "sublevel": 36
+    },
+    {
+      "file": "B-53",
+      "sublevel": 57
+    },
+    {
+      "file": "B-54",
+      "sublevel": 11
+    },
+    {
+      "file": "B-54",
+      "sublevel": 37
+    },
+    {
+      "file": "B-55",
+      "sublevel": 57
+    },
+    {
+      "file": "B-55",
+      "sublevel": 68
+    },
+    {
+      "file": "B-55",
+      "sublevel": 83
+    },
+    {
+      "file": "B-56",
+      "sublevel": 53
+    },
+    {
+      "file": "B-56",
+      "sublevel": 94
+    },
+    {
+      "file": "B-56",
+      "sublevel": 96
+    },
+    {
+      "file": "B-57",
+      "sublevel": 85
+    },
+    {
+      "file": "B-58",
+      "sublevel": 11
+    },
+    {
+      "file": "B-58",
+      "sublevel": 38
+    },
+    {
+      "file": "B-58",
+      "sublevel": 98
+    },
+    {
+      "file": "B-59",
+      "sublevel": 36
+    },
+    {
+      "file": "B-59",
+      "sublevel": 41
+    },
+    {
+      "file": "B-61",
+      "sublevel": 20
+    },
+    {
+      "file": "B-61",
+      "sublevel": 32
+    },
+    {
+      "file": "B-61",
+      "sublevel": 62
+    },
+    {
+      "file": "B-62",
+      "sublevel": 23
+    },
+    {
+      "file": "B-62",
+      "sublevel": 67
+    },
+    {
+      "file": "B-63",
+      "sublevel": 10
+    },
+    {
+      "file": "B-63",
+      "sublevel": 29
+    },
+    {
+      "file": "B-63",
+      "sublevel": 33
+    },
+    {
+      "file": "B-63",
+      "sublevel": 55
+    },
+    {
+      "file": "B-66",
+      "sublevel": 41
+    },
+    {
+      "file": "B-69",
+      "sublevel": 7
+    },
+    {
+      "file": "B-69",
+      "sublevel": 63
+    },
+    {
+      "file": "B-69",
+      "sublevel": 86
+    },
+    {
+      "file": "B-71",
+      "sublevel": 81
+    },
+    {
+      "file": "B-72",
+      "sublevel": 17
+    },
+    {
+      "file": "B-72",
+      "sublevel": 47
+    },
+    {
+      "file": "B-72",
+      "sublevel": 55
+    },
+    {
+      "file": "B-72",
+      "sublevel": 68
+    },
+    {
+      "file": "B-73",
+      "sublevel": 18
+    },
+    {
+      "file": "B-74",
+      "sublevel": 79
+    },
+    {
+      "file": "B-75",
+      "sublevel": 62
+    },
+    {
+      "file": "B-75",
+      "sublevel": 65
+    },
+    {
+      "file": "B-76",
+      "sublevel": 90
+    },
+    {
+      "file": "B-77",
+      "sublevel": 48
+    },
+    {
+      "file": "B-77",
+      "sublevel": 88
+    },
+    {
+      "file": "B-82",
+      "sublevel": 7
+    },
+    {
+      "file": "B-82",
+      "sublevel": 49
+    },
+    {
+      "file": "B-82",
+      "sublevel": 76
+    },
+    {
+      "file": "B-83",
+      "sublevel": 9
+    },
+    {
+      "file": "B-83",
+      "sublevel": 31
+    },
+    {
+      "file": "B-83",
+      "sublevel": 81
+    },
+    {
+      "file": "B-84",
+      "sublevel": 21
+    },
+    {
+      "file": "B-84",
+      "sublevel": 60
+    },
+    {
+      "file": "B-84",
+      "sublevel": 69
+    },
+    {
+      "file": "B-85",
+      "sublevel": 25
+    },
+    {
+      "file": "B-85",
+      "sublevel": 63
+    },
+    {
+      "file": "B-86",
+      "sublevel": 25
+    },
+    {
+      "file": "B-86",
+      "sublevel": 36
+    },
+    {
+      "file": "B-87",
+      "sublevel": 25
+    },
+    {
+      "file": "B-87",
+      "sublevel": 62
+    },
+    {
+      "file": "B-88",
+      "sublevel": 5
+    },
+    {
+      "file": "B-89",
+      "sublevel": 1
+    },
+    {
+      "file": "B-89",
+      "sublevel": 24
+    },
+    {
+      "file": "B-89",
+      "sublevel": 44
+    },
+    {
+      "file": "B-90",
+      "sublevel": 59
+    },
+    {
+      "file": "B-91",
+      "sublevel": 36
+    },
+    {
+      "file": "B-91",
+      "sublevel": 41
+    },
+    {
+      "file": "B-94",
+      "sublevel": 48
+    },
+    {
+      "file": "B-94",
+      "sublevel": 88
+    },
+    {
+      "file": "B-95",
+      "sublevel": 40
+    },
+    {
+      "file": "B-95",
+      "sublevel": 48
+    },
+    {
+      "file": "B-99",
+      "sublevel": 87
+    }
+  ],
+  "adventure": [
+    {
+      "pyramid": 0,
+      "chamber": 0,
+      "file": "B-0",
+      "sublevel": 18
+    },
+    {
+      "pyramid": 0,
+      "chamber": 1,
+      "file": "B-0",
+      "sublevel": 55
+    },
+    {
+      "pyramid": 0,
+      "chamber": 2,
+      "file": "B-1",
+      "sublevel": 27
+    },
+    {
+      "pyramid": 0,
+      "chamber": 3,
+      "file": "B-0",
+      "sublevel": 27
+    },
+    {
+      "pyramid": 0,
+      "chamber": 4,
+      "file": "B-0",
+      "sublevel": 3
+    },
+    {
+      "pyramid": 0,
+      "chamber": 5,
+      "file": "B-0",
+      "sublevel": 60
+    },
+    {
+      "pyramid": 0,
+      "chamber": 6,
+      "file": "B-19",
+      "sublevel": 7
+    },
+    {
+      "pyramid": 0,
+      "chamber": 7,
+      "file": "B-3",
+      "sublevel": 2
+    },
+    {
+      "pyramid": 0,
+      "chamber": 8,
+      "file": "B-0",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 0,
+      "chamber": 9,
+      "file": "B-9",
+      "sublevel": 14
+    },
+    {
+      "pyramid": 0,
+      "chamber": 10,
+      "file": "B-0",
+      "sublevel": 87
+    },
+    {
+      "pyramid": 0,
+      "chamber": 11,
+      "file": "B-21",
+      "sublevel": 75
+    },
+    {
+      "pyramid": 0,
+      "chamber": 12,
+      "file": "B-1",
+      "sublevel": 2
+    },
+    {
+      "pyramid": 0,
+      "chamber": 13,
+      "file": "B-4",
+      "sublevel": 50
+    },
+    {
+      "pyramid": 0,
+      "chamber": 14,
+      "file": "B-4",
+      "sublevel": 72
+    },
+    {
+      "pyramid": 1,
+      "chamber": 0,
+      "file": "B-19",
+      "sublevel": 3
+    },
+    {
+      "pyramid": 1,
+      "chamber": 1,
+      "file": "B-1",
+      "sublevel": 85
+    },
+    {
+      "pyramid": 1,
+      "chamber": 2,
+      "file": "B-14",
+      "sublevel": 33
+    },
+    {
+      "pyramid": 1,
+      "chamber": 3,
+      "file": "B-7",
+      "sublevel": 0
+    },
+    {
+      "pyramid": 1,
+      "chamber": 4,
+      "file": "B-8",
+      "sublevel": 69
+    },
+    {
+      "pyramid": 1,
+      "chamber": 5,
+      "file": "B-1",
+      "sublevel": 1
+    },
+    {
+      "pyramid": 1,
+      "chamber": 6,
+      "file": "B-6",
+      "sublevel": 7
+    },
+    {
+      "pyramid": 1,
+      "chamber": 7,
+      "file": "B-8",
+      "sublevel": 35
+    },
+    {
+      "pyramid": 1,
+      "chamber": 8,
+      "file": "B-3",
+      "sublevel": 37
+    },
+    {
+      "pyramid": 1,
+      "chamber": 9,
+      "file": "B-4",
+      "sublevel": 83
+    },
+    {
+      "pyramid": 1,
+      "chamber": 10,
+      "file": "B-10",
+      "sublevel": 61
+    },
+    {
+      "pyramid": 1,
+      "chamber": 11,
+      "file": "B-23",
+      "sublevel": 16
+    },
+    {
+      "pyramid": 1,
+      "chamber": 12,
+      "file": "B-27",
+      "sublevel": 64
+    },
+    {
+      "pyramid": 1,
+      "chamber": 13,
+      "file": "B-1",
+      "sublevel": 88
+    },
+    {
+      "pyramid": 1,
+      "chamber": 14,
+      "file": "B-18",
+      "sublevel": 16
+    },
+    {
+      "pyramid": 2,
+      "chamber": 0,
+      "file": "B-11",
+      "sublevel": 39
+    },
+    {
+      "pyramid": 2,
+      "chamber": 1,
+      "file": "B-33",
+      "sublevel": 7
+    },
+    {
+      "pyramid": 2,
+      "chamber": 2,
+      "file": "B-5",
+      "sublevel": 47
+    },
+    {
+      "pyramid": 2,
+      "chamber": 3,
+      "file": "B-14",
+      "sublevel": 27
+    },
+    {
+      "pyramid": 2,
+      "chamber": 4,
+      "file": "B-14",
+      "sublevel": 42
+    },
+    {
+      "pyramid": 2,
+      "chamber": 5,
+      "file": "B-6",
+      "sublevel": 57
+    },
+    {
+      "pyramid": 2,
+      "chamber": 6,
+      "file": "B-10",
+      "sublevel": 44
+    },
+    {
+      "pyramid": 2,
+      "chamber": 7,
+      "file": "B-2",
+      "sublevel": 40
+    },
+    {
+      "pyramid": 2,
+      "chamber": 8,
+      "file": "B-31",
+      "sublevel": 56
+    },
+    {
+      "pyramid": 2,
+      "chamber": 9,
+      "file": "B-5",
+      "sublevel": 72
+    },
+    {
+      "pyramid": 2,
+      "chamber": 10,
+      "file": "B-5",
+      "sublevel": 35
+    },
+    {
+      "pyramid": 2,
+      "chamber": 11,
+      "file": "B-8",
+      "sublevel": 7
+    },
+    {
+      "pyramid": 2,
+      "chamber": 12,
+      "file": "B-28",
+      "sublevel": 28
+    },
+    {
+      "pyramid": 2,
+      "chamber": 13,
+      "file": "B-5",
+      "sublevel": 5
+    },
+    {
+      "pyramid": 2,
+      "chamber": 14,
+      "file": "B-30",
+      "sublevel": 50
+    },
+    {
+      "pyramid": 3,
+      "chamber": 0,
+      "file": "B-30",
+      "sublevel": 55
+    },
+    {
+      "pyramid": 3,
+      "chamber": 1,
+      "file": "B-19",
+      "sublevel": 17
+    },
+    {
+      "pyramid": 3,
+      "chamber": 2,
+      "file": "B-3",
+      "sublevel": 96
+    },
+    {
+      "pyramid": 3,
+      "chamber": 3,
+      "file": "B-4",
+      "sublevel": 91
+    },
+    {
+      "pyramid": 3,
+      "chamber": 4,
+      "file": "B-11",
+      "sublevel": 39
+    },
+    {
+      "pyramid": 3,
+      "chamber": 5,
+      "file": "B-21",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 3,
+      "chamber": 6,
+      "file": "B-7",
+      "sublevel": 48
+    },
+    {
+      "pyramid": 3,
+      "chamber": 7,
+      "file": "B-14",
+      "sublevel": 82
+    },
+    {
+      "pyramid": 3,
+      "chamber": 8,
+      "file": "B-20",
+      "sublevel": 38
+    },
+    {
+      "pyramid": 3,
+      "chamber": 9,
+      "file": "B-20",
+      "sublevel": 48
+    },
+    {
+      "pyramid": 3,
+      "chamber": 10,
+      "file": "B-25",
+      "sublevel": 29
+    },
+    {
+      "pyramid": 3,
+      "chamber": 11,
+      "file": "B-7",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 3,
+      "chamber": 12,
+      "file": "B-3",
+      "sublevel": 71
+    },
+    {
+      "pyramid": 3,
+      "chamber": 13,
+      "file": "B-33",
+      "sublevel": 97
+    },
+    {
+      "pyramid": 3,
+      "chamber": 14,
+      "file": "B-65",
+      "sublevel": 77
+    },
+    {
+      "pyramid": 4,
+      "chamber": 0,
+      "file": "B-46",
+      "sublevel": 90
+    },
+    {
+      "pyramid": 4,
+      "chamber": 1,
+      "file": "B-38",
+      "sublevel": 10
+    },
+    {
+      "pyramid": 4,
+      "chamber": 2,
+      "file": "B-52",
+      "sublevel": 42
+    },
+    {
+      "pyramid": 4,
+      "chamber": 3,
+      "file": "B-43",
+      "sublevel": 66
+    },
+    {
+      "pyramid": 4,
+      "chamber": 4,
+      "file": "B-35",
+      "sublevel": 6
+    },
+    {
+      "pyramid": 4,
+      "chamber": 5,
+      "file": "B-60",
+      "sublevel": 83
+    },
+    {
+      "pyramid": 4,
+      "chamber": 6,
+      "file": "B-55",
+      "sublevel": 78
+    },
+    {
+      "pyramid": 4,
+      "chamber": 7,
+      "file": "B-46",
+      "sublevel": 1
+    },
+    {
+      "pyramid": 4,
+      "chamber": 8,
+      "file": "B-37",
+      "sublevel": 16
+    },
+    {
+      "pyramid": 4,
+      "chamber": 9,
+      "file": "B-36",
+      "sublevel": 7
+    },
+    {
+      "pyramid": 4,
+      "chamber": 10,
+      "file": "B-59",
+      "sublevel": 10
+    },
+    {
+      "pyramid": 4,
+      "chamber": 11,
+      "file": "B-40",
+      "sublevel": 68
+    },
+    {
+      "pyramid": 4,
+      "chamber": 12,
+      "file": "B-35",
+      "sublevel": 81
+    },
+    {
+      "pyramid": 4,
+      "chamber": 13,
+      "file": "B-49",
+      "sublevel": 32
+    },
+    {
+      "pyramid": 4,
+      "chamber": 14,
+      "file": "B-39",
+      "sublevel": 27
+    },
+    {
+      "pyramid": 5,
+      "chamber": 0,
+      "file": "B-47",
+      "sublevel": 29
+    },
+    {
+      "pyramid": 5,
+      "chamber": 1,
+      "file": "B-52",
+      "sublevel": 6
+    },
+    {
+      "pyramid": 5,
+      "chamber": 2,
+      "file": "B-58",
+      "sublevel": 93
+    },
+    {
+      "pyramid": 5,
+      "chamber": 3,
+      "file": "B-52",
+      "sublevel": 91
+    },
+    {
+      "pyramid": 5,
+      "chamber": 4,
+      "file": "B-63",
+      "sublevel": 30
+    },
+    {
+      "pyramid": 5,
+      "chamber": 5,
+      "file": "B-34",
+      "sublevel": 24
+    },
+    {
+      "pyramid": 5,
+      "chamber": 6,
+      "file": "B-37",
+      "sublevel": 40
+    },
+    {
+      "pyramid": 5,
+      "chamber": 7,
+      "file": "B-66",
+      "sublevel": 27
+    },
+    {
+      "pyramid": 5,
+      "chamber": 8,
+      "file": "B-60",
+      "sublevel": 11
+    },
+    {
+      "pyramid": 5,
+      "chamber": 9,
+      "file": "B-37",
+      "sublevel": 48
+    },
+    {
+      "pyramid": 5,
+      "chamber": 10,
+      "file": "B-51",
+      "sublevel": 80
+    },
+    {
+      "pyramid": 5,
+      "chamber": 11,
+      "file": "B-45",
+      "sublevel": 75
+    },
+    {
+      "pyramid": 5,
+      "chamber": 12,
+      "file": "B-53",
+      "sublevel": 49
+    },
+    {
+      "pyramid": 5,
+      "chamber": 13,
+      "file": "B-44",
+      "sublevel": 42
+    },
+    {
+      "pyramid": 5,
+      "chamber": 14,
+      "file": "B-51",
+      "sublevel": 60
+    },
+    {
+      "pyramid": 6,
+      "chamber": 0,
+      "file": "B-4",
+      "sublevel": 13
+    },
+    {
+      "pyramid": 6,
+      "chamber": 1,
+      "file": "B-18",
+      "sublevel": 56
+    },
+    {
+      "pyramid": 6,
+      "chamber": 2,
+      "file": "B-33",
+      "sublevel": 59
+    },
+    {
+      "pyramid": 6,
+      "chamber": 3,
+      "file": "B-1",
+      "sublevel": 99
+    },
+    {
+      "pyramid": 6,
+      "chamber": 4,
+      "file": "B-1",
+      "sublevel": 85
+    },
+    {
+      "pyramid": 6,
+      "chamber": 5,
+      "file": "B-2",
+      "sublevel": 40
+    },
+    {
+      "pyramid": 6,
+      "chamber": 6,
+      "file": "B-29",
+      "sublevel": 80
+    },
+    {
+      "pyramid": 6,
+      "chamber": 7,
+      "file": "B-22",
+      "sublevel": 89
+    },
+    {
+      "pyramid": 6,
+      "chamber": 8,
+      "file": "B-5",
+      "sublevel": 5
+    },
+    {
+      "pyramid": 6,
+      "chamber": 9,
+      "file": "B-1",
+      "sublevel": 2
+    },
+    {
+      "pyramid": 6,
+      "chamber": 10,
+      "file": "B-23",
+      "sublevel": 5
+    },
+    {
+      "pyramid": 6,
+      "chamber": 11,
+      "file": "B-3",
+      "sublevel": 37
+    },
+    {
+      "pyramid": 6,
+      "chamber": 12,
+      "file": "B-14",
+      "sublevel": 4
+    },
+    {
+      "pyramid": 6,
+      "chamber": 13,
+      "file": "B-33",
+      "sublevel": 54
+    },
+    {
+      "pyramid": 6,
+      "chamber": 14,
+      "file": "B-60",
+      "sublevel": 97
+    },
+    {
+      "pyramid": 7,
+      "chamber": 0,
+      "file": "B-62",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 7,
+      "chamber": 1,
+      "file": "B-36",
+      "sublevel": 89
+    },
+    {
+      "pyramid": 7,
+      "chamber": 2,
+      "file": "B-60",
+      "sublevel": 70
+    },
+    {
+      "pyramid": 7,
+      "chamber": 3,
+      "file": "B-46",
+      "sublevel": 82
+    },
+    {
+      "pyramid": 7,
+      "chamber": 4,
+      "file": "B-41",
+      "sublevel": 41
+    },
+    {
+      "pyramid": 7,
+      "chamber": 5,
+      "file": "B-40",
+      "sublevel": 14
+    },
+    {
+      "pyramid": 7,
+      "chamber": 6,
+      "file": "B-65",
+      "sublevel": 23
+    },
+    {
+      "pyramid": 7,
+      "chamber": 7,
+      "file": "B-58",
+      "sublevel": 39
+    },
+    {
+      "pyramid": 7,
+      "chamber": 8,
+      "file": "B-44",
+      "sublevel": 83
+    },
+    {
+      "pyramid": 7,
+      "chamber": 9,
+      "file": "B-59",
+      "sublevel": 13
+    },
+    {
+      "pyramid": 7,
+      "chamber": 10,
+      "file": "B-44",
+      "sublevel": 25
+    },
+    {
+      "pyramid": 7,
+      "chamber": 11,
+      "file": "B-57",
+      "sublevel": 37
+    },
+    {
+      "pyramid": 7,
+      "chamber": 12,
+      "file": "B-50",
+      "sublevel": 58
+    },
+    {
+      "pyramid": 7,
+      "chamber": 13,
+      "file": "B-41",
+      "sublevel": 16
+    },
+    {
+      "pyramid": 7,
+      "chamber": 14,
+      "file": "B-56",
+      "sublevel": 49
+    },
+    {
+      "pyramid": 8,
+      "chamber": 0,
+      "file": "B-47",
+      "sublevel": 52
+    },
+    {
+      "pyramid": 8,
+      "chamber": 1,
+      "file": "B-50",
+      "sublevel": 1
+    },
+    {
+      "pyramid": 8,
+      "chamber": 2,
+      "file": "B-35",
+      "sublevel": 67
+    },
+    {
+      "pyramid": 8,
+      "chamber": 3,
+      "file": "B-54",
+      "sublevel": 8
+    },
+    {
+      "pyramid": 8,
+      "chamber": 4,
+      "file": "B-44",
+      "sublevel": 94
+    },
+    {
+      "pyramid": 8,
+      "chamber": 5,
+      "file": "B-55",
+      "sublevel": 85
+    },
+    {
+      "pyramid": 8,
+      "chamber": 6,
+      "file": "B-38",
+      "sublevel": 65
+    },
+    {
+      "pyramid": 8,
+      "chamber": 7,
+      "file": "B-64",
+      "sublevel": 10
+    },
+    {
+      "pyramid": 8,
+      "chamber": 8,
+      "file": "B-63",
+      "sublevel": 84
+    },
+    {
+      "pyramid": 8,
+      "chamber": 9,
+      "file": "B-46",
+      "sublevel": 74
+    },
+    {
+      "pyramid": 8,
+      "chamber": 10,
+      "file": "B-40",
+      "sublevel": 52
+    },
+    {
+      "pyramid": 8,
+      "chamber": 11,
+      "file": "B-52",
+      "sublevel": 58
+    },
+    {
+      "pyramid": 8,
+      "chamber": 12,
+      "file": "B-61",
+      "sublevel": 11
+    },
+    {
+      "pyramid": 8,
+      "chamber": 13,
+      "file": "B-57",
+      "sublevel": 27
+    },
+    {
+      "pyramid": 8,
+      "chamber": 14,
+      "file": "B-43",
+      "sublevel": 14
+    },
+    {
+      "pyramid": 9,
+      "chamber": 0,
+      "file": "B-51",
+      "sublevel": 11
+    },
+    {
+      "pyramid": 9,
+      "chamber": 1,
+      "file": "B-53",
+      "sublevel": 37
+    },
+    {
+      "pyramid": 9,
+      "chamber": 2,
+      "file": "B-66",
+      "sublevel": 43
+    },
+    {
+      "pyramid": 9,
+      "chamber": 3,
+      "file": "B-96",
+      "sublevel": 33
+    },
+    {
+      "pyramid": 9,
+      "chamber": 4,
+      "file": "B-94",
+      "sublevel": 96
+    },
+    {
+      "pyramid": 9,
+      "chamber": 5,
+      "file": "B-74",
+      "sublevel": 81
+    },
+    {
+      "pyramid": 9,
+      "chamber": 6,
+      "file": "B-88",
+      "sublevel": 26
+    },
+    {
+      "pyramid": 9,
+      "chamber": 7,
+      "file": "B-95",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 9,
+      "chamber": 8,
+      "file": "B-95",
+      "sublevel": 61
+    },
+    {
+      "pyramid": 9,
+      "chamber": 9,
+      "file": "B-96",
+      "sublevel": 47
+    },
+    {
+      "pyramid": 9,
+      "chamber": 10,
+      "file": "B-85",
+      "sublevel": 18
+    },
+    {
+      "pyramid": 9,
+      "chamber": 11,
+      "file": "B-94",
+      "sublevel": 1
+    },
+    {
+      "pyramid": 9,
+      "chamber": 12,
+      "file": "B-95",
+      "sublevel": 60
+    },
+    {
+      "pyramid": 9,
+      "chamber": 13,
+      "file": "B-69",
+      "sublevel": 42
+    },
+    {
+      "pyramid": 9,
+      "chamber": 14,
+      "file": "B-98",
+      "sublevel": 93
+    },
+    {
+      "pyramid": 10,
+      "chamber": 0,
+      "file": "B-58",
+      "sublevel": 15
+    },
+    {
+      "pyramid": 10,
+      "chamber": 1,
+      "file": "B-43",
+      "sublevel": 31
+    },
+    {
+      "pyramid": 10,
+      "chamber": 2,
+      "file": "B-50",
+      "sublevel": 38
+    },
+    {
+      "pyramid": 10,
+      "chamber": 3,
+      "file": "B-63",
+      "sublevel": 67
+    },
+    {
+      "pyramid": 10,
+      "chamber": 4,
+      "file": "B-64",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 10,
+      "chamber": 5,
+      "file": "B-63",
+      "sublevel": 7
+    },
+    {
+      "pyramid": 10,
+      "chamber": 6,
+      "file": "B-40",
+      "sublevel": 33
+    },
+    {
+      "pyramid": 10,
+      "chamber": 7,
+      "file": "B-39",
+      "sublevel": 52
+    },
+    {
+      "pyramid": 10,
+      "chamber": 8,
+      "file": "B-57",
+      "sublevel": 11
+    },
+    {
+      "pyramid": 10,
+      "chamber": 9,
+      "file": "B-36",
+      "sublevel": 39
+    },
+    {
+      "pyramid": 10,
+      "chamber": 10,
+      "file": "B-54",
+      "sublevel": 3
+    },
+    {
+      "pyramid": 10,
+      "chamber": 11,
+      "file": "B-53",
+      "sublevel": 85
+    },
+    {
+      "pyramid": 10,
+      "chamber": 12,
+      "file": "B-71",
+      "sublevel": 59
+    },
+    {
+      "pyramid": 10,
+      "chamber": 13,
+      "file": "B-98",
+      "sublevel": 48
+    },
+    {
+      "pyramid": 10,
+      "chamber": 14,
+      "file": "B-93",
+      "sublevel": 82
+    },
+    {
+      "pyramid": 11,
+      "chamber": 0,
+      "file": "B-87",
+      "sublevel": 18
+    },
+    {
+      "pyramid": 11,
+      "chamber": 1,
+      "file": "B-71",
+      "sublevel": 41
+    },
+    {
+      "pyramid": 11,
+      "chamber": 2,
+      "file": "B-86",
+      "sublevel": 46
+    },
+    {
+      "pyramid": 11,
+      "chamber": 3,
+      "file": "B-68",
+      "sublevel": 61
+    },
+    {
+      "pyramid": 11,
+      "chamber": 4,
+      "file": "B-96",
+      "sublevel": 72
+    },
+    {
+      "pyramid": 11,
+      "chamber": 5,
+      "file": "B-95",
+      "sublevel": 8
+    },
+    {
+      "pyramid": 11,
+      "chamber": 6,
+      "file": "B-94",
+      "sublevel": 98
+    },
+    {
+      "pyramid": 11,
+      "chamber": 7,
+      "file": "B-71",
+      "sublevel": 72
+    },
+    {
+      "pyramid": 11,
+      "chamber": 8,
+      "file": "B-83",
+      "sublevel": 6
+    },
+    {
+      "pyramid": 11,
+      "chamber": 9,
+      "file": "B-82",
+      "sublevel": 84
+    },
+    {
+      "pyramid": 11,
+      "chamber": 10,
+      "file": "B-96",
+      "sublevel": 69
+    },
+    {
+      "pyramid": 11,
+      "chamber": 11,
+      "file": "B-94",
+      "sublevel": 81
+    },
+    {
+      "pyramid": 11,
+      "chamber": 12,
+      "file": "B-95",
+      "sublevel": 51
+    },
+    {
+      "pyramid": 11,
+      "chamber": 13,
+      "file": "B-96",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 11,
+      "chamber": 14,
+      "file": "B-98",
+      "sublevel": 68
+    },
+    {
+      "pyramid": 12,
+      "chamber": 0,
+      "file": "B-98",
+      "sublevel": 33
+    },
+    {
+      "pyramid": 12,
+      "chamber": 1,
+      "file": "B-82",
+      "sublevel": 28
+    },
+    {
+      "pyramid": 12,
+      "chamber": 2,
+      "file": "B-77",
+      "sublevel": 11
+    },
+    {
+      "pyramid": 12,
+      "chamber": 3,
+      "file": "B-95",
+      "sublevel": 69
+    },
+    {
+      "pyramid": 12,
+      "chamber": 4,
+      "file": "B-87",
+      "sublevel": 2
+    },
+    {
+      "pyramid": 12,
+      "chamber": 5,
+      "file": "B-77",
+      "sublevel": 64
+    },
+    {
+      "pyramid": 12,
+      "chamber": 6,
+      "file": "B-74",
+      "sublevel": 31
+    },
+    {
+      "pyramid": 12,
+      "chamber": 7,
+      "file": "B-95",
+      "sublevel": 38
+    },
+    {
+      "pyramid": 12,
+      "chamber": 8,
+      "file": "B-96",
+      "sublevel": 97
+    },
+    {
+      "pyramid": 12,
+      "chamber": 9,
+      "file": "B-89",
+      "sublevel": 78
+    },
+    {
+      "pyramid": 12,
+      "chamber": 10,
+      "file": "B-87",
+      "sublevel": 84
+    },
+    {
+      "pyramid": 12,
+      "chamber": 11,
+      "file": "B-69",
+      "sublevel": 74
+    },
+    {
+      "pyramid": 12,
+      "chamber": 12,
+      "file": "B-96",
+      "sublevel": 8
+    },
+    {
+      "pyramid": 12,
+      "chamber": 13,
+      "file": "B-86",
+      "sublevel": 10
+    },
+    {
+      "pyramid": 12,
+      "chamber": 14,
+      "file": "B-99",
+      "sublevel": 86
+    },
+    {
+      "pyramid": 13,
+      "chamber": 0,
+      "file": "B-89",
+      "sublevel": 65
+    },
+    {
+      "pyramid": 13,
+      "chamber": 1,
+      "file": "B-96",
+      "sublevel": 62
+    },
+    {
+      "pyramid": 13,
+      "chamber": 2,
+      "file": "B-69",
+      "sublevel": 44
+    },
+    {
+      "pyramid": 13,
+      "chamber": 3,
+      "file": "B-87",
+      "sublevel": 2
+    },
+    {
+      "pyramid": 13,
+      "chamber": 4,
+      "file": "B-94",
+      "sublevel": 19
+    },
+    {
+      "pyramid": 13,
+      "chamber": 5,
+      "file": "B-82",
+      "sublevel": 36
+    },
+    {
+      "pyramid": 13,
+      "chamber": 6,
+      "file": "B-98",
+      "sublevel": 31
+    },
+    {
+      "pyramid": 13,
+      "chamber": 7,
+      "file": "B-96",
+      "sublevel": 15
+    },
+    {
+      "pyramid": 13,
+      "chamber": 8,
+      "file": "B-83",
+      "sublevel": 16
+    },
+    {
+      "pyramid": 13,
+      "chamber": 9,
+      "file": "B-95",
+      "sublevel": 98
+    },
+    {
+      "pyramid": 13,
+      "chamber": 10,
+      "file": "B-96",
+      "sublevel": 36
+    },
+    {
+      "pyramid": 13,
+      "chamber": 11,
+      "file": "B-86",
+      "sublevel": 22
+    },
+    {
+      "pyramid": 13,
+      "chamber": 12,
+      "file": "B-99",
+      "sublevel": 44
+    },
+    {
+      "pyramid": 13,
+      "chamber": 13,
+      "file": "B-91",
+      "sublevel": 33
+    },
+    {
+      "pyramid": 13,
+      "chamber": 14,
+      "file": "B-88",
+      "sublevel": 59
+    },
+    {
+      "pyramid": 14,
+      "chamber": 0,
+      "file": "B-77",
+      "sublevel": 95
+    },
+    {
+      "pyramid": 14,
+      "chamber": 1,
+      "file": "B-98",
+      "sublevel": 40
+    },
+    {
+      "pyramid": 14,
+      "chamber": 2,
+      "file": "B-88",
+      "sublevel": 68
+    },
+    {
+      "pyramid": 14,
+      "chamber": 3,
+      "file": "B-74",
+      "sublevel": 93
+    },
+    {
+      "pyramid": 14,
+      "chamber": 4,
+      "file": "B-73",
+      "sublevel": 74
+    },
+    {
+      "pyramid": 14,
+      "chamber": 5,
+      "file": "B-82",
+      "sublevel": 38
+    },
+    {
+      "pyramid": 14,
+      "chamber": 6,
+      "file": "B-94",
+      "sublevel": 51
+    },
+    {
+      "pyramid": 14,
+      "chamber": 7,
+      "file": "B-74",
+      "sublevel": 22
+    },
+    {
+      "pyramid": 14,
+      "chamber": 8,
+      "file": "B-85",
+      "sublevel": 77
+    },
+    {
+      "pyramid": 14,
+      "chamber": 9,
+      "file": "B-82",
+      "sublevel": 84
+    },
+    {
+      "pyramid": 14,
+      "chamber": 10,
+      "file": "B-96",
+      "sublevel": 5
+    },
+    {
+      "pyramid": 14,
+      "chamber": 11,
+      "file": "B-86",
+      "sublevel": 22
+    },
+    {
+      "pyramid": 14,
+      "chamber": 12,
+      "file": "B-99",
+      "sublevel": 18
+    },
+    {
+      "pyramid": 14,
+      "chamber": 13,
+      "file": "B-86",
+      "sublevel": 65
+    },
+    {
+      "pyramid": 14,
+      "chamber": 14,
+      "file": "B-98",
+      "sublevel": 89
+    }
+  ]
+}
