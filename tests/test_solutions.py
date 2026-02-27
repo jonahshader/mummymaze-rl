@@ -27,7 +27,7 @@ from src.game import (
   step as py_step,
 )
 
-DAT_DIR = Path("/home/jonah/repos/mummy-maze-parser/Mummy Maze Deluxe/data/mazes")
+DAT_DIR = Path(__file__).resolve().parent.parent / "mazes"
 SOLUTIONS_FILE = Path(__file__).parent.parent / "solutions.txt"
 
 MOVE_MAP = {

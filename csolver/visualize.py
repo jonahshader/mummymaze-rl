@@ -22,7 +22,7 @@ from pathlib import Path
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CSIM = PROJECT_ROOT / "csolver" / "build" / "csim"
-DAT_DIR = Path("/home/jonah/repos/mummy-maze-parser/Mummy Maze Deluxe/data/mazes")
+DAT_DIR = Path(__file__).resolve().parent.parent / "mazes"
 
 # Ensure the Python engine is importable
 sys.path.insert(0, str(PROJECT_ROOT))

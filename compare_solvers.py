@@ -24,7 +24,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 CSIM = PROJECT_ROOT / "csolver" / "build" / "csim"
 CSOLVER = PROJECT_ROOT / "csolver" / "build" / "csolver"
-DAT_DIR = Path("/home/jonah/repos/mummy-maze-parser/Mummy Maze Deluxe/data/mazes")
+DAT_DIR = Path(__file__).resolve().parent / "mazes"
 
 sys.path.insert(0, str(PROJECT_ROOT))
 from mummy_maze.parser import parse_file
