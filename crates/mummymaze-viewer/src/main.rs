@@ -8,14 +8,9 @@ use eframe::egui;
 use gameplay::GameplayState;
 use mummymaze::game::Action;
 
-enum Mode {
-    Preview,
-    Playing(GameplayState),
-}
-
 struct App {
     store: DataStore,
-    mode: Mode,
+    gameplay: Option<GameplayState>,
 }
 
 impl App {
@@ -24,8 +19,14 @@ impl App {
         store.start_analysis();
         App {
             store,
-            mode: Mode::Preview,
+            gameplay: None,
         }
+    }
+
+    fn select_level(&mut self, idx: usize) {
+        self.store.selected = Some(idx);
+        let row = &self.store.rows[idx];
+        self.gameplay = Some(GameplayState::new(row.level.clone()));
     }
 }
 
@@ -35,15 +36,13 @@ impl eframe::App for App {
         if self.store.poll_analysis() {
             ctx.request_repaint();
         }
-
-        // If analysis is still running, request repaint to keep polling
         if self.store.is_analyzing() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         // Consume keyboard input for gameplay BEFORE panels process it
         let mut gameplay_action = None;
-        if let Mode::Playing(ref gs) = self.mode {
+        if let Some(ref gs) = self.gameplay {
             if !gs.is_over() {
                 ctx.input(|i: &egui::InputState| {
                     if i.key_pressed(egui::Key::ArrowUp) {
@@ -60,10 +59,8 @@ impl eframe::App for App {
                 });
             }
         }
-
-        // Apply action
         if let Some(action) = gameplay_action {
-            if let Mode::Playing(ref mut gs) = self.mode {
+            if let Some(ref mut gs) = self.gameplay {
                 gs.apply_action(action);
             }
         }
@@ -95,37 +92,16 @@ impl eframe::App for App {
                 ui.separator();
 
                 if let Some(clicked) = table::draw_table(ui, &mut self.store) {
-                    self.store.selected = Some(clicked);
-                    self.mode = Mode::Preview;
+                    self.select_level(clicked);
                 }
             });
 
-        // Central panel: preview or gameplay
+        // Central panel
         egui::CentralPanel::default().show(ctx, |ui: &mut egui::Ui| {
-            // Buttons and info at the TOP, before the maze
-            ui.horizontal(|ui: &mut egui::Ui| {
-                match &self.mode {
-                    Mode::Preview => {
-                        if let Some(sel) = self.store.selected {
-                            if ui.button("Play").clicked() {
-                                let row = &self.store.rows[sel];
-                                self.mode =
-                                    Mode::Playing(GameplayState::new(row.level.clone()));
-                            }
-                        }
-                    }
-                    Mode::Playing(_) => {
-                        if ui.button("Back").clicked() {
-                            self.mode = Mode::Preview;
-                        }
-                    }
-                }
-            });
-
-            // Level info
+            // Level info + controls
             if let Some(sel) = self.store.selected {
                 let row = &self.store.rows[sel];
-                ui.horizontal_wrapped(|ui: &mut egui::Ui| {
+                ui.horizontal(|ui: &mut egui::Ui| {
                     ui.label(format!(
                         "{} sub {} | grid {} | BFS: {}",
                         row.file_stem,
@@ -141,64 +117,48 @@ impl eframe::App for App {
                         ui.label(format!("| E[steps] {:.1}", a.expected_steps));
                     }
                 });
-            }
 
-            ui.separator();
+                if let Some(ref mut gs) = self.gameplay {
+                    ui.horizontal(|ui: &mut egui::Ui| {
+                        let status = gs.status_text();
+                        let color = match gs.result {
+                            Some(mummymaze::game::StepResult::Win) => egui::Color32::GREEN,
+                            Some(mummymaze::game::StepResult::Dead) => egui::Color32::RED,
+                            _ => ui.visuals().text_color(),
+                        };
+                        ui.colored_label(color, egui::RichText::new(&status).size(16.0));
+                        ui.separator();
+                        if ui.button("Undo").clicked() {
+                            gs.undo();
+                        }
+                        if ui.button("Reset").clicked() {
+                            gs.reset();
+                        }
+                    });
+                }
 
-            // Maze rendering takes remaining space
-            match &mut self.mode {
-                Mode::Preview => {
-                    draw_preview_panel(ui, &self.store);
+                ui.separator();
+
+                // Maze
+                if let Some(ref gs) = self.gameplay {
+                    let available = ui.available_size();
+                    let size = render::maze_preferred_size(available);
+                    let (response, painter) =
+                        ui.allocate_painter(size, egui::Sense::hover());
+                    render::draw_maze_state(
+                        &painter,
+                        response.rect,
+                        &gs.level,
+                        &gs.current_state,
+                    );
                 }
-                Mode::Playing(gs) => {
-                    draw_gameplay_panel(ui, gs);
-                }
+            } else {
+                ui.centered_and_justified(|ui: &mut egui::Ui| {
+                    ui.heading("Select a level from the table");
+                });
             }
         });
     }
-}
-
-fn draw_preview_panel(ui: &mut egui::Ui, store: &DataStore) {
-    if let Some(sel) = store.selected {
-        let row = &store.rows[sel];
-        let available = ui.available_size();
-        let size = render::maze_preferred_size(available);
-        let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
-        render::draw_maze_state(&painter, response.rect, &row.level, &row.initial_state);
-    } else {
-        ui.centered_and_justified(|ui: &mut egui::Ui| {
-            ui.heading("Select a level from the table");
-        });
-    }
-}
-
-fn draw_gameplay_panel(ui: &mut egui::Ui, gs: &mut GameplayState) {
-    // Status + controls
-    ui.horizontal(|ui: &mut egui::Ui| {
-        let status = gs.status_text();
-        let color = match gs.result {
-            Some(mummymaze::game::StepResult::Win) => egui::Color32::GREEN,
-            Some(mummymaze::game::StepResult::Dead) => egui::Color32::RED,
-            _ => egui::Color32::WHITE,
-        };
-        ui.colored_label(color, egui::RichText::new(&status).size(18.0));
-
-        ui.separator();
-        if ui.button("Undo").clicked() {
-            gs.undo();
-        }
-        if ui.button("Reset").clicked() {
-            gs.reset();
-        }
-    });
-
-    ui.separator();
-
-    // Maze
-    let available = ui.available_size();
-    let size = render::maze_preferred_size(available);
-    let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
-    render::draw_maze_state(&painter, response.rect, &gs.level, &gs.current_state);
 }
 
 fn main() {

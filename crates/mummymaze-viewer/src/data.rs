@@ -1,8 +1,8 @@
 use mummymaze::batch::{self, LevelAnalysis};
-use mummymaze::game::State;
 use mummymaze::parse::Level;
 use mummymaze::solver;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 
@@ -10,9 +10,41 @@ pub struct LevelRow {
     pub file_stem: String,
     pub sublevel: usize,
     pub level: Level,
-    pub initial_state: State,
     pub bfs_moves: Option<u32>,
     pub analysis: Option<LevelAnalysis>,
+    pub is_duplicate: bool,
+}
+
+/// Hash a Level by its gameplay-relevant fields for dedup.
+fn level_fingerprint(lev: &Level) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    lev.grid_size.hash(&mut h);
+    lev.walls.hash(&mut h);
+    lev.player_row.hash(&mut h);
+    lev.player_col.hash(&mut h);
+    lev.mummy1_row.hash(&mut h);
+    lev.mummy1_col.hash(&mut h);
+    lev.mummy2_row.hash(&mut h);
+    lev.mummy2_col.hash(&mut h);
+    lev.has_mummy2.hash(&mut h);
+    lev.scorpion_row.hash(&mut h);
+    lev.scorpion_col.hash(&mut h);
+    lev.has_scorpion.hash(&mut h);
+    lev.trap1_row.hash(&mut h);
+    lev.trap1_col.hash(&mut h);
+    lev.trap2_row.hash(&mut h);
+    lev.trap2_col.hash(&mut h);
+    lev.trap_count.hash(&mut h);
+    lev.gate_row.hash(&mut h);
+    lev.gate_col.hash(&mut h);
+    lev.has_gate.hash(&mut h);
+    lev.key_row.hash(&mut h);
+    lev.key_col.hash(&mut h);
+    lev.exit_row.hash(&mut h);
+    lev.exit_col.hash(&mut h);
+    lev.exit_mask.hash(&mut h);
+    lev.flip.hash(&mut h);
+    h.finish()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,11 +83,22 @@ impl SortDir {
     }
 }
 
-#[derive(Default)]
 pub struct FilterState {
     pub text: String,
     pub grid_size: Option<i32>,
     pub solvable_only: bool,
+    pub show_duplicates: bool,
+}
+
+impl Default for FilterState {
+    fn default() -> Self {
+        FilterState {
+            text: String::new(),
+            grid_size: None,
+            solvable_only: true,
+            show_duplicates: false,
+        }
+    }
 }
 
 pub struct DataStore {
@@ -77,18 +120,20 @@ impl DataStore {
         let all_levels = batch::collect_levels(maze_dir).unwrap_or_default();
         let total = all_levels.len();
 
+        let mut seen = HashSet::new();
         let rows: Vec<LevelRow> = all_levels
             .into_iter()
             .map(|(stem, sub, lev)| {
                 let bfs = solver::solve(&lev).moves;
-                let initial_state = State::from_level(&lev);
+                let fp = level_fingerprint(&lev);
+                let is_duplicate = !seen.insert(fp);
                 LevelRow {
                     file_stem: stem,
                     sublevel: sub,
                     level: lev,
-                    initial_state,
                     bfs_moves: bfs,
                     analysis: None,
+                    is_duplicate,
                 }
             })
             .collect();
@@ -208,6 +253,9 @@ impl DataStore {
                     }
                 }
                 if filter.solvable_only && row.bfs_moves.is_none() {
+                    return false;
+                }
+                if !filter.show_duplicates && row.is_duplicate {
                     return false;
                 }
                 true

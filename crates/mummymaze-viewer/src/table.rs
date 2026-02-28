@@ -53,6 +53,12 @@ pub fn draw_filters(ui: &mut Ui, store: &mut DataStore) {
         {
             changed = true;
         }
+        if ui
+            .checkbox(&mut store.filter.show_duplicates, "Duplicates")
+            .changed()
+        {
+            changed = true;
+        }
     });
 
     if changed {
