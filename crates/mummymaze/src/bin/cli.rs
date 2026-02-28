@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         } else {
             let r = batch::analyze_one(&path, cli.sublevel)?;
             println!(
-                "{} sub {} (grid {}): {} states, win_prob={:.6}, expected_steps={:.2}, bfs={}",
+                "{} sub {} (grid {}): {} states, win_prob={:.6}, expected_steps={:.2}, bfs={}, dead_end={:.4}, branching={:.2}, optimal_paths={}, greedy_dev={}, safety={}",
                 r.file_stem,
                 r.sublevel,
                 r.grid_size,
@@ -56,6 +56,15 @@ fn main() -> Result<()> {
                 r.bfs_moves
                     .map(|m| m.to_string())
                     .unwrap_or_else(|| "unsolvable".into()),
+                r.difficulty.dead_end_ratio,
+                r.difficulty.avg_branching_factor,
+                r.difficulty.n_optimal_solutions,
+                r.difficulty.greedy_deviation_count
+                    .map(|m| m.to_string())
+                    .unwrap_or_default(),
+                r.difficulty.path_safety
+                    .map(|s| format!("{:.4}", s))
+                    .unwrap_or_default(),
             );
         }
         return Ok(());
@@ -106,7 +115,7 @@ fn main() -> Result<()> {
     // Write CSV
     if let Some(out_path) = &cli.output {
         let mut wtr = csv::Writer::from_path(out_path)?;
-        wtr.write_record(["file", "sublevel", "grid_size", "n_states", "win_prob", "expected_steps", "bfs_moves"])?;
+        wtr.write_record(["file", "sublevel", "grid_size", "n_states", "win_prob", "expected_steps", "bfs_moves", "dead_end_ratio", "avg_branching_factor", "n_optimal_solutions", "greedy_deviation_count", "path_safety"])?;
         for r in &results {
             wtr.write_record(&[
                 r.file_stem.clone(),
@@ -118,16 +127,25 @@ fn main() -> Result<()> {
                 r.bfs_moves
                     .map(|m| m.to_string())
                     .unwrap_or_default(),
+                format!("{:.6}", r.difficulty.dead_end_ratio),
+                format!("{:.2}", r.difficulty.avg_branching_factor),
+                r.difficulty.n_optimal_solutions.to_string(),
+                r.difficulty.greedy_deviation_count
+                    .map(|m| m.to_string())
+                    .unwrap_or_default(),
+                r.difficulty.path_safety
+                    .map(|s| format!("{:.6}", s))
+                    .unwrap_or_default(),
             ])?;
         }
         wtr.flush()?;
         eprintln!("Results written to {}", out_path.display());
     } else {
         // Print to stdout
-        println!("file,sublevel,grid_size,n_states,win_prob,expected_steps,bfs_moves");
+        println!("file,sublevel,grid_size,n_states,win_prob,expected_steps,bfs_moves,dead_end_ratio,avg_branching_factor,n_optimal_solutions,greedy_deviation_count,path_safety");
         for r in &results {
             println!(
-                "{},{},{},{},{:.6},{:.2},{}",
+                "{},{},{},{},{:.6},{:.2},{},{:.6},{:.2},{},{},{}",
                 r.file_stem,
                 r.sublevel,
                 r.grid_size,
@@ -136,6 +154,15 @@ fn main() -> Result<()> {
                 r.expected_steps,
                 r.bfs_moves
                     .map(|m| m.to_string())
+                    .unwrap_or_default(),
+                r.difficulty.dead_end_ratio,
+                r.difficulty.avg_branching_factor,
+                r.difficulty.n_optimal_solutions,
+                r.difficulty.greedy_deviation_count
+                    .map(|m| m.to_string())
+                    .unwrap_or_default(),
+                r.difficulty.path_safety
+                    .map(|s| format!("{:.6}", s))
                     .unwrap_or_default(),
             );
         }

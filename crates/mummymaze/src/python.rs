@@ -4,7 +4,25 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::Path;
 
-use crate::batch;
+use crate::batch::{self, LevelAnalysis};
+
+/// Convert a LevelAnalysis to a Python dict.
+fn level_analysis_to_dict(py: Python<'_>, r: &LevelAnalysis) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("file", &r.file_stem)?;
+    dict.set_item("sublevel", r.sublevel)?;
+    dict.set_item("grid_size", r.grid_size)?;
+    dict.set_item("n_states", r.n_states)?;
+    dict.set_item("win_prob", r.win_prob)?;
+    dict.set_item("expected_steps", r.expected_steps)?;
+    dict.set_item("bfs_moves", r.bfs_moves)?;
+    dict.set_item("dead_end_ratio", r.difficulty.dead_end_ratio)?;
+    dict.set_item("avg_branching_factor", r.difficulty.avg_branching_factor)?;
+    dict.set_item("n_optimal_solutions", r.difficulty.n_optimal_solutions)?;
+    dict.set_item("greedy_deviation_count", r.difficulty.greedy_deviation_count)?;
+    dict.set_item("path_safety", r.difficulty.path_safety)?;
+    Ok(dict.into())
+}
 
 /// Analyze a single level, returning a dict with all results.
 #[pyfunction]
@@ -13,16 +31,7 @@ fn analyze_level(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<Py
     let path = Path::new(dat_path);
     let result = batch::analyze_one(path, sublevel)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-    let dict = PyDict::new(py);
-    dict.set_item("file", &result.file_stem)?;
-    dict.set_item("sublevel", result.sublevel)?;
-    dict.set_item("grid_size", result.grid_size)?;
-    dict.set_item("n_states", result.n_states)?;
-    dict.set_item("win_prob", result.win_prob)?;
-    dict.set_item("expected_steps", result.expected_steps)?;
-    dict.set_item("bfs_moves", result.bfs_moves)?;
-    Ok(dict.into())
+    level_analysis_to_dict(py, &result)
 }
 
 /// Analyze all levels in a directory. Releases the GIL, uses rayon internally.
@@ -37,15 +46,7 @@ fn analyze_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyOb
 
     let mut out = Vec::with_capacity(results.len());
     for r in &results {
-        let dict = PyDict::new(py);
-        dict.set_item("file", &r.file_stem)?;
-        dict.set_item("sublevel", r.sublevel)?;
-        dict.set_item("grid_size", r.grid_size)?;
-        dict.set_item("n_states", r.n_states)?;
-        dict.set_item("win_prob", r.win_prob)?;
-        dict.set_item("expected_steps", r.expected_steps)?;
-        dict.set_item("bfs_moves", r.bfs_moves)?;
-        out.push(dict.into());
+        out.push(level_analysis_to_dict(py, r)?);
     }
     Ok(out)
 }

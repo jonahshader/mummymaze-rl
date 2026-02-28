@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::graph::build_graph;
 use crate::markov::analyze;
+use crate::metrics;
 use crate::parse::{self, Level};
 use crate::solver;
 use rayon::prelude::*;
@@ -17,13 +18,15 @@ pub struct LevelAnalysis {
     pub win_prob: f64,
     pub expected_steps: f64,
     pub bfs_moves: Option<u32>,
+    pub difficulty: metrics::DifficultyMetrics,
 }
 
-/// Analyze a single level: BFS solve + full state graph + Markov chain.
+/// Analyze a single level: BFS solve + full state graph + Markov chain + difficulty metrics.
 fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelAnalysis> {
     let bfs = solver::solve(lev);
     let graph = build_graph(lev);
     let markov = analyze(&graph)?;
+    let diff = metrics::compute(&graph, lev, &bfs);
 
     Ok(LevelAnalysis {
         file_stem: file_stem.to_string(),
@@ -33,6 +36,7 @@ fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelA
         win_prob: markov.win_prob,
         expected_steps: markov.expected_steps,
         bfs_moves: bfs.moves,
+        difficulty: diff,
     })
 }
 
