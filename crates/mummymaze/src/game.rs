@@ -32,6 +32,17 @@ impl Action {
             Action::Wait => (0, 0),
         }
     }
+
+    /// Integer index matching JAX env convention: N=0, S=1, E=2, W=3, Wait=4
+    pub fn to_index(self) -> u8 {
+        match self {
+            Action::North => 0,
+            Action::South => 1,
+            Action::East => 2,
+            Action::West => 3,
+            Action::Wait => 4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -159,6 +159,38 @@ pub fn analyze_one(path: &Path, sublevel: usize) -> Result<LevelAnalysis> {
     analyze_level(&stem, sublevel, &levels[sublevel])
 }
 
+/// Solve all levels and return action sequences. Parallel via rayon.
+/// Returns sorted Vec of (file_stem, sublevel, Option<Vec<Action>>).
+pub fn solve_all_with_actions(
+    maze_dir: &Path,
+    jobs: usize,
+) -> Result<Vec<(String, usize, Option<Vec<crate::game::Action>>)>> {
+    let all_levels = collect_levels(maze_dir)?;
+
+    if jobs > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global()
+            .ok();
+    }
+
+    let mut results: Vec<(String, usize, Option<Vec<crate::game::Action>>)> = all_levels
+        .par_iter()
+        .map(|(stem, sub_idx, lev)| {
+            let bfs = solver::solve(lev);
+            (stem.clone(), *sub_idx, bfs.actions)
+        })
+        .collect();
+
+    results.sort_by(|a, b| {
+        let a_num: i32 = a.0.strip_prefix("B-").unwrap_or("0").parse().unwrap_or(0);
+        let b_num: i32 = b.0.strip_prefix("B-").unwrap_or("0").parse().unwrap_or(0);
+        a_num.cmp(&b_num).then(a.1.cmp(&b.1))
+    });
+
+    Ok(results)
+}
+
 /// BFS-only solve for a single level.
 pub fn solve_one(path: &Path, sublevel: usize) -> Result<Option<u32>> {
     let (_, levels) = parse::parse_file(path)?;

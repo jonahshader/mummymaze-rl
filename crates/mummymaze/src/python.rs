@@ -50,13 +50,50 @@ fn analyze_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyOb
     Ok(out)
 }
 
-/// BFS-only solve for a single level.
+/// BFS-only solve for a single level. Returns move count.
 #[pyfunction]
 #[pyo3(signature = (dat_path, sublevel))]
 fn solve_level(_py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<Option<u32>> {
     let path = Path::new(dat_path);
     batch::solve_one(path, sublevel)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+}
+
+/// BFS solve returning the full action sequence as a list of ints.
+/// Action indices match JAX env: N=0, S=1, E=2, W=3, Wait=4.
+/// Returns None if unsolvable.
+#[pyfunction]
+#[pyo3(signature = (dat_path, sublevel))]
+fn solve_level_actions(_py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<Option<Vec<u32>>> {
+    let path = Path::new(dat_path);
+    let (_, levels) = crate::parse::parse_file(path)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    if sublevel >= levels.len() {
+        return Err(pyo3::exceptions::PyIndexError::new_err("sublevel out of range"));
+    }
+    let result = crate::solver::solve(&levels[sublevel]);
+    Ok(result.actions.map(|acts| acts.iter().map(|a| a.to_index() as u32).collect()))
+}
+
+/// Solve all levels, returning action sequences. Releases the GIL, uses rayon internally.
+/// Returns list of dicts: {"file": str, "sublevel": int, "actions": list[int] | None}
+#[pyfunction]
+#[pyo3(signature = (maze_dir, jobs=0))]
+fn solve_all_actions(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyObject>> {
+    let path = Path::new(maze_dir);
+    let results = py
+        .allow_threads(|| batch::solve_all_with_actions(path, jobs))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    let mut out = Vec::with_capacity(results.len());
+    for (stem, sub_idx, actions) in &results {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("file", stem)?;
+        dict.set_item("sublevel", sub_idx)?;
+        dict.set_item("actions", actions.as_ref().map(|a| a.iter().map(|x| x.to_index() as u32).collect::<Vec<u32>>()))?;
+        out.push(dict.into());
+    }
+    Ok(out)
 }
 
 /// Build and return the full state graph as a Python dict.
@@ -131,6 +168,8 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(analyze_level, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_all, m)?)?;
     m.add_function(wrap_pyfunction!(solve_level, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_level_actions, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
     Ok(())
 }
