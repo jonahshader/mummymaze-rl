@@ -82,17 +82,27 @@ pub fn draw_progress(ui: &mut Ui, store: &DataStore) {
     }
 }
 
-fn sort_header(ui: &mut Ui, label: &str, col: SortColumn, store: &mut DataStore) {
+fn sort_header(
+    ui: &mut Ui,
+    label: &str,
+    col: SortColumn,
+    store: &mut DataStore,
+    tooltip: Option<&str>,
+) {
     let arrow = if store.sort_col == col {
         match store.sort_dir {
-            SortDir::Asc => " \u{25B2}",
-            SortDir::Desc => " \u{25BC}",
+            SortDir::Asc => " ^",
+            SortDir::Desc => " v",
         }
     } else {
         ""
     };
     let text = format!("{label}{arrow}");
-    if ui.button(text).clicked() {
+    let response = ui.button(text);
+    if let Some(tip) = tooltip {
+        response.clone().on_hover_text(tip);
+    }
+    if response.clicked() {
         store.toggle_sort(col);
     }
 }
@@ -115,35 +125,35 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
         .column(Column::auto().at_least(50.0)) // File
         .column(Column::auto().at_least(35.0)) // Sub
         .column(Column::auto().at_least(35.0)) // Grid
-        .column(Column::auto().at_least(35.0)) // BFS
+        .column(Column::auto().at_least(35.0)) // Moves
         .column(Column::auto().at_least(50.0)) // States
         .column(Column::auto().at_least(50.0)) // Win%
         .column(Column::auto().at_least(50.0)) // Dead%
         .column(Column::auto().at_least(50.0)) // Safety
         .header(row_height, |mut header: egui_extras::TableRow<'_, '_>| {
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "File", SortColumn::File, store);
+                sort_header(ui, "File", SortColumn::File, store, Some("Pyramid .dat file (B-0 through B-100)"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "Sub", SortColumn::Sub, store);
+                sort_header(ui, "Sub", SortColumn::Sub, store, Some("Sublevel index within the pyramid (0-99)"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "Grid", SortColumn::Grid, store);
+                sort_header(ui, "Grid", SortColumn::Grid, store, Some("Grid size (6, 8, or 10)"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "BFS", SortColumn::Bfs, store);
+                sort_header(ui, "Moves", SortColumn::Bfs, store, Some("Minimum moves to win (BFS optimal solution)"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "States", SortColumn::States, store);
+                sort_header(ui, "States", SortColumn::States, store, Some("Total reachable game states"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "Win%", SortColumn::WinProb, store);
+                sort_header(ui, "Win%", SortColumn::WinProb, store, Some("Probability of winning under uniformly random play"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "Dead%", SortColumn::DeadEnd, store);
+                sort_header(ui, "Dead%", SortColumn::DeadEnd, store, Some("Fraction of reachable states from which winning is impossible"));
             });
             header.col(|ui: &mut Ui| {
-                sort_header(ui, "Safety", SortColumn::Safety, store);
+                sort_header(ui, "Safety", SortColumn::Safety, store, Some("Average fraction of actions leading to winnable states along the optimal path"));
             });
         })
         .body(|body: egui_extras::TableBody<'_>| {
