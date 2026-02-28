@@ -1,0 +1,14 @@
+[package]
+name = "mummymaze-viewer"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "mummymaze-viewer"
+path = "src/main.rs"
+
+[dependencies]
+mummymaze = { path = "../mummymaze", default-features = false }
+eframe = "0.31"
+rayon = "1.10"
+egui_extras = { version = "0.31", features = ["default"] }

@@ -22,7 +22,7 @@ pub struct LevelAnalysis {
 }
 
 /// Analyze a single level: BFS solve + full state graph + Markov chain + difficulty metrics.
-fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelAnalysis> {
+pub fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelAnalysis> {
     let bfs = solver::solve(lev);
     let graph = build_graph(lev);
     let markov = analyze(&graph)?;
@@ -41,7 +41,7 @@ fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelA
 }
 
 /// Gather all (file_stem, sublevel_index, Level) triples from a maze directory.
-fn collect_levels(maze_dir: &Path) -> Result<Vec<(String, usize, Level)>> {
+pub fn collect_levels(maze_dir: &Path) -> Result<Vec<(String, usize, Level)>> {
     let mut dat_files: Vec<PathBuf> = std::fs::read_dir(maze_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
