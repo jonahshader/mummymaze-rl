@@ -451,6 +451,7 @@ dependencies = [
     { name = "joblib" },
     { name = "matplotlib" },
     { name = "mummy-maze-parser" },
+    { name = "mummymaze-rust" },
     { name = "optax" },
 ]
 
@@ -472,6 +473,7 @@ requires-dist = [
     { name = "joblib", specifier = ">=1.5.3" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mummy-maze-parser", git = "https://github.com/jonahshader/mummy-maze-parser" },
+    { name = "mummymaze-rust", editable = "crates/mummymaze" },
     { name = "optax", specifier = ">=0.2.6" },
 ]
 
@@ -482,6 +484,11 @@ dev = [
     { name = "ty", specifier = ">=0.0.12" },
     { name = "vulture", specifier = ">=2.14" },
 ]
+
+[[package]]
+name = "mummymaze-rust"
+version = "0.1.0"
+source = { editable = "crates/mummymaze" }
 
 [[package]]
 name = "numpy"

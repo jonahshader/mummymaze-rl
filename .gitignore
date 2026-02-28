@@ -15,5 +15,8 @@ wheels/
 # C solver build artifacts
 csolver/build/
 
+# Rust build artifacts
+crates/*/target/
+
 # Game data (private repo only)
 # mazes/

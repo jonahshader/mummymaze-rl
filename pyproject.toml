@@ -13,6 +13,7 @@ dependencies = [
     "joblib>=1.5.3",
     "matplotlib>=3.10.8",
     "mummy-maze-parser",
+    "mummymaze-rust",
     "optax>=0.2.6",
 ]
 
@@ -71,3 +72,4 @@ min_confidence = 60
 
 [tool.uv.sources]
 mummy-maze-parser = { git = "https://github.com/jonahshader/mummy-maze-parser" }
+mummymaze-rust = { path = "crates/mummymaze", editable = true }
