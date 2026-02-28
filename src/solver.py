@@ -6,6 +6,7 @@ import csv
 import os
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from mummy_maze.parser import parse_file
@@ -17,6 +18,7 @@ from src.game import (
   ACTION_WAIT,
   ACTION_WEST,
   GameState,
+  _can_move,
   load_level,
   step,
 )
@@ -74,6 +76,71 @@ def solve(state: GameState) -> tuple[list[int], int] | None:
       queue.append((next_state, actions + [action]))
 
   return None
+
+
+# -- State graph (full reachable state space) --
+
+_WIN: tuple[str] = ("WIN",)
+_DEAD: tuple[str] = ("DEAD",)
+
+
+@dataclass(frozen=True)
+class StateGraph:
+  """Complete state-action transition graph from BFS exploration."""
+
+  start: tuple[object, ...]
+  # transitions[state_key][action] -> next_key (WIN/DEAD sentinels for terminals)
+  transitions: dict[tuple[object, ...], dict[int, tuple[object, ...]]]
+  n_transient: int  # number of non-terminal reachable states
+
+
+def build_graph(state: GameState) -> StateGraph:
+  """BFS over all reachable states, recording transitions for every valid action.
+
+  Unlike solve(), this does NOT short-circuit on first win — it explores
+  the entire reachable state space. Blocked moves (wall/gate) are skipped
+  since they are equivalent to WAIT.
+  """
+  start_key = state_key(state)
+  transitions: dict[tuple[object, ...], dict[int, tuple[object, ...]]] = {}
+
+  visited: set[tuple[object, ...]] = {start_key}
+  queue: deque[tuple[GameState, tuple[object, ...]]] = deque()
+  queue.append((state, start_key))
+
+  while queue:
+    current, cur_key = queue.popleft()
+    action_map: dict[int, tuple[object, ...]] = {}
+
+    # Determine which directional moves are actually available
+    pr, pc = current.player
+    valid_actions = [ACTION_WAIT]
+    for a in (ACTION_NORTH, ACTION_SOUTH, ACTION_EAST, ACTION_WEST):
+      if _can_move(current, pr, pc, a):
+        valid_actions.append(a)
+
+    for action in valid_actions:
+      next_state = copy.deepcopy(current)
+      step(next_state, action)
+
+      if next_state.won:
+        action_map[action] = _WIN
+      elif not next_state.alive:
+        action_map[action] = _DEAD
+      else:
+        nk = state_key(next_state)
+        action_map[action] = nk
+        if nk not in visited:
+          visited.add(nk)
+          queue.append((next_state, nk))
+
+    transitions[cur_key] = action_map
+
+  return StateGraph(
+    start=start_key,
+    transitions=transitions,
+    n_transient=len(transitions),
+  )
 
 
 def _solve_one(args: tuple[Path, int]) -> tuple[str, int, int | None, int]:

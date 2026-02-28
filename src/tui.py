@@ -115,16 +115,14 @@ def _render(stdscr: curses.window, state: GameState) -> None:
     grid[kr * 2 + 1][kc * 2 + 1] = "K"
     colors[kr * 2 + 1][kc * 2 + 1] = _COL_KEY
 
-  # Gate (rendered on south wall edge of the gate's cell)
-  if state.gate_wall is not None:
-    gr, gc = state.gate_wall  # h_walls index: (row+1, col)
-    wall_present = state.h_walls[gr][gc]
-    if wall_present:
-      grid[gr * 2][gc * 2 + 1] = "G"
-      colors[gr * 2][gc * 2 + 1] = _COL_GATE_CLOSED
-    else:
-      grid[gr * 2][gc * 2 + 1] = "g"
-      colors[gr * 2][gc * 2 + 1] = _COL_GATE_OPEN
+  # Gate (vertical barrier on east edge of gate_cell)
+  if state.gate_cell is not None:
+    gr, gc = state.gate_cell
+    # East edge of (gr, gc) is v_walls[gr][gc+1], drawn at grid row gr*2+1, col (gc+1)*2
+    col = _COL_GATE_CLOSED if state.gate_active else _COL_GATE_OPEN
+    ch = "G" if state.gate_active else "g"
+    grid[gr * 2 + 1][(gc + 1) * 2] = ch
+    colors[gr * 2 + 1][(gc + 1) * 2] = col
 
   # Scorpions
   for sr, sc in state.scorpions:
