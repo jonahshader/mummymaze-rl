@@ -34,9 +34,9 @@ class LevelData:
   is_red: Bool[Array, ""]
   has_key_gate: Bool[Array, ""]
 
-  # Gate wall position in h_walls (valid index even if no gate — use (0,0))
-  gate_wall_row: Int[Array, ""]
-  gate_wall_col: Int[Array, ""]
+  # Gate cell position (valid index even if no gate — use (0,0))
+  gate_row: Int[Array, ""]
+  gate_col: Int[Array, ""]
 
   # Entity positions and masks
   trap_pos: Int[Array, "2 2"]
@@ -57,8 +57,8 @@ class LevelData:
     v_walls_base: Bool[Array, "N Np1"],
     is_red: Bool[Array, ""],
     has_key_gate: Bool[Array, ""],
-    gate_wall_row: Int[Array, ""],
-    gate_wall_col: Int[Array, ""],
+    gate_row: Int[Array, ""],
+    gate_col: Int[Array, ""],
     trap_pos: Int[Array, "2 2"],
     trap_active: Bool[Array, "2"],
     key_pos: Int[Array, "2"],
@@ -73,8 +73,8 @@ class LevelData:
     self.v_walls_base = v_walls_base
     self.is_red = is_red
     self.has_key_gate = has_key_gate
-    self.gate_wall_row = gate_wall_row
-    self.gate_wall_col = gate_wall_col
+    self.gate_row = gate_row
+    self.gate_col = gate_col
     self.trap_pos = trap_pos
     self.trap_active = trap_active
     self.key_pos = key_pos
@@ -129,8 +129,8 @@ _LEVEL_DATA_FIELDS = [
   "v_walls_base",
   "is_red",
   "has_key_gate",
-  "gate_wall_row",
-  "gate_wall_col",
+  "gate_row",
+  "gate_col",
   "trap_pos",
   "trap_active",
   "key_pos",

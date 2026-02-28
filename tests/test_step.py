@@ -129,11 +129,12 @@ def _compare_states(
     f"{turn_label}: won mismatch: py={py_state.won} jax={jax_won}"
   )
 
-  # Gate open
+  # Gate open (JAX gate_open=True means open; game.py gate_active=True means closed)
   if bool(level.has_key_gate):
-    assert bool(jax_state.gate_open) == py_state.gate_open, (
-      f"{turn_label}: gate_open mismatch: py={py_state.gate_open} "
-      f"jax={bool(jax_state.gate_open)}"
+    py_gate_open = not py_state.gate_active
+    assert bool(jax_state.gate_open) == py_gate_open, (
+      f"{turn_label}: gate_open mismatch: py_gate_active={py_state.gate_active} "
+      f"jax_gate_open={bool(jax_state.gate_open)}"
     )
 
 

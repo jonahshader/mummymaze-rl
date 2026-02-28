@@ -11,7 +11,7 @@ from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
 from src.env.env import EnvOut, MummyMazeEnv
 from src.env.level_bank import LevelBank, get_level, load_all_levels
-from src.env.mechanics import can_move, effective_h_walls
+from src.env.mechanics import can_move
 from src.env.types import EnvState, LevelData
 
 NUM_ACTIONS = 5
@@ -35,11 +35,9 @@ def valid_action_mask(
   state: EnvState,
 ) -> Bool[Array, "5"]:
   """Return a boolean mask of which actions are valid from the current state."""
-  h_walls = effective_h_walls(level, state.gate_open)
-  v_walls = level.v_walls_base
   r, c = state.player[0], state.player[1]
   mask = jnp.array(
-    [can_move(grid_size, h_walls, v_walls, r, c, jnp.int32(a)) for a in range(4)]
+    [can_move(grid_size, level, state.gate_open, r, c, jnp.int32(a)) for a in range(4)]
     + [True]
   )  # wait is always valid
   return mask

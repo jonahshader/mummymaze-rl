@@ -41,8 +41,8 @@ class LevelBank:
   v_walls_base: Bool[Array, "n_levels N Np1"]
   is_red: Bool[Array, "n_levels"]
   has_key_gate: Bool[Array, "n_levels"]
-  gate_wall_row: Int[Array, "n_levels"]
-  gate_wall_col: Int[Array, "n_levels"]
+  gate_row: Int[Array, "n_levels"]
+  gate_col: Int[Array, "n_levels"]
   trap_pos: Int[Array, "n_levels 2 2"]
   trap_active: Bool[Array, "n_levels 2"]
   key_pos: Int[Array, "n_levels 2"]
@@ -65,8 +65,8 @@ def get_level(bank: LevelBank, idx: Int[Array, ""]) -> LevelData:
     v_walls_base=bank.v_walls_base[idx],
     is_red=bank.is_red[idx],
     has_key_gate=bank.has_key_gate[idx],
-    gate_wall_row=bank.gate_wall_row[idx],
-    gate_wall_col=bank.gate_wall_col[idx],
+    gate_row=bank.gate_row[idx],
+    gate_col=bank.gate_col[idx],
     trap_pos=bank.trap_pos[idx],
     trap_active=bank.trap_active[idx],
     key_pos=bank.key_pos[idx],
@@ -114,7 +114,7 @@ def _load_level_np(sublevel: object, header: object) -> tuple[int, dict[str, obj
   scorpions: list[tuple[int, int]] = []
   traps: list[tuple[int, int]] = []
   key_pos: tuple[int, int] | None = None
-  gate_wall: tuple[int, int] | None = None
+  gate_pos: tuple[int, int] | None = None
 
   for ent in sublevel.entities:  # type: ignore[union-attr]
     pos = (ent.row, ent.col)
@@ -129,14 +129,10 @@ def _load_level_np(sublevel: object, header: object) -> tuple[int, dict[str, obj
     elif ent.type == EntityType.KEY:
       key_pos = pos
     elif ent.type == EntityType.GATE:
-      gate_wall = (ent.row + 1, ent.col)
+      gate_pos = (ent.row, ent.col)
 
   h_walls = np.array(sublevel.h_walls, dtype=np.bool_)  # type: ignore[union-attr]
   v_walls = np.array(sublevel.v_walls, dtype=np.bool_)  # type: ignore[union-attr]
-
-  # .dat files store walls without the gate wall. Gate starts closed (wall present).
-  if gate_wall is not None:
-    h_walls[gate_wall[0], gate_wall[1]] = True
 
   mummy_arr = np.zeros((MAX_MUMMIES, 2), dtype=np.int32)
   mummy_alive = np.zeros(MAX_MUMMIES, dtype=np.bool_)
@@ -157,8 +153,8 @@ def _load_level_np(sublevel: object, header: object) -> tuple[int, dict[str, obj
     trap_active[i] = True
 
   kp = np.array(key_pos if key_pos is not None else (0, 0), dtype=np.int32)
-  gwr = np.int32(gate_wall[0] if gate_wall is not None else 0)
-  gwc = np.int32(gate_wall[1] if gate_wall is not None else 0)
+  gr = np.int32(gate_pos[0] if gate_pos is not None else 0)
+  gc = np.int32(gate_pos[1] if gate_pos is not None else 0)
   ec = exit_cell(sublevel.exit_side, sublevel.exit_pos, n)  # type: ignore[union-attr]
 
   return n, {
@@ -166,8 +162,8 @@ def _load_level_np(sublevel: object, header: object) -> tuple[int, dict[str, obj
     "v_walls_base": v_walls,
     "is_red": np.bool_(header.flip),  # type: ignore[union-attr]
     "has_key_gate": np.bool_(bool(header.key_gate)),  # type: ignore[union-attr]
-    "gate_wall_row": gwr,
-    "gate_wall_col": gwc,
+    "gate_row": gr,
+    "gate_col": gc,
     "trap_pos": trap_arr,
     "trap_active": trap_active,
     "key_pos": kp,
@@ -199,8 +195,8 @@ def _level_fingerprint(level: LevelData) -> tuple[object, ...]:
     level.v_walls_base.tobytes(),
     bool(level.is_red),
     bool(level.has_key_gate),
-    int(level.gate_wall_row),
-    int(level.gate_wall_col),
+    int(level.gate_row),
+    int(level.gate_col),
     level.trap_pos.tobytes(),
     level.trap_active.tobytes(),
     level.key_pos.tobytes(),
@@ -230,8 +226,8 @@ def _build_bank(
   v_walls = _stack("v_walls_base")
   is_red = _stack("is_red")
   has_key_gate = _stack("has_key_gate")
-  gate_wall_row = _stack("gate_wall_row")
-  gate_wall_col = _stack("gate_wall_col")
+  gate_row = _stack("gate_row")
+  gate_col = _stack("gate_col")
   trap_pos = _stack("trap_pos")
   trap_active = _stack("trap_active")
   key_pos = _stack("key_pos")
@@ -256,8 +252,8 @@ def _build_bank(
     v_walls_base=v_walls,
     is_red=is_red,
     has_key_gate=has_key_gate,
-    gate_wall_row=gate_wall_row,
-    gate_wall_col=gate_wall_col,
+    gate_row=gate_row,
+    gate_col=gate_col,
     trap_pos=trap_pos,
     trap_active=trap_active,
     key_pos=key_pos,

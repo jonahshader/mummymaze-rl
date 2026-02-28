@@ -1,8 +1,24 @@
 """Full turn pipeline for the JAX Mummy Maze environment.
 
+Matches the original Mummy Maze Deluxe binary (FUN_00405580) exactly:
+1. Player moves
+2. Player key toggle (absolute assignment, not relative)
+3. Trap check -> early return
+4. Scorpion moves 1 step
+5. Scorpion-on-player death -> early return
+6. Scorpion-mummy collision (scorpion dies)
+7. Scorpion key toggle
+8. Mummy loop (2 iterations), each containing:
+   a. Each mummy moves 1 step
+   b. Mummy-mummy collision
+   c. Mummy-scorpion collision (scorpion dies, gate toggles if at key)
+   d. Mummy-player death check
+   e. Mummy key toggle (mutually exclusive, turn-start moved check)
+9. Final enemy-on-player check
+10. Win check
+
 grid_size is the only trace-time constant. Everything else (is_red,
 has_key_gate, entity counts) is handled via runtime masks.
-Always loops over max entity counts (2 mummies, 1 scorpion, 2 traps).
 """
 
 import jax
@@ -14,7 +30,6 @@ from src.env.mechanics import (
   _DC,
   _DR,
   can_move,
-  effective_h_walls,
   move_enemy_one_step,
 )
 from src.env.types import MAX_MUMMIES, MAX_SCORPIONS, MAX_TRAPS, EnvState, LevelData
@@ -43,12 +58,11 @@ def _live_step(
   action: Int[Array, ""],
 ) -> EnvState:
   """Execute a turn for a live (not done/won) game."""
-  h_walls = effective_h_walls(level, state.gate_open)
-  v_walls = level.v_walls_base
 
   # --- 1. Player movement ---
   pr, pc = state.player[0], state.player[1]
-  can = can_move(grid_size, h_walls, v_walls, pr, pc, action)
+  gate_open = state.gate_open
+  can = can_move(grid_size, level, gate_open, pr, pc, action)
   is_move = action != ACTION_WAIT
   do_move = is_move & can
 
@@ -58,185 +72,239 @@ def _live_step(
   new_pc = jnp.where(do_move, pc + dc, pc)
   player = jnp.array([new_pr, new_pc])
 
-  # --- 2. Trap check (always check MAX_TRAPS, masked by trap_active) ---
+  # --- 2. Player key toggle (absolute: gate_open = ~original_gate) ---
+  original_gate = state.gate_open
+  was_on_key = (pr == level.key_pos[0]) & (pc == level.key_pos[1])
+  now_on_key = (new_pr == level.key_pos[0]) & (new_pc == level.key_pos[1])
+  player_entered_key = level.has_key_gate & now_on_key & ~was_on_key
+  gate_open = jnp.where(player_entered_key, ~original_gate, gate_open)
+  key_toggled = player_entered_key
+
+  # --- 3. Trap check -> early return if dead ---
   on_trap = jnp.bool_(False)
   for i in range(MAX_TRAPS):
     trap_r, trap_c = level.trap_pos[i, 0], level.trap_pos[i, 1]
     on_trap = on_trap | (level.trap_active[i] & (new_pr == trap_r) & (new_pc == trap_c))
 
-  dead = on_trap
-  state_after_trap = EnvState(
+  state_dead_trap = EnvState(
     player=player,
     mummy_pos=state.mummy_pos,
     mummy_alive=state.mummy_alive,
     scorpion_pos=state.scorpion_pos,
     scorpion_alive=state.scorpion_alive,
-    gate_open=state.gate_open,
+    gate_open=gate_open,
     done=jnp.bool_(True),
     won=jnp.bool_(False),
     turn=state.turn,
   )
   return jax.lax.cond(
-    dead,
-    lambda: state_after_trap,
-    lambda: _continue_after_player_move(
-      grid_size, level, state, player, new_pr, new_pc, h_walls, v_walls
+    on_trap,
+    lambda: state_dead_trap,
+    lambda: _after_player(
+      grid_size,
+      level,
+      state,
+      player,
+      new_pr,
+      new_pc,
+      gate_open,
+      original_gate,
+      key_toggled,
     ),
   )
 
 
-def _continue_after_player_move(
+def _after_player(
   grid_size: int,
   level: LevelData,
   state: EnvState,
   player: Int[Array, "2"],
   pr: Int[Array, ""],
   pc: Int[Array, ""],
-  h_walls: Bool[Array, "Np1 N"],
-  v_walls: Bool[Array, "N Np1"],
+  gate_open: Bool[Array, ""],
+  original_gate: Bool[Array, ""],
+  key_toggled: Bool[Array, ""],
 ) -> EnvState:
-  """Continue turn after player has moved and survived traps."""
+  """Continue after player moved and survived traps."""
 
-  # --- 3. Check if player stepped on enemy ---
-  on_enemy = jnp.bool_(False)
-  for i in range(MAX_MUMMIES):
-    alive = state.mummy_alive[i]
-    mr, mc = state.mummy_pos[i, 0], state.mummy_pos[i, 1]
-    on_enemy = on_enemy | (alive & (pr == mr) & (pc == mc))
-  for i in range(MAX_SCORPIONS):
-    alive = state.scorpion_alive[i]
-    sr, sc = state.scorpion_pos[i, 0], state.scorpion_pos[i, 1]
-    on_enemy = on_enemy | (alive & (pr == sr) & (pc == sc))
-
-  state_dead = EnvState(
-    player=player,
-    mummy_pos=state.mummy_pos,
-    mummy_alive=state.mummy_alive,
-    scorpion_pos=state.scorpion_pos,
-    scorpion_alive=state.scorpion_alive,
-    gate_open=state.gate_open,
-    done=jnp.bool_(True),
-    won=jnp.bool_(False),
-    turn=state.turn,
-  )
-
-  return jax.lax.cond(
-    on_enemy,
-    lambda: state_dead,
-    lambda: _continue_after_enemy_check(
-      grid_size, level, state, player, pr, pc, h_walls, v_walls
-    ),
-  )
-
-
-def _continue_after_enemy_check(
-  grid_size: int,
-  level: LevelData,
-  state: EnvState,
-  player: Int[Array, "2"],
-  pr: Int[Array, ""],
-  pc: Int[Array, ""],
-  h_walls: Bool[Array, "Np1 N"],
-  v_walls: Bool[Array, "N Np1"],
-) -> EnvState:
-  """Continue after player survived stepping on enemies."""
-
-  # --- 4. Player key toggle (only on entry, not every turn) ---
-  gate_open = state.gate_open
-  prev_pr, prev_pc = state.player[0], state.player[1]
-  was_on_key = (prev_pr == level.key_pos[0]) & (prev_pc == level.key_pos[1])
-  now_on_key = (pr == level.key_pos[0]) & (pc == level.key_pos[1])
-  entered_key = level.has_key_gate & now_on_key & ~was_on_key
-  gate_open = jnp.where(entered_key, ~gate_open, gate_open)
-  # Recompute h_walls with new gate state
-  h_walls = effective_h_walls(level, gate_open)
-
-  # --- 5. Enemy AI (always loop max, masked by alive) ---
-  old_mummy_pos = state.mummy_pos
+  # --- 4. Scorpion movement (1 step each) ---
   old_scorpion_pos = state.scorpion_pos
-  mummy_pos = state.mummy_pos
   scorpion_pos = state.scorpion_pos
-
-  # Move mummies (2 steps each)
-  for i in range(MAX_MUMMIES):
-    alive_i = state.mummy_alive[i]
-    mr, mc = mummy_pos[i, 0], mummy_pos[i, 1]
-    # Step 1
-    nr1, nc1 = move_enemy_one_step(
-      grid_size, h_walls, v_walls, level.is_red, mr, mc, pr, pc
-    )
-    mr1 = jnp.where(alive_i, nr1, mr)
-    mc1 = jnp.where(alive_i, nc1, mc)
-    # Step 2
-    nr2, nc2 = move_enemy_one_step(
-      grid_size, h_walls, v_walls, level.is_red, mr1, mc1, pr, pc
-    )
-    mr2 = jnp.where(alive_i, nr2, mr1)
-    mc2 = jnp.where(alive_i, nc2, mc1)
-    mummy_pos = mummy_pos.at[i].set(jnp.array([mr2, mc2]))
-
-  # Move scorpions (1 step each)
   for i in range(MAX_SCORPIONS):
     alive_i = state.scorpion_alive[i]
     sr, sc = scorpion_pos[i, 0], scorpion_pos[i, 1]
     nr, nc = move_enemy_one_step(
-      grid_size, h_walls, v_walls, level.is_red, sr, sc, pr, pc
+      grid_size, level, gate_open, level.is_red, sr, sc, pr, pc
     )
     sr1 = jnp.where(alive_i, nr, sr)
     sc1 = jnp.where(alive_i, nc, sc)
     scorpion_pos = scorpion_pos.at[i].set(jnp.array([sr1, sc1]))
 
-  # --- 6. Enemy key toggle (only on entry) ---
-  toggle_count = jnp.int32(0)
-  for i in range(MAX_MUMMIES):
-    alive_i = state.mummy_alive[i]
-    now_on = (mummy_pos[i, 0] == level.key_pos[0]) & (
-      mummy_pos[i, 1] == level.key_pos[1]
-    )
-    was_on = (old_mummy_pos[i, 0] == level.key_pos[0]) & (
-      old_mummy_pos[i, 1] == level.key_pos[1]
-    )
-    entered = alive_i & now_on & ~was_on
-    toggle_count = toggle_count + jnp.where(entered, jnp.int32(1), jnp.int32(0))
+  # --- 5. Scorpion-on-player death check -> early return ---
+  scorp_on_player = jnp.bool_(False)
   for i in range(MAX_SCORPIONS):
-    alive_i = state.scorpion_alive[i]
+    scorp_on_player = scorp_on_player | (
+      state.scorpion_alive[i] & (scorpion_pos[i, 0] == pr) & (scorpion_pos[i, 1] == pc)
+    )
+
+  state_dead_scorp = EnvState(
+    player=player,
+    mummy_pos=state.mummy_pos,
+    mummy_alive=state.mummy_alive,
+    scorpion_pos=scorpion_pos,
+    scorpion_alive=state.scorpion_alive,
+    gate_open=gate_open,
+    done=jnp.bool_(True),
+    won=jnp.bool_(False),
+    turn=state.turn,
+  )
+  return jax.lax.cond(
+    scorp_on_player,
+    lambda: state_dead_scorp,
+    lambda: _after_scorpion(
+      grid_size,
+      level,
+      state,
+      player,
+      pr,
+      pc,
+      gate_open,
+      original_gate,
+      key_toggled,
+      scorpion_pos,
+      old_scorpion_pos,
+    ),
+  )
+
+
+def _after_scorpion(
+  grid_size: int,
+  level: LevelData,
+  state: EnvState,
+  player: Int[Array, "2"],
+  pr: Int[Array, ""],
+  pc: Int[Array, ""],
+  gate_open: Bool[Array, ""],
+  original_gate: Bool[Array, ""],
+  key_toggled: Bool[Array, ""],
+  scorpion_pos: Int[Array, "1 2"],
+  old_scorpion_pos: Int[Array, "1 2"],
+) -> EnvState:
+  """Continue after scorpion moved and survived."""
+
+  # --- 6. Scorpion-mummy collision (scorpion dies stepping onto mummy) ---
+  # Binary does NOT check scorpion_alive; dead scorpion positions persist.
+  scorpion_alive = state.scorpion_alive
+  for si in range(MAX_SCORPIONS):
+    scorp_on_mummy = jnp.bool_(False)
+    for mi in range(MAX_MUMMIES):
+      scorp_on_mummy = scorp_on_mummy | (
+        state.mummy_alive[mi]
+        & (scorpion_pos[si, 0] == state.mummy_pos[mi, 0])
+        & (scorpion_pos[si, 1] == state.mummy_pos[mi, 1])
+      )
+    scorpion_alive = scorpion_alive.at[si].set(scorpion_alive[si] & ~scorp_on_mummy)
+
+  # --- 7. Scorpion key toggle ---
+  # Uses original_gate for absolute assignment, guarded by key_toggled.
+  for i in range(MAX_SCORPIONS):
     now_on = (scorpion_pos[i, 0] == level.key_pos[0]) & (
       scorpion_pos[i, 1] == level.key_pos[1]
     )
     was_on = (old_scorpion_pos[i, 0] == level.key_pos[0]) & (
       old_scorpion_pos[i, 1] == level.key_pos[1]
     )
-    entered = alive_i & now_on & ~was_on
-    toggle_count = toggle_count + jnp.where(entered, jnp.int32(1), jnp.int32(0))
-  # Only toggle if level actually has key/gate
-  should_toggle = level.has_key_gate & (toggle_count % 2 == 1)
-  gate_open = jnp.where(should_toggle, ~gate_open, gate_open)
+    entered = scorpion_alive[i] & now_on & ~was_on & level.has_key_gate & ~key_toggled
+    gate_open = jnp.where(entered, ~original_gate, gate_open)
+    key_toggled = key_toggled | entered
 
-  # --- 7. Collision resolution ---
+  # --- 8. Mummy loop (2 iterations) ---
+  # Save turn-start positions for "moved" check in key toggle.
+  initial_mummy_pos = state.mummy_pos
+  mummy_pos = state.mummy_pos
   mummy_alive = state.mummy_alive
-  scorpion_alive = state.scorpion_alive
+  dead = jnp.bool_(False)
 
-  # Mummy vs mummy (m0 vs m1) — lower index survives
-  same_pos_mm = (
-    mummy_alive[0]
-    & mummy_alive[1]
-    & (mummy_pos[0, 0] == mummy_pos[1, 0])
-    & (mummy_pos[0, 1] == mummy_pos[1, 1])
-  )
-  mummy_alive = mummy_alive.at[1].set(mummy_alive[1] & ~same_pos_mm)
-
-  # Mummy vs scorpion — mummy wins
-  for mi in range(MAX_MUMMIES):
-    for si in range(MAX_SCORPIONS):
-      same_pos_ms = (
-        mummy_alive[mi]
-        & scorpion_alive[si]
-        & (mummy_pos[mi, 0] == scorpion_pos[si, 0])
-        & (mummy_pos[mi, 1] == scorpion_pos[si, 1])
+  for _mummy_step in range(2):
+    # 8a. Each mummy moves 1 step (skip if player already dead)
+    for i in range(MAX_MUMMIES):
+      alive_i = mummy_alive[i] & ~dead
+      mr, mc = mummy_pos[i, 0], mummy_pos[i, 1]
+      nr, nc = move_enemy_one_step(
+        grid_size, level, gate_open, level.is_red, mr, mc, pr, pc
       )
-      scorpion_alive = scorpion_alive.at[si].set(scorpion_alive[si] & ~same_pos_ms)
+      mr1 = jnp.where(alive_i, nr, mr)
+      mc1 = jnp.where(alive_i, nc, mc)
+      mummy_pos = mummy_pos.at[i].set(jnp.array([mr1, mc1]))
 
-  # --- 8. Death check — enemy on player after movement ---
+    # 8b. Mummy-mummy collision: lower index survives
+    same_pos_mm = (
+      ~dead
+      & mummy_alive[0]
+      & mummy_alive[1]
+      & (mummy_pos[0, 0] == mummy_pos[1, 0])
+      & (mummy_pos[0, 1] == mummy_pos[1, 1])
+    )
+    mummy_alive = mummy_alive.at[1].set(mummy_alive[1] & ~same_pos_mm)
+
+    # 8c. Mummy-scorpion collision: scorpion dies, gate toggles if at key.
+    # Binary does NOT check scorpion_alive — dead scorpion position still triggers.
+    for mi in range(MAX_MUMMIES):
+      for si in range(MAX_SCORPIONS):
+        same_pos_ms = (
+          ~dead
+          & mummy_alive[mi]
+          & (
+            (mummy_pos[mi, 0] == scorpion_pos[si, 0])
+            & (mummy_pos[mi, 1] == scorpion_pos[si, 1])
+          )
+        )
+        # Gate toggle on collision at key cell (relative: ~gate_open)
+        at_key = (
+          level.has_key_gate
+          & (scorpion_pos[si, 0] == level.key_pos[0])
+          & (scorpion_pos[si, 1] == level.key_pos[1])
+        )
+        gate_open = jnp.where(same_pos_ms & at_key, ~gate_open, gate_open)
+        scorpion_alive = scorpion_alive.at[si].set(scorpion_alive[si] & ~same_pos_ms)
+
+    # 8d. Mummy-player death check
+    mummy_on_player = jnp.bool_(False)
+    for i in range(MAX_MUMMIES):
+      mummy_on_player = mummy_on_player | (
+        mummy_alive[i] & (mummy_pos[i, 0] == pr) & (mummy_pos[i, 1] == pc)
+      )
+    dead = dead | mummy_on_player
+
+    # 8e. Mummy key toggle — mutually exclusive, first matching mummy wins.
+    # "Moved" check: compare against turn-start positions (initial_mummy_pos).
+    # Absolute assignment: gate_open = ~original_gate.
+    # Only mummy0 sets key_toggled; mummy1 toggles gate but doesn't set it.
+    # Guarded by ~dead (game.py returns before this on death).
+    mummy_entered_this_iter = jnp.bool_(False)
+    for i in range(MAX_MUMMIES):
+      now_on = (mummy_pos[i, 0] == level.key_pos[0]) & (
+        mummy_pos[i, 1] == level.key_pos[1]
+      )
+      moved = (mummy_pos[i, 0] != initial_mummy_pos[i, 0]) | (
+        mummy_pos[i, 1] != initial_mummy_pos[i, 1]
+      )
+      entered = (
+        ~dead
+        & mummy_alive[i]
+        & now_on
+        & moved
+        & level.has_key_gate
+        & ~key_toggled
+        & ~mummy_entered_this_iter
+      )
+      gate_open = jnp.where(entered, ~original_gate, gate_open)
+      # Only mummy0 sets key_toggled (binary: mummy1's goto skips it)
+      key_toggled = jnp.where(entered & (i == 0), jnp.bool_(True), key_toggled)
+      # Both mummies set per-iteration exclusion (emulates break)
+      mummy_entered_this_iter = mummy_entered_this_iter | entered
+
+  # --- 9. Final enemy-on-player check ---
   enemy_on_player = jnp.bool_(False)
   for i in range(MAX_MUMMIES):
     enemy_on_player = enemy_on_player | (
@@ -246,11 +314,12 @@ def _continue_after_enemy_check(
     enemy_on_player = enemy_on_player | (
       scorpion_alive[i] & (scorpion_pos[i, 0] == pr) & (scorpion_pos[i, 1] == pc)
     )
+  dead = dead | enemy_on_player
 
-  # --- 9. Win check ---
+  # --- 10. Win check ---
   on_exit = (pr == level.exit_cell[0]) & (pc == level.exit_cell[1])
-  won = on_exit & ~enemy_on_player
-  done = enemy_on_player | won
+  won = on_exit & ~dead
+  done = dead | won
 
   return EnvState(
     player=player,

@@ -3,7 +3,6 @@
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from src.env.mechanics import effective_h_walls
 from src.env.types import MAX_MUMMIES, MAX_SCORPIONS, MAX_TRAPS, EnvState, LevelData
 
 
@@ -16,7 +15,7 @@ def observe(
     0: North wall (h_walls[r][c] for each cell)
     1: South wall (h_walls[r+1][c] for each cell)
     2: West wall  (v_walls[r][c] for each cell)
-    3: East wall  (v_walls[r][c+1] for each cell)
+    3: East wall  (v_walls[r][c+1] for each cell) — includes gate when closed
     4: Player position
     5: Alive mummies
     6: Alive scorpions
@@ -26,8 +25,15 @@ def observe(
    10: Gate open (scalar broadcast to full grid)
   """
   n = grid_size
-  h_walls = effective_h_walls(level, state.gate_open)
+  h_walls = level.h_walls_base
   v_walls = level.v_walls_base
+
+  # Bake gate into v_walls for observations: gate blocks east/west at
+  # v_walls[gate_row, gate_col+1]. Active when has_key_gate & ~gate_open.
+  gate_active = level.has_key_gate & ~state.gate_open
+  gr = level.gate_row
+  gc = level.gate_col
+  v_walls = v_walls.at[gr, gc + 1].set(v_walls[gr, gc + 1] | gate_active)
 
   # Wall channels
   north_wall = h_walls[:n, :].astype(jnp.float32)

@@ -177,7 +177,7 @@ def run_single(file_stem: str, sub_idx: int) -> None:
     print(f"  walls: {n*n - wall_diffs}/{n*n} cells match")
     exit_ok = c["exit"] == p["exit"] and c["exit_mask"] == p["exit_mask"]
     if exit_ok:
-        print(f"  exit: ok")
+        print("  exit: ok")
     else:
         print(f"  exit: C={c['exit']} mask={c['exit_mask']} Py={p['exit']} mask={p['exit_mask']}")
 

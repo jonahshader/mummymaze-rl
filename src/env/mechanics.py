@@ -21,19 +21,29 @@ _DR = jnp.array([-1, 1, 0, 0, 0], dtype=jnp.int32)
 _DC = jnp.array([0, 0, 1, -1, 0], dtype=jnp.int32)
 
 
-def effective_h_walls(
-  level: LevelData, gate_open: Bool[Array, ""]
-) -> Bool[Array, "Np1 N"]:
-  """Return h_walls with gate state applied.
+def gate_blocked(
+  level: LevelData,
+  gate_open: Bool[Array, ""],
+  r: Int[Array, ""],
+  c: Int[Array, ""],
+  direction: Int[Array, ""],
+) -> Bool[Array, ""]:
+  """Check if the gate blocks movement from (r, c) in direction.
 
-  Always runs the gate logic but masks it with has_key_gate.
-  When has_key_gate is False, should_flip is False, so XOR is a no-op.
-  gate_wall_row/col must be valid indices even when no gate (use 0,0).
+  Gate is a vertical barrier on the EAST edge of (gate_row, gate_col).
+  It blocks east from gate_cell and west into gate_cell (from gate_col+1).
+  Only active when has_key_gate & ~gate_open.
   """
-  should_flip = level.has_key_gate & gate_open
-  gr = level.gate_wall_row
-  gc = level.gate_wall_col
-  return level.h_walls_base.at[gr, gc].set(level.h_walls_base[gr, gc] ^ should_flip)
+  active = level.has_key_gate & ~gate_open
+  gr = level.gate_row
+  gc = level.gate_col
+
+  # East from gate cell
+  east_blocked = (direction == ACTION_EAST) & (r == gr) & (c == gc)
+  # West into gate cell (from the cell to the east)
+  west_blocked = (direction == ACTION_WEST) & (r == gr) & (c == gc + 1)
+
+  return active & (east_blocked | west_blocked)
 
 
 def wall_blocked(
@@ -58,13 +68,13 @@ def wall_blocked(
 
 def can_move(
   grid_size: int,
-  h_walls: Bool[Array, "Np1 N"],
-  v_walls: Bool[Array, "N Np1"],
+  level: LevelData,
+  gate_open: Bool[Array, ""],
   r: Int[Array, ""],
   c: Int[Array, ""],
   direction: Int[Array, ""],
 ) -> Bool[Array, ""]:
-  """Check if movement from (r, c) in direction is valid (in bounds + no wall)."""
+  """Check if movement from (r,c) in direction is valid (bounds+wall+gate)."""
   dr = _DR[direction]
   dc = _DC[direction]
   nr = r + dr
@@ -72,15 +82,16 @@ def can_move(
 
   n = grid_size
   in_bounds = (nr >= 0) & (nr < n) & (nc >= 0) & (nc < n)
-  not_blocked = ~wall_blocked(h_walls, v_walls, r, c, direction)
+  not_wall = ~wall_blocked(level.h_walls_base, level.v_walls_base, r, c, direction)
+  not_gate = ~gate_blocked(level, gate_open, r, c, direction)
 
-  return in_bounds & not_blocked
+  return in_bounds & not_wall & not_gate
 
 
 def move_enemy_one_step(
   grid_size: int,
-  h_walls: Bool[Array, "Np1 N"],
-  v_walls: Bool[Array, "N Np1"],
+  level: LevelData,
+  gate_open: Bool[Array, ""],
   is_red: Bool[Array, ""],
   er: Int[Array, ""],
   ec: Int[Array, ""],
@@ -102,16 +113,18 @@ def move_enemy_one_step(
   v_aligned = er == pr
 
   # Select primary/secondary based on is_red
-  primary_dir = jnp.where(is_red, v_dir, h_dir)
-  primary_aligned = jnp.where(is_red, v_aligned, h_aligned)
-  secondary_dir = jnp.where(is_red, h_dir, v_dir)
-  secondary_aligned = jnp.where(is_red, h_aligned, v_aligned)
+  # Red (is_red=True): primary = horizontal, secondary = vertical
+  # White (is_red=False): primary = vertical, secondary = horizontal
+  primary_dir = jnp.where(is_red, h_dir, v_dir)
+  primary_aligned = jnp.where(is_red, h_aligned, v_aligned)
+  secondary_dir = jnp.where(is_red, v_dir, h_dir)
+  secondary_aligned = jnp.where(is_red, v_aligned, h_aligned)
 
   primary_ok = ~primary_aligned & can_move(
-    grid_size, h_walls, v_walls, er, ec, primary_dir
+    grid_size, level, gate_open, er, ec, primary_dir
   )
   secondary_ok = ~secondary_aligned & can_move(
-    grid_size, h_walls, v_walls, er, ec, secondary_dir
+    grid_size, level, gate_open, er, ec, secondary_dir
   )
 
   # Try primary, then secondary, then stay

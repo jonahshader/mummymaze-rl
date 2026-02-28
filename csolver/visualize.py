@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import copy
 import html
 import json
 import subprocess
@@ -27,7 +26,7 @@ DAT_DIR = Path(__file__).resolve().parent.parent / "mazes"
 # Ensure the Python engine is importable
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from mummy_maze.parser import parse_file, EntityType
+from mummy_maze.parser import parse_file
 from src.game import (
     ACTION_EAST,
     ACTION_NORTH,
@@ -37,7 +36,7 @@ from src.game import (
     load_level,
     step,
 )
-from src.solver import solve, state_key
+from src.solver import solve
 
 ACTIONS = [ACTION_NORTH, ACTION_SOUTH, ACTION_EAST, ACTION_WEST, ACTION_WAIT]
 ACTION_NAMES = {

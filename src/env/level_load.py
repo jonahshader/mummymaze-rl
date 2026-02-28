@@ -31,7 +31,7 @@ def load_level(sublevel: SubLevel, header: Header) -> tuple[int, LevelData, EnvS
   scorpions: list[tuple[int, int]] = []
   traps: list[tuple[int, int]] = []
   key_pos: tuple[int, int] | None = None
-  gate_wall: tuple[int, int] | None = None
+  gate_pos: tuple[int, int] | None = None
 
   for ent in sublevel.entities:
     pos = (ent.row, ent.col)
@@ -46,7 +46,7 @@ def load_level(sublevel: SubLevel, header: Header) -> tuple[int, LevelData, EnvS
     elif ent.type == EntityType.KEY:
       key_pos = pos
     elif ent.type == EntityType.GATE:
-      gate_wall = (ent.row + 1, ent.col)
+      gate_pos = (ent.row, ent.col)
 
   # Convert walls to JAX arrays
   h_walls_base = jnp.array(sublevel.h_walls, dtype=jnp.bool_)
@@ -76,9 +76,9 @@ def load_level(sublevel: SubLevel, header: Header) -> tuple[int, LevelData, EnvS
   # Key position (0,0 if no key — safe since has_key_gate masks usage)
   key_arr = jnp.array(key_pos if key_pos is not None else (0, 0), dtype=jnp.int32)
 
-  # Gate wall position (0,0 if no gate — safe since has_key_gate masks XOR)
-  gate_row = jnp.int32(gate_wall[0] if gate_wall is not None else 0)
-  gate_col = jnp.int32(gate_wall[1] if gate_wall is not None else 0)
+  # Gate cell position (0,0 if no gate — safe since has_key_gate masks usage)
+  gate_row = jnp.int32(gate_pos[0] if gate_pos is not None else 0)
+  gate_col = jnp.int32(gate_pos[1] if gate_pos is not None else 0)
 
   # Exit cell
   ec = exit_cell(sublevel.exit_side, sublevel.exit_pos, n)
@@ -92,8 +92,8 @@ def load_level(sublevel: SubLevel, header: Header) -> tuple[int, LevelData, EnvS
     v_walls_base=v_walls_base,
     is_red=jnp.bool_(header.flip),
     has_key_gate=jnp.bool_(bool(header.key_gate)),
-    gate_wall_row=gate_row,
-    gate_wall_col=gate_col,
+    gate_row=gate_row,
+    gate_col=gate_col,
     trap_pos=trap_arr,
     trap_active=trap_active,
     key_pos=key_arr,
