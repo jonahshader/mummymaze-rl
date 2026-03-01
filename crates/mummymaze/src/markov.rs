@@ -37,17 +37,10 @@ struct SolveResult {
 
 /// Core Gauss-Seidel solver shared by `analyze()` and `analyze_full()`.
 fn solve_markov(graph: &StateGraph) -> Result<SolveResult> {
-    let n = graph.n_transient;
-
-    // Map transient states to integer indices
-    let mut state_to_idx: FxHashMap<State, usize> = FxHashMap::default();
-    let mut idx_to_state: Vec<State> = Vec::with_capacity(n);
-    let mut idx = 0usize;
-    for s in graph.transitions.keys() {
-        state_to_idx.insert(*s, idx);
-        idx_to_state.push(*s);
-        idx += 1;
-    }
+    let indices = graph.state_indices();
+    let state_to_idx = &indices.state_to_idx;
+    let idx_to_state = indices.idx_to_state;
+    let n = idx_to_state.len();
 
     let start_idx = state_to_idx[&graph.start];
 
@@ -58,7 +51,7 @@ fn solve_markov(graph: &StateGraph) -> Result<SolveResult> {
     // diag[i] = (I-Q)[i,i] = 1 - Q[i,i]
     let mut diag: Vec<f64> = vec![1.0; n];
 
-    for (s, s_idx) in &state_to_idx {
+    for (s, s_idx) in state_to_idx {
         let action_map = &graph.transitions[s];
         let k = action_map.len();
         if k == 0 {

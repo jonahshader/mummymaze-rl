@@ -199,11 +199,14 @@ impl GraphView {
             }
         }
 
-        // Compute BFS depths
-        let depths = layout::bfs_depths(graph);
+        // Compute BFS depths (only needed for BFS/radial layouts and node info)
+        let depths = if self.layout_mode != LayoutMode::ForceDirected {
+            graph.bfs_depths()
+        } else {
+            FxHashMap::default()
+        };
 
         // Compute positions based on layout mode
-        let max_depth = depths.values().copied().max().unwrap_or(0);
         let mut positions = match self.layout_mode {
             LayoutMode::ForceDirected => layout::random_positions(n_nodes, 42),
             LayoutMode::BfsLayers => {
@@ -216,6 +219,7 @@ impl GraphView {
 
         // Place virtual nodes outside the layout
         if self.layout_mode != LayoutMode::ForceDirected {
+            let max_depth = depths.values().copied().max().unwrap_or(0);
             let outer = (max_depth + 2) as f32 * 3.0;
             if let Some(wi) = win_idx {
                 let (x, y) = match self.layout_mode {

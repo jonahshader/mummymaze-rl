@@ -113,12 +113,9 @@ fn build_graph(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<PyOb
     let graph = crate::graph::build_graph(&levels[sublevel]);
 
     // Map states to indices
-    let mut state_list: Vec<crate::game::State> = Vec::new();
-    let mut state_to_idx = rustc_hash::FxHashMap::default();
-    for s in graph.transitions.keys() {
-        state_to_idx.insert(*s, state_list.len());
-        state_list.push(*s);
-    }
+    let indices = graph.state_indices();
+    let state_to_idx = &indices.state_to_idx;
+    let state_list = &indices.idx_to_state;
 
     // Convert states to Python tuples
     let py_states: Vec<(i32,i32,i32,i32,bool,i32,i32,bool,i32,i32,bool,bool)> = state_list.iter().map(|s| {

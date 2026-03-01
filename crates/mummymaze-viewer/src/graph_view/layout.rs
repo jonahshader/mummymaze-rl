@@ -1,32 +1,7 @@
 //! CPU layout algorithms for initial node positioning.
 
 use mummymaze::game::State;
-use mummymaze::graph::{StateGraph, StateKey};
 use rustc_hash::FxHashMap;
-use std::collections::VecDeque;
-
-/// Compute BFS depth from the start state for each node.
-pub fn bfs_depths(graph: &StateGraph) -> FxHashMap<State, u32> {
-    let mut depths = FxHashMap::default();
-    depths.insert(graph.start, 0);
-    let mut queue = VecDeque::new();
-    queue.push_back(graph.start);
-
-    while let Some(cur) = queue.pop_front() {
-        let d = depths[&cur];
-        if let Some(transitions) = graph.transitions.get(&cur) {
-            for &(_action, dest) in transitions {
-                if let StateKey::Transient(ns) = dest {
-                    if !depths.contains_key(&ns) {
-                        depths.insert(ns, d + 1);
-                        queue.push_back(ns);
-                    }
-                }
-            }
-        }
-    }
-    depths
-}
 
 /// Random initial positions scattered in a circle.
 pub fn random_positions(n: usize, seed: u64) -> Vec<[f32; 2]> {
