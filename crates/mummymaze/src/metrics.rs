@@ -47,7 +47,7 @@ pub fn compute(graph: &StateGraph, lev: &Level, solve: &SolveResult) -> Difficul
 }
 
 /// Backward BFS from WIN to find all states that can reach a win.
-pub fn winning_set(graph: &StateGraph) -> FxHashSet<State> {
+fn winning_set(graph: &StateGraph) -> FxHashSet<State> {
     // Build reverse adjacency: for each transient destination, record the source.
     let mut reverse: FxHashMap<State, Vec<State>> = FxHashMap::default();
     let mut win_predecessors: Vec<State> = Vec::new();

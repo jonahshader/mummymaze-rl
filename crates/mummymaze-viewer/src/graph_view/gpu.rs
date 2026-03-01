@@ -13,8 +13,8 @@ pub struct GraphPipelines {
     pub edge_pipeline: wgpu::RenderPipeline,
     pub force_pipeline: wgpu::ComputePipeline,
     pub camera_bgl: wgpu::BindGroupLayout,
-    pub node_render_bgl: wgpu::BindGroupLayout,
-    pub edge_render_bgl: wgpu::BindGroupLayout,
+    /// Shared layout for both node and edge render bind groups (2x storage read-only).
+    pub storage_ro_2_bgl: wgpu::BindGroupLayout,
     pub compute_bgl: wgpu::BindGroupLayout,
 }
 
@@ -63,15 +63,9 @@ impl GraphPipelines {
             count: None,
         };
 
-        let node_render_bgl =
+        let storage_ro_2_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("node_render_bgl"),
-                entries: &[storage_ro_entry(0), storage_ro_entry(1)],
-            });
-
-        let edge_render_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("edge_render_bgl"),
+                label: Some("storage_ro_2_bgl"),
                 entries: &[storage_ro_entry(0), storage_ro_entry(1)],
             });
 
@@ -114,17 +108,17 @@ impl GraphPipelines {
         // --- Shaders ---
         let node_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("node_shader"),
-            source: wgpu::ShaderSource::Wgsl(shaders::NODE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shaders::node_shader().into()),
         });
 
         let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("edge_shader"),
-            source: wgpu::ShaderSource::Wgsl(shaders::EDGE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shaders::edge_shader().into()),
         });
 
         let force_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("force_shader"),
-            source: wgpu::ShaderSource::Wgsl(shaders::FORCE_COMPUTE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shaders::force_compute_shader().into()),
         });
 
         // --- Pipelines ---
@@ -145,7 +139,7 @@ impl GraphPipelines {
         let node_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("node_pipeline_layout"),
-                bind_group_layouts: &[&camera_bgl, &node_render_bgl],
+                bind_group_layouts: &[&camera_bgl, &storage_ro_2_bgl],
                 push_constant_ranges: &[],
             });
 
@@ -181,7 +175,7 @@ impl GraphPipelines {
         let edge_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("edge_pipeline_layout"),
-                bind_group_layouts: &[&camera_bgl, &edge_render_bgl],
+                bind_group_layouts: &[&camera_bgl, &storage_ro_2_bgl],
                 push_constant_ranges: &[],
             });
 
@@ -235,8 +229,7 @@ impl GraphPipelines {
             edge_pipeline,
             force_pipeline,
             camera_bgl,
-            node_render_bgl,
-            edge_render_bgl,
+            storage_ro_2_bgl,
             compute_bgl,
         }
     }
@@ -301,7 +294,7 @@ impl GraphBuffers {
 
         let node_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("node_render_bg"),
-            layout: &pipelines.node_render_bgl,
+            layout: &pipelines.storage_ro_2_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -316,7 +309,7 @@ impl GraphBuffers {
 
         let edge_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("edge_render_bg"),
-            layout: &pipelines.edge_render_bgl,
+            layout: &pipelines.storage_ro_2_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -369,7 +362,6 @@ pub struct GraphPaintCallback {
     pub pipelines: Arc<GraphPipelines>,
     pub buffers: Arc<GraphBuffers>,
     pub camera: CameraUniform,
-    pub sim_params: SimParams,
     pub run_compute: bool,
     pub iterations_per_frame: u32,
 }
@@ -390,22 +382,16 @@ impl CallbackTrait for GraphPaintCallback {
             bytemuck::bytes_of(&self.camera),
         );
 
-        // Upload sim params and run compute
+        // Run force compute (sim params already uploaded at load time)
         if self.run_compute && self.buffers.n_nodes > 0 {
-            queue.write_buffer(
-                &self.buffers.sim_params_buf,
-                0,
-                bytemuck::bytes_of(&self.sim_params),
-            );
-
             let workgroups = (self.buffers.n_nodes + 63) / 64;
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("force_compute"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.force_pipeline);
+            pass.set_bind_group(0, &self.buffers.compute_bind_group, &[]);
             for _ in 0..self.iterations_per_frame {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("force_compute"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipelines.force_pipeline);
-                pass.set_bind_group(0, &self.buffers.compute_bind_group, &[]);
                 pass.dispatch_workgroups(workgroups, 1, 1);
             }
         }

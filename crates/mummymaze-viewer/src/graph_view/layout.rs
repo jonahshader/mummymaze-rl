@@ -44,22 +44,29 @@ pub fn random_positions(n: usize, seed: u64) -> Vec<[f32; 2]> {
     positions
 }
 
-/// BFS layer layout: nodes arranged by BFS depth, spread horizontally.
-pub fn bfs_layer_positions(
+/// Group node indices by BFS depth, returning (max_depth, layers).
+fn group_by_depth(
     state_indices: &FxHashMap<State, usize>,
     depths: &FxHashMap<State, u32>,
-    n: usize,
-) -> Vec<[f32; 2]> {
+) -> (u32, Vec<Vec<usize>>) {
     let max_depth = depths.values().copied().max().unwrap_or(0);
-    let mut positions = vec![[0.0f32; 2]; n];
-
-    // Group nodes by depth
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); (max_depth + 1) as usize];
     for (state, &idx) in state_indices {
         if let Some(&d) = depths.get(state) {
             layers[d as usize].push(idx);
         }
     }
+    (max_depth, layers)
+}
+
+/// BFS layer layout: nodes arranged by BFS depth, spread horizontally.
+pub fn bfs_layer_positions(
+    state_indices: &FxHashMap<State, usize>,
+    depths: &FxHashMap<State, u32>,
+    n: usize,
+) -> Vec<[f32; 2]> {
+    let (_max_depth, layers) = group_by_depth(state_indices, depths);
+    let mut positions = vec![[0.0f32; 2]; n];
 
     let spacing_y = 3.0;
     for (d, layer) in layers.iter().enumerate() {
@@ -85,16 +92,8 @@ pub fn radial_tree_positions(
     depths: &FxHashMap<State, u32>,
     n: usize,
 ) -> Vec<[f32; 2]> {
-    let max_depth = depths.values().copied().max().unwrap_or(0);
+    let (_max_depth, layers) = group_by_depth(state_indices, depths);
     let mut positions = vec![[0.0f32; 2]; n];
-
-    // Group by depth
-    let mut layers: Vec<Vec<usize>> = vec![Vec::new(); (max_depth + 1) as usize];
-    for (state, &idx) in state_indices {
-        if let Some(&d) = depths.get(state) {
-            layers[d as usize].push(idx);
-        }
-    }
 
     let ring_spacing = 3.0;
     for (d, layer) in layers.iter().enumerate() {

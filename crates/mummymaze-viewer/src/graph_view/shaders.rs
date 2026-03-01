@@ -1,18 +1,38 @@
 //! Inline WGSL shader sources for graph visualization.
 
-pub const NODE_SHADER: &str = r#"
-// --- Bindings ---
+/// Common struct definitions shared across all shaders.
+const COMMON_STRUCTS: &str = "
 struct CameraUniform {
     pan: vec2<f32>,
     zoom: f32,
     aspect: f32,
 };
-@group(0) @binding(0) var<uniform> camera: CameraUniform;
 
 struct NodeGpu {
     pos: vec2<f32>,
     vel: vec2<f32>,
 };
+
+struct EdgeGpu {
+    src: u32,
+    dst: u32,
+};
+
+// Node flag bits (must match types.rs constants)
+const FLAG_START: u32 = 1u;
+const FLAG_WIN: u32 = 2u;
+const FLAG_DEAD: u32 = 4u;
+const FLAG_HOVERED: u32 = 8u;
+";
+
+/// Build a complete shader source by prepending common structs.
+fn shader(body: &str) -> String {
+    format!("{COMMON_STRUCTS}\n{body}")
+}
+
+pub fn node_shader() -> String {
+    shader(
+        r#"
 struct NodeInfo {
     color: vec4<f32>,
     flags: u32,
@@ -21,6 +41,7 @@ struct NodeInfo {
     _pad: f32,
 };
 
+@group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<storage, read> nodes: array<NodeGpu>;
 @group(1) @binding(1) var<storage, read> node_info: array<NodeInfo>;
 
@@ -57,7 +78,7 @@ fn vs_node(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     out.color = info.color;
     out.local_uv = uv;
     // Outline for start or hovered nodes
-    out.outline = select(0.0, 1.0, (info.flags & 0x9u) != 0u); // FLAG_START | FLAG_HOVERED
+    out.outline = select(0.0, 1.0, (info.flags & (FLAG_START | FLAG_HOVERED)) != 0u);
     return out;
 }
 
@@ -80,25 +101,14 @@ fn fs_node(in: VsOut) -> @location(0) vec4<f32> {
 
     return col;
 }
-"#;
+"#,
+    )
+}
 
-pub const EDGE_SHADER: &str = r#"
-struct CameraUniform {
-    pan: vec2<f32>,
-    zoom: f32,
-    aspect: f32,
-};
+pub fn edge_shader() -> String {
+    shader(
+        r#"
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-
-struct NodeGpu {
-    pos: vec2<f32>,
-    vel: vec2<f32>,
-};
-struct EdgeGpu {
-    src: u32,
-    dst: u32,
-};
-
 @group(1) @binding(0) var<storage, read> nodes: array<NodeGpu>;
 @group(1) @binding(1) var<storage, read> edges: array<EdgeGpu>;
 
@@ -142,17 +152,13 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 fn fs_edge(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.5, 0.5, 0.5, in.alpha);
 }
-"#;
+"#,
+    )
+}
 
-pub const FORCE_COMPUTE_SHADER: &str = r#"
-struct NodeGpu {
-    pos: vec2<f32>,
-    vel: vec2<f32>,
-};
-struct EdgeGpu {
-    src: u32,
-    dst: u32,
-};
+pub fn force_compute_shader() -> String {
+    shader(
+        r#"
 struct SimParams {
     n_nodes: u32,
     n_edges: u32,
@@ -219,4 +225,6 @@ fn cs_force(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     nodes[i] = NodeGpu(pos_i, vel_i);
 }
-"#;
+"#,
+    )
+}

@@ -15,6 +15,9 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use types::*;
 
+/// Wraps a `Level` in an `Arc` to avoid cloning on every hover frame.
+type SharedLevel = Arc<Level>;
+
 /// Layout algorithm selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
@@ -48,7 +51,7 @@ pub struct GraphView {
     /// Per-state win probabilities (from analyze_full)
     state_win_probs: FxHashMap<State, f64>,
     /// Level associated with current graph
-    level: Option<Level>,
+    level: Option<SharedLevel>,
     /// Index of WIN virtual node (if present)
     win_idx: Option<usize>,
     /// Index of DEAD virtual node (if present)
@@ -59,7 +62,6 @@ pub struct GraphView {
     // Simulation state
     layout_mode: LayoutMode,
     sim_running: bool,
-    max_velocity: f32,
     iterations_per_frame: u32,
 
     // Hover
@@ -89,7 +91,6 @@ impl GraphView {
             },
             layout_mode: LayoutMode::ForceDirected,
             sim_running: false,
-            max_velocity: 0.0,
             iterations_per_frame: 5,
             hovered_node: None,
             loaded_level_idx: None,
@@ -109,7 +110,7 @@ impl GraphView {
         state_win_probs: FxHashMap<State, f64>,
     ) {
         self.loaded_level_idx = Some(level_idx);
-        self.level = Some(level.clone());
+        self.level = Some(Arc::new(level.clone()));
         self.state_win_probs = state_win_probs;
         self.build_from_graph(graph);
     }
@@ -202,35 +203,35 @@ impl GraphView {
         let depths = layout::bfs_depths(graph);
 
         // Compute positions based on layout mode
-        let positions = match self.layout_mode {
+        let max_depth = depths.values().copied().max().unwrap_or(0);
+        let mut positions = match self.layout_mode {
             LayoutMode::ForceDirected => layout::random_positions(n_nodes, 42),
             LayoutMode::BfsLayers => {
-                let mut pos =
-                    layout::bfs_layer_positions(&state_to_idx, &depths, n_nodes);
-                // Place virtual nodes below
-                let max_depth = depths.values().copied().max().unwrap_or(0);
-                if let Some(wi) = win_idx {
-                    pos[wi] = [-3.0, -((max_depth + 2) as f32 * 3.0)];
-                }
-                if let Some(di) = dead_idx {
-                    pos[di] = [3.0, -((max_depth + 2) as f32 * 3.0)];
-                }
-                pos
+                layout::bfs_layer_positions(&state_to_idx, &depths, n_nodes)
             }
             LayoutMode::RadialTree => {
-                let mut pos =
-                    layout::radial_tree_positions(&state_to_idx, &depths, n_nodes);
-                let max_depth = depths.values().copied().max().unwrap_or(0);
-                let outer = (max_depth + 2) as f32 * 3.0;
-                if let Some(wi) = win_idx {
-                    pos[wi] = [outer, 0.0];
-                }
-                if let Some(di) = dead_idx {
-                    pos[di] = [-outer, 0.0];
-                }
-                pos
+                layout::radial_tree_positions(&state_to_idx, &depths, n_nodes)
             }
         };
+
+        // Place virtual nodes outside the layout
+        if self.layout_mode != LayoutMode::ForceDirected {
+            let outer = (max_depth + 2) as f32 * 3.0;
+            if let Some(wi) = win_idx {
+                let (x, y) = match self.layout_mode {
+                    LayoutMode::BfsLayers => (-3.0, -outer),
+                    _ => (outer, 0.0),
+                };
+                positions[wi] = [x, y];
+            }
+            if let Some(di) = dead_idx {
+                let (x, y) = match self.layout_mode {
+                    LayoutMode::BfsLayers => (3.0, -outer),
+                    _ => (-outer, 0.0),
+                };
+                positions[di] = [x, y];
+            }
+        }
 
         // Build NodeGpu (positions + zero velocity)
         let node_data: Vec<NodeGpu> = positions
@@ -326,12 +327,27 @@ impl GraphView {
             queue.write_buffer(&new_buffers.edge_buf, 0, bytemuck::cast_slice(&edges));
         }
 
+        // Upload sim params once (they never change)
+        let sim_params = SimParams {
+            n_nodes: n_nodes as u32,
+            n_edges: n_edges_u32,
+            repel: 1.0,
+            attract: 1.0,
+            decay: 0.92,
+            speed_limit: 20.0,
+            _pad: [0.0; 2],
+        };
+        queue.write_buffer(
+            &new_buffers.sim_params_buf,
+            0,
+            bytemuck::bytes_of(&sim_params),
+        );
+
         self.buffers = Some(Arc::new(new_buffers));
         self.positions = positions;
         self.state_to_idx = state_to_idx;
         self.idx_to_state = idx_to_state;
         self.sim_running = self.layout_mode == LayoutMode::ForceDirected;
-        self.max_velocity = f32::MAX;
 
         // Auto-fit camera
         self.fit_camera();
@@ -383,21 +399,10 @@ impl GraphView {
         // Issue GPU paint callback
         if let Some(buffers) = &self.buffers {
             if buffers.n_nodes > 0 {
-                let sim_params = SimParams {
-                    n_nodes: buffers.n_nodes,
-                    n_edges: buffers.n_edges,
-                    repel: 1.0,
-                    attract: 1.0,
-                    decay: 0.92,
-                    speed_limit: 20.0,
-                    _pad: [0.0; 2],
-                };
-
                 let callback = GraphPaintCallback {
                     pipelines: Arc::clone(&self.pipelines),
                     buffers: Arc::clone(buffers),
                     camera: self.camera,
-                    sim_params,
                     run_compute: self.sim_running,
                     iterations_per_frame: self.iterations_per_frame,
                 };
@@ -475,11 +480,11 @@ impl GraphView {
         ]
     }
 
-    /// Convert normalized clip coordinates to world coordinates.
-    fn clip_to_world(&self, clip: [f32; 2]) -> [f32; 2] {
+    /// Convert normalized clip coordinates to world coordinates at a given zoom level.
+    fn clip_to_world_at(&self, clip: [f32; 2], zoom: f32) -> [f32; 2] {
         [
-            clip[0] * self.camera.aspect / self.camera.zoom + self.camera.pan[0],
-            clip[1] / self.camera.zoom + self.camera.pan[1],
+            clip[0] * self.camera.aspect / zoom + self.camera.pan[0],
+            clip[1] / zoom + self.camera.pan[1],
         ]
     }
 
@@ -508,11 +513,8 @@ impl GraphView {
             // Zoom toward cursor: adjust pan so the world point under the cursor stays fixed
             if let Some(cursor) = response.hover_pos() {
                 let clip = Self::screen_to_clip(cursor, rect);
-                let world_before = [
-                    clip[0] * self.camera.aspect / old_zoom + self.camera.pan[0],
-                    clip[1] / old_zoom + self.camera.pan[1],
-                ];
-                let world_after = self.clip_to_world(clip);
+                let world_before = self.clip_to_world_at(clip, old_zoom);
+                let world_after = self.clip_to_world_at(clip, self.camera.zoom);
                 self.camera.pan[0] += world_before[0] - world_after[0];
                 self.camera.pan[1] += world_before[1] - world_after[1];
             }
@@ -522,16 +524,16 @@ impl GraphView {
         self.hovered_node = None;
         if let Some(cursor) = response.hover_pos() {
             let clip = Self::screen_to_clip(cursor, rect);
-            let world = self.clip_to_world(clip);
+            let world = self.clip_to_world_at(clip, self.camera.zoom);
 
-            let mut best_dist = f32::MAX;
+            let hit_r_sq = 1.0f32;
+            let mut best_dist_sq = f32::MAX;
             for (i, pos) in self.positions.iter().enumerate() {
                 let dx = pos[0] - world[0];
                 let dy = pos[1] - world[1];
-                let dist = (dx * dx + dy * dy).sqrt();
-                let hit_r = 1.0;
-                if dist < hit_r && dist < best_dist {
-                    best_dist = dist;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq < hit_r_sq && dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
                     self.hovered_node = Some(i);
                 }
             }
@@ -565,9 +567,9 @@ impl GraphView {
         };
 
         let win_prob = self.state_win_probs.get(&state).copied().unwrap_or(0.0);
-        let level = level.clone();
+        let level = Arc::clone(level);
 
-        response.clone().on_hover_ui(|ui: &mut egui::Ui| {
+        response.clone().on_hover_ui(move |ui: &mut egui::Ui| {
             ui.label(format!("Win prob: {:.1}%", win_prob * 100.0));
 
             // Draw maze state preview

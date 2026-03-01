@@ -24,8 +24,6 @@ pub struct MarkovResult {
 
 #[derive(Debug, Clone)]
 pub struct FullMarkovResult {
-    pub win_prob: f64,
-    pub expected_steps: f64,
     pub state_win_probs: FxHashMap<State, f64>,
 }
 
@@ -35,7 +33,6 @@ struct SolveResult {
     expected_steps: Vec<f64>,
     start_idx: usize,
     idx_to_state: Vec<State>,
-    n: usize,
 }
 
 /// Core Gauss-Seidel solver shared by `analyze()` and `analyze_full()`.
@@ -170,7 +167,6 @@ fn solve_markov(graph: &StateGraph) -> Result<SolveResult> {
                         expected_steps: t,
                         start_idx,
                         idx_to_state,
-                        n,
                     });
                 }
                 if iter2 == MAX_ITERATIONS - 1 {
@@ -200,7 +196,7 @@ pub fn analyze(graph: &StateGraph) -> Result<MarkovResult> {
     Ok(MarkovResult {
         win_prob: s.win_probs[s.start_idx],
         expected_steps: s.expected_steps[s.start_idx],
-        n_transient: s.n,
+        n_transient: s.idx_to_state.len(),
     })
 }
 
@@ -209,8 +205,6 @@ pub fn analyze_full(graph: &StateGraph) -> Result<FullMarkovResult> {
     let n = graph.n_transient;
     if n == 0 {
         return Ok(FullMarkovResult {
-            win_prob: 0.0,
-            expected_steps: 0.0,
             state_win_probs: FxHashMap::default(),
         });
     }
@@ -219,9 +213,5 @@ pub fn analyze_full(graph: &StateGraph) -> Result<FullMarkovResult> {
     for (i, &state) in s.idx_to_state.iter().enumerate() {
         state_win_probs.insert(state, s.win_probs[i]);
     }
-    Ok(FullMarkovResult {
-        win_prob: s.win_probs[s.start_idx],
-        expected_steps: s.expected_steps[s.start_idx],
-        state_win_probs,
-    })
+    Ok(FullMarkovResult { state_win_probs })
 }
