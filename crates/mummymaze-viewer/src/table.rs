@@ -1,6 +1,6 @@
 use crate::data::{DataStore, SortColumn, SortDir};
 use eframe::egui;
-use egui::Ui;
+use egui::{ScrollArea, Ui};
 use egui_extras::{Column, TableBuilder};
 
 /// Draw the filter bar (text filter, grid size dropdown, solvable-only checkbox).
@@ -98,9 +98,9 @@ fn sort_header(
         ""
     };
     let text = format!("{label}{arrow}");
-    let response = ui.button(text);
+    let mut response = ui.button(text);
     if let Some(tip) = tooltip {
-        response.clone().on_hover_text(tip);
+        response = response.on_hover_text(tip);
     }
     if response.clicked() {
         store.toggle_sort(col);
@@ -115,6 +115,7 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
     let available = ui.available_size();
     let row_height = 20.0;
 
+    ScrollArea::horizontal().show(ui, |ui: &mut Ui| {
     TableBuilder::new(ui)
         .id_salt("level_table")
         .striped(true)
@@ -129,7 +130,7 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
         .column(Column::auto().at_least(50.0)) // States
         .column(Column::auto().at_least(50.0)) // Win%
         .column(Column::auto().at_least(50.0)) // Dead%
-        .column(Column::auto().at_least(50.0)) // Safety
+        .column(Column::remainder().at_least(50.0)) // Safety
         .header(row_height, |mut header: egui_extras::TableRow<'_, '_>| {
             header.col(|ui: &mut Ui| {
                 sort_header(ui, "File", SortColumn::File, store, Some("Pyramid .dat file (B-0 through B-100)"));
@@ -221,6 +222,7 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
                 },
             );
         });
+    });
 
     clicked_row
 }
