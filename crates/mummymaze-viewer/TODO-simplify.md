@@ -26,6 +26,6 @@
 ## Larger tasks (separate PRs)
 
 - [ ] **Async graph build + Markov solve** — `main.rs:115-122`. Blocks UI thread. Needs background task + loading state. Could reuse rayon pattern from `DataStore`.
-- [ ] **Sync CPU positions from GPU during force sim** — `mod.rs:329`. Positions go stale immediately. Needs GPU readback on convergence (or periodic). Hover and fit_camera use wrong data.
+- [x] **~~Sync CPU positions from GPU during force sim~~** — Solved via GPU hit-test compute shader (`cs_hit_test`) instead of readback. Hover now uses GPU positions directly. `fit_camera` still uses stale CPU positions but only runs at load time (before sim starts), so it's correct.
 - [ ] **Cache `StateGraph` / per-state win probs in `LevelRow`** — Redundant `build_graph` + `analyze_full` between background analysis and graph view. Needs `DataStore` schema change.
 - [ ] **Win-probs-only Markov solver** — `markov.rs`. `analyze_full` computes `expected_steps` that the graph view discards. Skip the second Gauss-Seidel loop when not needed.

@@ -393,14 +393,6 @@ impl GraphView {
         }
     }
 
-    fn camera_uniform(&self) -> CameraUniform {
-        if self.layout_mode.is_3d() {
-            self.cam_3d.to_uniform()
-        } else {
-            self.cam_2d.to_uniform()
-        }
-    }
-
     /// Synchronously read back last frame's GPU hit-test result.
     ///
     /// The staging buffer must be unmapped before `prepare()` runs (egui defers
@@ -464,16 +456,24 @@ impl GraphView {
 
         if let Some(buffers) = &self.buffers {
             if buffers.n_nodes > 0 {
-                let hit_test_params = self.pending_hit_test.take();
-                // Track whether we dispatched a hit test so we read it back next frame
-                if hit_test_params.is_some() {
+                let camera = if self.layout_mode.is_3d() {
+                    self.cam_3d.to_uniform()
+                } else {
+                    self.cam_2d.to_uniform()
+                };
+
+                // Fill in view_proj for the hit-test params (deferred from handle_interaction
+                // to avoid computing to_uniform() twice)
+                let mut hit_test_params = self.pending_hit_test.take();
+                if let Some(ref mut params) = hit_test_params {
+                    params.view_proj = camera.view_proj;
                     self.hit_test_in_flight = true;
                 }
 
                 let callback = GraphPaintCallback {
                     pipelines: Arc::clone(&self.pipelines),
                     buffers: Arc::clone(buffers),
-                    camera: self.camera_uniform(),
+                    camera,
                     run_compute: self.sim_running,
                     iterations_per_frame: self.iterations_per_frame,
                     hit_test_params,
@@ -584,12 +584,12 @@ impl GraphView {
             self.cam_3d.distance = self.cam_3d.distance.clamp(0.1, 10000.0);
         }
 
-        // Hover hit test — dispatch on GPU (result read back next frame)
+        // Hover hit test — store cursor/rect info; view_proj is filled in draw()
+        // to avoid computing to_uniform() twice per frame.
         if let Some(cursor) = response.hover_pos() {
             if let Some(buffers) = &self.buffers {
-                let uniform = self.cam_3d.to_uniform();
                 self.pending_hit_test = Some(HitTestParams {
-                    view_proj: uniform.view_proj,
+                    view_proj: [[0.0; 4]; 4], // filled by draw() before dispatch
                     cursor: [cursor.x, cursor.y],
                     half_size: [rect.width() / 2.0, rect.height() / 2.0],
                     rect_center: [rect.center().x, rect.center().y],
