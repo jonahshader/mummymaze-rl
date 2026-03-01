@@ -12,10 +12,12 @@ pub struct GraphPipelines {
     pub node_pipeline: wgpu::RenderPipeline,
     pub edge_pipeline: wgpu::RenderPipeline,
     pub force_pipeline: wgpu::ComputePipeline,
+    pub hit_test_pipeline: wgpu::ComputePipeline,
     pub camera_bgl: wgpu::BindGroupLayout,
     /// Shared layout for both node and edge render bind groups (2x storage read-only).
     pub storage_ro_2_bgl: wgpu::BindGroupLayout,
     pub compute_bgl: wgpu::BindGroupLayout,
+    pub hit_test_bgl: wgpu::BindGroupLayout,
 }
 
 /// Per-level GPU buffers and bind groups, recreated when the graph changes.
@@ -29,6 +31,11 @@ pub struct GraphBuffers {
     pub node_render_bind_group: wgpu::BindGroup,
     pub edge_render_bind_group: wgpu::BindGroup,
     pub compute_bind_group: wgpu::BindGroup,
+    // Hit-test compute resources
+    pub hit_test_params_buf: wgpu::Buffer,
+    pub hit_test_result_buf: wgpu::Buffer,
+    pub hit_test_staging_buf: wgpu::Buffer,
+    pub hit_test_bind_group: wgpu::BindGroup,
     pub n_nodes: u32,
     pub n_edges: u32,
 }
@@ -108,6 +115,43 @@ impl GraphPipelines {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Hit test: nodes(storage RO), params(uniform), result(storage RW)
+        let hit_test_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hit_test_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -235,13 +279,37 @@ impl GraphPipelines {
             cache: None,
         });
 
+        let hit_test_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hit_test_shader"),
+            source: wgpu::ShaderSource::Wgsl(shaders::hit_test_compute_shader().into()),
+        });
+
+        let hit_test_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("hit_test_pipeline_layout"),
+                bind_group_layouts: &[&hit_test_bgl],
+                push_constant_ranges: &[],
+            });
+
+        let hit_test_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("hit_test_pipeline"),
+                layout: Some(&hit_test_pipeline_layout),
+                module: &hit_test_shader,
+                entry_point: Some("cs_hit_test"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         GraphPipelines {
             node_pipeline,
             edge_pipeline,
             force_pipeline,
+            hit_test_pipeline,
             camera_bgl,
             storage_ro_2_bgl,
             compute_bgl,
+            hit_test_bgl,
         }
     }
 }
@@ -352,6 +420,47 @@ impl GraphBuffers {
             ],
         });
 
+        // Hit-test compute buffers
+        let hit_test_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hit_test_params_buf"),
+            size: std::mem::size_of::<HitTestParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let hit_test_result_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hit_test_result_buf"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let hit_test_staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hit_test_staging_buf"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let hit_test_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hit_test_bg"),
+            layout: &pipelines.hit_test_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: node_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: hit_test_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: hit_test_result_buf.as_entire_binding(),
+                },
+            ],
+        });
+
         GraphBuffers {
             node_buf,
             node_info_buf,
@@ -362,6 +471,10 @@ impl GraphBuffers {
             node_render_bind_group,
             edge_render_bind_group,
             compute_bind_group,
+            hit_test_params_buf,
+            hit_test_result_buf,
+            hit_test_staging_buf,
+            hit_test_bind_group,
             n_nodes,
             n_edges,
         }
@@ -375,6 +488,8 @@ pub struct GraphPaintCallback {
     pub camera: CameraUniform,
     pub run_compute: bool,
     pub iterations_per_frame: u32,
+    /// If set, dispatch the hit-test compute shader this frame.
+    pub hit_test_params: Option<HitTestParams>,
 }
 
 impl CallbackTrait for GraphPaintCallback {
@@ -405,6 +520,40 @@ impl CallbackTrait for GraphPaintCallback {
             for _ in 0..self.iterations_per_frame {
                 pass.dispatch_workgroups(workgroups, 1, 1);
             }
+        }
+
+        // Hit-test compute: find nearest node to cursor on GPU
+        if let Some(params) = &self.hit_test_params {
+            queue.write_buffer(
+                &self.buffers.hit_test_params_buf,
+                0,
+                bytemuck::bytes_of(params),
+            );
+            // Reset result to 0xFFFFFFFF (no-hit sentinel)
+            queue.write_buffer(
+                &self.buffers.hit_test_result_buf,
+                0,
+                &0xFFFF_FFFFu32.to_ne_bytes(),
+            );
+
+            let workgroups = (params.n_nodes + 63) / 64;
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("hit_test_compute"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.hit_test_pipeline);
+            pass.set_bind_group(0, &self.buffers.hit_test_bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+            drop(pass);
+
+            // Copy result to staging buffer for CPU readback
+            encoder.copy_buffer_to_buffer(
+                &self.buffers.hit_test_result_buf,
+                0,
+                &self.buffers.hit_test_staging_buf,
+                0,
+                4,
+            );
         }
 
         Vec::new()

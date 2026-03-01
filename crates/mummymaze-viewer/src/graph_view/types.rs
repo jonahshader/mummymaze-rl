@@ -50,6 +50,18 @@ pub struct SimParams {
     pub _pad: [f32; 2],
 }
 
+/// GPU hit-test parameters: cursor + projection info for the compute shader.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HitTestParams {
+    pub view_proj: [[f32; 4]; 4], // 64 bytes
+    pub cursor: [f32; 2],        // 8 bytes
+    pub half_size: [f32; 2],     // 8 bytes
+    pub rect_center: [f32; 2],   // 8 bytes
+    pub threshold_sq: f32,       // 4 bytes
+    pub n_nodes: u32,            // 4 bytes
+} // Total: 96 bytes (16-byte aligned)
+
 // Node flag bits (also used in WGSL shaders)
 pub const FLAG_START: u32 = 1;
 pub const FLAG_WIN: u32 = 2;

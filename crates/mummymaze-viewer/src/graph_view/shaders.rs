@@ -164,6 +164,51 @@ fn fs_edge(in: VsOut) -> @location(0) vec4<f32> {
     )
 }
 
+pub fn hit_test_compute_shader() -> String {
+    shader(
+        r#"
+struct HitTestParams {
+    view_proj: mat4x4<f32>,
+    cursor: vec2<f32>,
+    half_size: vec2<f32>,
+    rect_center: vec2<f32>,
+    threshold_sq: f32,
+    n_nodes: u32,
+};
+
+@group(0) @binding(0) var<storage, read> nodes: array<NodeGpu>;
+@group(0) @binding(1) var<uniform> params: HitTestParams;
+@group(0) @binding(2) var<storage, read_write> result: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn cs_hit_test(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= params.n_nodes { return; }
+
+    let pos = nodes[i].pos.xyz;
+    let clip = params.view_proj * vec4<f32>(pos, 1.0);
+    if clip.w <= 0.0 { return; }
+
+    let ndc = clip.xy / clip.w;
+    let screen = vec2<f32>(
+        params.rect_center.x + ndc.x * params.half_size.x,
+        params.rect_center.y - ndc.y * params.half_size.y,
+    );
+
+    let diff = screen - params.cursor;
+    let dist_sq = dot(diff, diff);
+    if dist_sq >= params.threshold_sq { return; }
+
+    // Pack: upper 16 bits = quantized distance, lower 16 bits = node index.
+    // atomicMin naturally picks the smallest distance, breaking ties by smallest index.
+    let dist_quant = u32(clamp(dist_sq, 0.0, 65535.0));
+    let packed = (dist_quant << 16u) | (i & 0xFFFFu);
+    atomicMin(&result, packed);
+}
+"#,
+    )
+}
+
 pub fn force_compute_shader() -> String {
     shader(
         r#"

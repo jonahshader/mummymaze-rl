@@ -5,30 +5,6 @@ use glam::{Mat4, Vec3, Vec4};
 use super::types::CameraUniform;
 
 // ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Project a world position to screen coordinates via a view-projection matrix.
-/// Returns `None` if behind camera.
-pub fn project_to_screen(
-    pos: Vec3,
-    view_proj: &Mat4,
-    rect_center: [f32; 2],
-    half_size: [f32; 2],
-) -> Option<[f32; 2]> {
-    let clip = *view_proj * Vec4::new(pos.x, pos.y, pos.z, 1.0);
-    if clip.w <= 0.0 {
-        return None;
-    }
-    let ndc_x = clip.x / clip.w;
-    let ndc_y = clip.y / clip.w;
-    Some([
-        rect_center[0] + ndc_x * half_size[0],
-        rect_center[1] - ndc_y * half_size[1],
-    ])
-}
-
-// ---------------------------------------------------------------------------
 // 2D pan/zoom camera (for BFS Layers, Radial Tree)
 // ---------------------------------------------------------------------------
 

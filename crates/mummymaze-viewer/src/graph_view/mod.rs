@@ -7,10 +7,10 @@ mod shaders;
 pub mod types;
 
 use eframe::egui;
+use eframe::wgpu;
 use egui_wgpu::{Callback, RenderState};
-use glam::{Mat4, Vec3};
 use gpu::{GraphBuffers, GraphPaintCallback, GraphPipelines};
-use math::{project_to_screen, OrbitalCamera, PanZoomCamera};
+use math::{OrbitalCamera, PanZoomCamera};
 use mummymaze::game::State;
 use mummymaze::graph::{StateGraph, StateKey};
 use mummymaze::parse::Level;
@@ -81,6 +81,10 @@ pub struct GraphView {
 
     // Hover
     hovered_node: Option<usize>,
+    /// Hit-test params to send to GPU this frame (3D mode only)
+    pending_hit_test: Option<HitTestParams>,
+    /// Whether a GPU hit-test readback is in flight from the previous frame
+    hit_test_in_flight: bool,
     /// Which level index we last built the graph for
     loaded_level_idx: Option<usize>,
 }
@@ -104,6 +108,8 @@ impl GraphView {
             sim_running: false,
             iterations_per_frame: 5,
             hovered_node: None,
+            pending_hit_test: None,
+            hit_test_in_flight: false,
             loaded_level_idx: None,
         }
     }
@@ -395,8 +401,48 @@ impl GraphView {
         }
     }
 
+    /// Synchronously read back last frame's GPU hit-test result.
+    ///
+    /// The staging buffer must be unmapped before `prepare()` runs (egui defers
+    /// the paint callback), so we do the full map→read→unmap cycle here at the
+    /// start of `draw()`, before creating the next callback.
+    fn poll_hit_test_result(&mut self) {
+        if !self.hit_test_in_flight {
+            return;
+        }
+        self.hit_test_in_flight = false;
+
+        let Some(buffers) = &self.buffers else {
+            return;
+        };
+
+        let staging = &buffers.hit_test_staging_buf;
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.render_state.device.poll(wgpu::Maintain::Wait);
+
+        let data = slice.get_mapped_range();
+        let packed = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+        drop(data);
+        staging.unmap();
+
+        if packed == 0xFFFF_FFFF {
+            self.hovered_node = None;
+        } else {
+            let idx = (packed & 0xFFFF) as usize;
+            if idx < buffers.n_nodes as usize {
+                self.hovered_node = Some(idx);
+            } else {
+                self.hovered_node = None;
+            }
+        }
+    }
+
     /// Main draw function, called from the Graph tab.
     pub fn draw(&mut self, ui: &mut egui::Ui, selected_level_idx: Option<usize>) {
+        // Read back GPU hit-test result from previous frame (3D mode)
+        self.poll_hit_test_result();
+
         self.draw_toolbar(ui, selected_level_idx);
         ui.separator();
 
@@ -418,12 +464,19 @@ impl GraphView {
 
         if let Some(buffers) = &self.buffers {
             if buffers.n_nodes > 0 {
+                let hit_test_params = self.pending_hit_test.take();
+                // Track whether we dispatched a hit test so we read it back next frame
+                if hit_test_params.is_some() {
+                    self.hit_test_in_flight = true;
+                }
+
                 let callback = GraphPaintCallback {
                     pipelines: Arc::clone(&self.pipelines),
                     buffers: Arc::clone(buffers),
                     camera: self.camera_uniform(),
                     run_compute: self.sim_running,
                     iterations_per_frame: self.iterations_per_frame,
+                    hit_test_params,
                 };
 
                 painter.add(Callback::new_paint_callback(rect, callback));
@@ -531,30 +584,22 @@ impl GraphView {
             self.cam_3d.distance = self.cam_3d.distance.clamp(0.1, 10000.0);
         }
 
-        // Hover hit test
-        self.hovered_node = None;
+        // Hover hit test — dispatch on GPU (result read back next frame)
         if let Some(cursor) = response.hover_pos() {
-            let uniform = self.cam_3d.to_uniform();
-            let vp = Mat4::from_cols_array_2d(&uniform.view_proj);
-            let cx = rect.center().x;
-            let cy = rect.center().y;
-            let half_w = rect.width() / 2.0;
-            let half_h = rect.height() / 2.0;
-
-            let mut best_dist_sq = 100.0f32;
-            for (i, pos) in self.positions.iter().enumerate() {
-                if let Some(screen) =
-                    project_to_screen(Vec3::from_array(*pos), &vp, [cx, cy], [half_w, half_h])
-                {
-                    let dx = screen[0] - cursor.x;
-                    let dy = screen[1] - cursor.y;
-                    let dist_sq = dx * dx + dy * dy;
-                    if dist_sq < best_dist_sq {
-                        best_dist_sq = dist_sq;
-                        self.hovered_node = Some(i);
-                    }
-                }
+            if let Some(buffers) = &self.buffers {
+                let uniform = self.cam_3d.to_uniform();
+                self.pending_hit_test = Some(HitTestParams {
+                    view_proj: uniform.view_proj,
+                    cursor: [cursor.x, cursor.y],
+                    half_size: [rect.width() / 2.0, rect.height() / 2.0],
+                    rect_center: [rect.center().x, rect.center().y],
+                    threshold_sq: 100.0,
+                    n_nodes: buffers.n_nodes,
+                });
             }
+        } else {
+            self.pending_hit_test = None;
+            self.hovered_node = None;
         }
     }
 
