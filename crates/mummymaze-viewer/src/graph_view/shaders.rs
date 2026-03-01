@@ -1,16 +1,16 @@
-//! Inline WGSL shader sources for graph visualization.
+//! Inline WGSL shader sources for 3D graph visualization.
 
 /// Common struct definitions shared across all shaders.
 const COMMON_STRUCTS: &str = "
 struct CameraUniform {
-    pan: vec2<f32>,
-    zoom: f32,
-    aspect: f32,
+    view_proj: mat4x4<f32>,
+    camera_right: vec4<f32>,
+    camera_up: vec4<f32>,
 };
 
 struct NodeGpu {
-    pos: vec2<f32>,
-    vel: vec2<f32>,
+    pos: vec4<f32>,
+    vel: vec4<f32>,
 };
 
 struct EdgeGpu {
@@ -64,17 +64,16 @@ fn vs_node(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     );
     let uv = quad[vid];
 
+    // Billboard: offset in camera-local right/up directions
     let r = info.radius;
-    let world = node.pos + uv * r;
+    let world = node.pos.xyz
+        + camera.camera_right.xyz * (uv.x * r)
+        + camera.camera_up.xyz * (uv.y * r);
 
-    // Camera transform: world -> clip
-    let clip = vec2<f32>(
-        (world.x - camera.pan.x) * camera.zoom / camera.aspect,
-        (world.y - camera.pan.y) * camera.zoom,
-    );
+    let clip = camera.view_proj * vec4<f32>(world, 1.0);
 
     var out: VsOut;
-    out.pos = vec4<f32>(clip, 0.0, 1.0);
+    out.pos = clip;
     out.color = info.color;
     out.local_uv = uv;
     // Outline for start or hovered nodes
@@ -120,13 +119,25 @@ struct VsOut {
 @vertex
 fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VsOut {
     let edge = edges[iid];
-    let p0 = nodes[edge.src].pos;
-    let p1 = nodes[edge.dst].pos;
+    let p0 = nodes[edge.src].pos.xyz;
+    let p1 = nodes[edge.dst].pos.xyz;
 
     let dir = p1 - p0;
     let len = length(dir);
-    let fwd = select(vec2(1.0, 0.0), dir / len, len > 0.001);
-    let perp = vec2(-fwd.y, fwd.x);
+    let fwd = select(vec3<f32>(1.0, 0.0, 0.0), dir / len, len > 0.001);
+
+    // Camera forward = cross(right, up)
+    let cam_fwd = cross(camera.camera_right.xyz, camera.camera_up.xyz);
+
+    // Perpendicular in camera-facing plane
+    var perp = cross(fwd, cam_fwd);
+    let perp_len = length(perp);
+    // Fallback to camera_up when edge points at camera (degenerate cross product)
+    if perp_len < 0.001 {
+        perp = camera.camera_up.xyz;
+    } else {
+        perp = perp / perp_len;
+    }
 
     // Thin quad along the edge
     let thickness = 0.1;
@@ -137,13 +148,10 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     let q = quad[vid];
     let world = p0 + fwd * q.x * len + perp * q.y * thickness;
 
-    let clip = vec2<f32>(
-        (world.x - camera.pan.x) * camera.zoom / camera.aspect,
-        (world.y - camera.pan.y) * camera.zoom,
-    );
+    let clip = camera.view_proj * vec4<f32>(world, 1.0);
 
     var out: VsOut;
-    out.pos = vec4<f32>(clip, 0.1, 1.0); // z=0.1: behind nodes
+    out.pos = clip;
     out.alpha = 0.2;
     return out;
 }
@@ -180,14 +188,14 @@ fn cs_force(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    var pos_i = nodes[i].pos;
-    var vel_i = nodes[i].vel;
-    var force = vec2<f32>(0.0, 0.0);
+    var pos_i = nodes[i].pos.xyz;
+    var vel_i = nodes[i].vel.xyz;
+    var force = vec3<f32>(0.0, 0.0, 0.0);
 
     // All-pairs repulsion (softened inverse-square)
     for (var j = 0u; j < params.n_nodes; j++) {
         if j == i { continue; }
-        let diff = pos_i - nodes[j].pos;
+        let diff = pos_i - nodes[j].pos.xyz;
         let dist_sq = dot(diff, diff) + 1.0;
         force += normalize(diff) / (dist_sq * 10.0 + 2.0);
     }
@@ -204,7 +212,7 @@ fn cs_force(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         if neighbor_idx == 0xFFFFFFFFu { continue; }
 
-        let diff = nodes[neighbor_idx].pos - pos_i;
+        let diff = nodes[neighbor_idx].pos.xyz - pos_i;
         let dist_sq = dot(diff, diff);
         let d6 = dist_sq * dist_sq * dist_sq * 0.05;
         let force_mag = (d6 - 1.0) / (d6 + 1.0) * 0.2 - 0.1;
@@ -223,7 +231,7 @@ fn cs_force(@builtin(global_invocation_id) gid: vec3<u32>) {
     vel_i *= params.decay;
     pos_i += vel_i;
 
-    nodes[i] = NodeGpu(pos_i, vel_i);
+    nodes[i] = NodeGpu(vec4<f32>(pos_i, 0.0), vec4<f32>(vel_i, 0.0));
 }
 "#,
     )

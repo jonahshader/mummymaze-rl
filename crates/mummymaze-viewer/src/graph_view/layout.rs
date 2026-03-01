@@ -1,20 +1,21 @@
-//! CPU layout algorithms for initial node positioning.
+//! CPU layout algorithms for initial node positioning (3D).
 
 use mummymaze::game::State;
 use rustc_hash::FxHashMap;
 
-/// Random initial positions scattered in a circle.
-pub fn random_positions(n: usize, seed: u64) -> Vec<[f32; 2]> {
+/// Random initial positions scattered in a 3D sphere.
+pub fn random_positions(n: usize, seed: u64) -> Vec<[f32; 3]> {
     let mut positions = Vec::with_capacity(n);
-    // Simple LCG pseudo-random
     let mut rng = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    let radius = (n as f32).sqrt() * 2.0;
+    let radius = (n as f32).cbrt() * 2.0;
     for _ in 0..n {
         rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let x = ((rng >> 33) as f32 / (u32::MAX as f32) - 0.5) * radius * 2.0;
         rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let y = ((rng >> 33) as f32 / (u32::MAX as f32) - 0.5) * radius * 2.0;
-        positions.push([x, y]);
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let z = ((rng >> 33) as f32 / (u32::MAX as f32) - 0.5) * radius * 2.0;
+        positions.push([x, y, z]);
     }
     positions
 }
@@ -34,14 +35,14 @@ fn group_by_depth(
     (max_depth, layers)
 }
 
-/// BFS layer layout: nodes arranged by BFS depth, spread horizontally.
+/// BFS layer layout: depth along -Y, spread in X, z=0 (flat layers).
 pub fn bfs_layer_positions(
     state_indices: &FxHashMap<State, usize>,
     depths: &FxHashMap<State, u32>,
     n: usize,
-) -> Vec<[f32; 2]> {
+) -> Vec<[f32; 3]> {
     let (_max_depth, layers) = group_by_depth(state_indices, depths);
-    let mut positions = vec![[0.0f32; 2]; n];
+    let mut positions = vec![[0.0f32; 3]; n];
 
     let spacing_y = 3.0;
     for (d, layer) in layers.iter().enumerate() {
@@ -55,27 +56,28 @@ pub fn bfs_layer_positions(
             positions[idx] = [
                 i as f32 * spacing_x - width / 2.0,
                 -(d as f32 * spacing_y), // top to bottom
+                0.0,
             ];
         }
     }
     positions
 }
 
-/// Radial tree layout: BFS tree with depth as radius.
+/// Radial tree layout: concentric rings in XZ plane, Y=0.
 pub fn radial_tree_positions(
     state_indices: &FxHashMap<State, usize>,
     depths: &FxHashMap<State, u32>,
     n: usize,
-) -> Vec<[f32; 2]> {
+) -> Vec<[f32; 3]> {
     let (_max_depth, layers) = group_by_depth(state_indices, depths);
-    let mut positions = vec![[0.0f32; 2]; n];
+    let mut positions = vec![[0.0f32; 3]; n];
 
     let ring_spacing = 3.0;
     for (d, layer) in layers.iter().enumerate() {
         if d == 0 {
             // Start node at center
             for &idx in layer {
-                positions[idx] = [0.0, 0.0];
+                positions[idx] = [0.0, 0.0, 0.0];
             }
             continue;
         }
@@ -83,7 +85,7 @@ pub fn radial_tree_positions(
         let n_in_ring = layer.len();
         for (i, &idx) in layer.iter().enumerate() {
             let angle = 2.0 * std::f32::consts::PI * (i as f32 / n_in_ring as f32);
-            positions[idx] = [radius * angle.cos(), radius * angle.sin()];
+            positions[idx] = [radius * angle.cos(), radius * angle.sin(), 0.0];
         }
     }
     positions

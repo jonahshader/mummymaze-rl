@@ -1,11 +1,12 @@
 //! GPU buffer structs for the state graph visualization.
 
 /// Per-node position and velocity (read/write by compute and vertex shaders).
+/// Uses vec4 (xyz + pad) to avoid vec3 alignment issues in storage buffers.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NodeGpu {
-    pub pos: [f32; 2],
-    pub vel: [f32; 2],
+    pub pos: [f32; 4],
+    pub vel: [f32; 4],
 }
 
 /// Per-node static info (read-only in vertex shader).
@@ -27,13 +28,13 @@ pub struct EdgeGpu {
     pub dst: u32,
 }
 
-/// Camera transform: pan + zoom.
+/// Camera transform for 3D rendering: view-projection matrix + billboard vectors.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
-    pub pan: [f32; 2],
-    pub zoom: f32,
-    pub aspect: f32,
+    pub view_proj: [[f32; 4]; 4], // 64 bytes
+    pub camera_right: [f32; 4],   // 16 bytes (w unused)
+    pub camera_up: [f32; 4],      // 16 bytes (w unused)
 }
 
 /// Force simulation parameters.

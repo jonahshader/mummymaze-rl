@@ -2,12 +2,15 @@
 
 mod gpu;
 mod layout;
+mod math;
 mod shaders;
 pub mod types;
 
 use eframe::egui;
 use egui_wgpu::{Callback, RenderState};
+use glam::{Mat4, Vec3};
 use gpu::{GraphBuffers, GraphPaintCallback, GraphPipelines};
+use math::{project_to_screen, OrbitalCamera, PanZoomCamera};
 use mummymaze::game::State;
 use mummymaze::graph::{StateGraph, StateKey};
 use mummymaze::parse::Level;
@@ -34,6 +37,10 @@ impl LayoutMode {
             LayoutMode::RadialTree => "Radial Tree",
         }
     }
+
+    fn is_3d(self) -> bool {
+        self == LayoutMode::ForceDirected
+    }
 }
 
 /// CPU-side state for the graph view.
@@ -43,7 +50,7 @@ pub struct GraphView {
     buffers: Option<Arc<GraphBuffers>>,
 
     // CPU mirror of node positions (for hit testing)
-    positions: Vec<[f32; 2]>,
+    positions: Vec<[f32; 3]>,
     /// Map from graph State to node index
     state_to_idx: FxHashMap<State, usize>,
     /// Map from node index to graph State (None for WIN/DEAD virtual nodes)
@@ -57,8 +64,10 @@ pub struct GraphView {
     /// Index of DEAD virtual node (if present)
     dead_idx: Option<usize>,
 
-    // Camera
-    camera: CameraUniform,
+    // Cameras (each mode uses its native camera)
+    cam_2d: PanZoomCamera,
+    cam_3d: OrbitalCamera,
+
     // Simulation state
     layout_mode: LayoutMode,
     sim_running: bool,
@@ -84,11 +93,8 @@ impl GraphView {
             level: None,
             win_idx: None,
             dead_idx: None,
-            camera: CameraUniform {
-                pan: [0.0, 0.0],
-                zoom: 0.1,
-                aspect: 1.0,
-            },
+            cam_2d: PanZoomCamera::new(),
+            cam_3d: OrbitalCamera::new(),
             layout_mode: LayoutMode::ForceDirected,
             sim_running: false,
             iterations_per_frame: 5,
@@ -218,31 +224,29 @@ impl GraphView {
         };
 
         // Place virtual nodes outside the layout
-        if self.layout_mode != LayoutMode::ForceDirected {
+        if !self.layout_mode.is_3d() {
             let max_depth = depths.values().copied().max().unwrap_or(0);
             let outer = (max_depth + 2) as f32 * 3.0;
             if let Some(wi) = win_idx {
-                let (x, y) = match self.layout_mode {
-                    LayoutMode::BfsLayers => (-3.0, -outer),
-                    _ => (outer, 0.0),
-                };
-                positions[wi] = [x, y];
+                match self.layout_mode {
+                    LayoutMode::BfsLayers => positions[wi] = [-3.0, -outer, 0.0],
+                    _ => positions[wi] = [outer, 0.0, 0.0],
+                }
             }
             if let Some(di) = dead_idx {
-                let (x, y) = match self.layout_mode {
-                    LayoutMode::BfsLayers => (3.0, -outer),
-                    _ => (-outer, 0.0),
-                };
-                positions[di] = [x, y];
+                match self.layout_mode {
+                    LayoutMode::BfsLayers => positions[di] = [3.0, -outer, 0.0],
+                    _ => positions[di] = [-outer, 0.0, 0.0],
+                }
             }
         }
 
-        // Build NodeGpu (positions + zero velocity)
+        // Build NodeGpu (positions + zero velocity, padded to vec4)
         let node_data: Vec<NodeGpu> = positions
             .iter()
             .map(|p| NodeGpu {
-                pos: *p,
-                vel: [0.0, 0.0],
+                pos: [p[0], p[1], p[2], 0.0],
+                vel: [0.0, 0.0, 0.0, 0.0],
             })
             .collect();
 
@@ -251,7 +255,7 @@ impl GraphView {
             .map(|i| {
                 if Some(i) == win_idx {
                     return NodeInfo {
-                        color: [0.2, 0.9, 0.2, 1.0], // bright green
+                        color: [0.2, 0.9, 0.2, 1.0],
                         flags: FLAG_WIN,
                         bfs_depth: u32::MAX,
                         radius: 1.0,
@@ -260,7 +264,7 @@ impl GraphView {
                 }
                 if Some(i) == dead_idx {
                     return NodeInfo {
-                        color: [0.7, 0.1, 0.1, 1.0], // dark red
+                        color: [0.7, 0.1, 0.1, 1.0],
                         flags: FLAG_DEAD,
                         bfs_depth: u32::MAX,
                         radius: 1.0,
@@ -278,15 +282,15 @@ impl GraphView {
                 let is_winning = win_prob > 0.0;
 
                 let color = if is_start {
-                    [0.3, 0.55, 1.0, 1.0] // blue
+                    [0.3, 0.55, 1.0, 1.0]
                 } else if !is_winning {
-                    [0.25, 0.25, 0.25, 0.8] // dark gray (dead-end)
+                    [0.25, 0.25, 0.25, 0.8]
                 } else if win_prob > 0.8 {
-                    [0.2, 0.8, 0.2, 1.0] // green
+                    [0.2, 0.8, 0.2, 1.0]
                 } else if win_prob > 0.3 {
-                    [0.9, 0.8, 0.2, 1.0] // yellow
+                    [0.9, 0.8, 0.2, 1.0]
                 } else {
-                    [0.8, 0.2, 0.2, 1.0] // red
+                    [0.8, 0.2, 0.2, 1.0]
                 };
 
                 let radius = if is_start {
@@ -331,7 +335,7 @@ impl GraphView {
             queue.write_buffer(&new_buffers.edge_buf, 0, bytemuck::cast_slice(&edges));
         }
 
-        // Upload sim params once (they never change)
+        // Upload sim params once
         let sim_params = SimParams {
             n_nodes: n_nodes as u32,
             n_edges: n_edges_u32,
@@ -353,74 +357,61 @@ impl GraphView {
         self.idx_to_state = idx_to_state;
         self.sim_running = self.layout_mode == LayoutMode::ForceDirected;
 
-        // Auto-fit camera
-        self.fit_camera();
+        // Fit the appropriate camera
+        if self.layout_mode.is_3d() {
+            self.cam_3d.fit(&self.positions);
+        } else {
+            self.cam_2d.fit(&self.positions);
+        }
     }
 
-    fn fit_camera(&mut self) {
-        if self.positions.is_empty() {
-            return;
+    fn camera_uniform(&self) -> CameraUniform {
+        if self.layout_mode.is_3d() {
+            self.cam_3d.to_uniform()
+        } else {
+            self.cam_2d.to_uniform()
         }
-        let mut min_x = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut min_y = f32::MAX;
-        let mut max_y = f32::MIN;
-        for p in &self.positions {
-            min_x = min_x.min(p[0]);
-            max_x = max_x.max(p[0]);
-            min_y = min_y.min(p[1]);
-            max_y = max_y.max(p[1]);
-        }
-        self.camera.pan = [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0];
-        let range_x = (max_x - min_x).max(1.0);
-        let range_y = (max_y - min_y).max(1.0);
-        let range = range_x.max(range_y) * 1.2; // 20% margin
-        self.camera.zoom = 2.0 / range;
     }
 
     /// Main draw function, called from the Graph tab.
     pub fn draw(&mut self, ui: &mut egui::Ui, selected_level_idx: Option<usize>) {
-        // Toolbar
         self.draw_toolbar(ui, selected_level_idx);
         ui.separator();
 
-        // Graph canvas
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
         let rect = response.rect;
 
-        // Update aspect ratio
         if rect.width() > 0.0 && rect.height() > 0.0 {
-            self.camera.aspect = rect.width() / rect.height();
+            if self.layout_mode.is_3d() {
+                self.cam_3d.aspect = rect.width() / rect.height();
+            } else {
+                self.cam_2d.aspect = rect.width() / rect.height();
+            }
         }
 
-        // Handle interaction
         self.handle_interaction(ui, &response);
 
-        // Paint background
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(25, 25, 35));
 
-        // Issue GPU paint callback
         if let Some(buffers) = &self.buffers {
             if buffers.n_nodes > 0 {
                 let callback = GraphPaintCallback {
                     pipelines: Arc::clone(&self.pipelines),
                     buffers: Arc::clone(buffers),
-                    camera: self.camera,
+                    camera: self.camera_uniform(),
                     run_compute: self.sim_running,
                     iterations_per_frame: self.iterations_per_frame,
                 };
 
                 painter.add(Callback::new_paint_callback(rect, callback));
 
-                // Request repaint while sim is running
                 if self.sim_running {
                     ui.ctx().request_repaint();
                 }
             }
         }
 
-        // Draw hover tooltip
         self.draw_hover_tooltip(ui, &response);
     }
 
@@ -448,8 +439,7 @@ impl GraphView {
                     );
                 });
             if self.layout_mode != prev_mode {
-                // Re-layout with new mode
-                self.loaded_level_idx = None; // force rebuild
+                self.loaded_level_idx = None;
             }
 
             ui.separator();
@@ -460,7 +450,7 @@ impl GraphView {
                     self.sim_running = !self.sim_running;
                 }
                 if ui.button("Reset").clicked() {
-                    self.loaded_level_idx = None; // force rebuild
+                    self.loaded_level_idx = None;
                 }
             }
 
@@ -476,59 +466,119 @@ impl GraphView {
         });
     }
 
-    /// Convert a screen position to normalized clip coordinates (Y-up).
-    fn screen_to_clip(pos: egui::Pos2, rect: egui::Rect) -> [f32; 2] {
-        [
-            (pos.x - rect.center().x) / (rect.width() / 2.0),
-            -(pos.y - rect.center().y) / (rect.height() / 2.0),
-        ]
-    }
-
-    /// Convert normalized clip coordinates to world coordinates at a given zoom level.
-    fn clip_to_world_at(&self, clip: [f32; 2], zoom: f32) -> [f32; 2] {
-        [
-            clip[0] * self.camera.aspect / zoom + self.camera.pan[0],
-            clip[1] / zoom + self.camera.pan[1],
-        ]
-    }
-
     fn handle_interaction(&mut self, ui: &egui::Ui, response: &egui::Response) {
         let rect = response.rect;
+
+        if self.layout_mode.is_3d() {
+            self.handle_3d_interaction(ui, response, rect);
+        } else {
+            self.handle_2d_interaction(ui, response, rect);
+        }
+    }
+
+    fn handle_3d_interaction(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+    ) {
+        // Orbit: left-drag
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let delta = response.drag_delta();
+            self.cam_3d.yaw -= delta.x * 0.005;
+            self.cam_3d.pitch += delta.y * 0.005;
+            let limit = std::f32::consts::FRAC_PI_2 - 0.01;
+            self.cam_3d.pitch = self.cam_3d.pitch.clamp(-limit, limit);
+        }
 
         // Pan: right-drag or middle-drag
         if response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
         {
             let delta = response.drag_delta();
-            // Convert screen delta to world delta (negate Y: screen Y-down, clip Y-up)
-            self.camera.pan[0] -=
-                delta.x * self.camera.aspect / (self.camera.zoom * rect.width() / 2.0);
-            self.camera.pan[1] += delta.y / (self.camera.zoom * rect.height() / 2.0);
+            let speed = self.cam_3d.distance * 0.002;
+            let r = self.cam_3d.right();
+            let u = self.cam_3d.up();
+            self.cam_3d.target -= r * delta.x * speed - u * delta.y * speed;
         }
 
-        // Zoom: scroll wheel, zoom toward cursor
+        // Dolly: scroll wheel
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll.abs() > 0.1 {
-            let factor = (scroll * 0.005).exp();
-            let old_zoom = self.camera.zoom;
-            self.camera.zoom *= factor;
-            self.camera.zoom = self.camera.zoom.clamp(0.001, 100.0);
-
-            // Zoom toward cursor: adjust pan so the world point under the cursor stays fixed
-            if let Some(cursor) = response.hover_pos() {
-                let clip = Self::screen_to_clip(cursor, rect);
-                let world_before = self.clip_to_world_at(clip, old_zoom);
-                let world_after = self.clip_to_world_at(clip, self.camera.zoom);
-                self.camera.pan[0] += world_before[0] - world_after[0];
-                self.camera.pan[1] += world_before[1] - world_after[1];
-            }
+            self.cam_3d.distance *= (-scroll * 0.003).exp();
+            self.cam_3d.distance = self.cam_3d.distance.clamp(0.1, 10000.0);
         }
 
         // Hover hit test
         self.hovered_node = None;
         if let Some(cursor) = response.hover_pos() {
-            let clip = Self::screen_to_clip(cursor, rect);
-            let world = self.clip_to_world_at(clip, self.camera.zoom);
+            let uniform = self.cam_3d.to_uniform();
+            let vp = Mat4::from_cols_array_2d(&uniform.view_proj);
+            let cx = rect.center().x;
+            let cy = rect.center().y;
+            let half_w = rect.width() / 2.0;
+            let half_h = rect.height() / 2.0;
+
+            let mut best_dist_sq = 100.0f32;
+            for (i, pos) in self.positions.iter().enumerate() {
+                if let Some(screen) =
+                    project_to_screen(Vec3::from_array(*pos), &vp, [cx, cy], [half_w, half_h])
+                {
+                    let dx = screen[0] - cursor.x;
+                    let dy = screen[1] - cursor.y;
+                    let dist_sq = dx * dx + dy * dy;
+                    if dist_sq < best_dist_sq {
+                        best_dist_sq = dist_sq;
+                        self.hovered_node = Some(i);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_2d_interaction(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+    ) {
+        // Pan: any drag
+        if response.dragged_by(egui::PointerButton::Primary)
+            || response.dragged_by(egui::PointerButton::Secondary)
+            || response.dragged_by(egui::PointerButton::Middle)
+        {
+            let delta = response.drag_delta();
+            self.cam_2d.pan[0] -=
+                delta.x * self.cam_2d.aspect / (self.cam_2d.zoom * rect.width() / 2.0);
+            self.cam_2d.pan[1] += delta.y / (self.cam_2d.zoom * rect.height() / 2.0);
+        }
+
+        // Zoom toward cursor
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.1 {
+            let factor = (scroll * 0.005).exp();
+            if let Some(cursor) = response.hover_pos() {
+                self.cam_2d.zoom_at(
+                    factor,
+                    [cursor.x, cursor.y],
+                    [rect.center().x, rect.center().y],
+                    [rect.width() / 2.0, rect.height() / 2.0],
+                );
+            } else {
+                self.cam_2d.zoom *= factor;
+                self.cam_2d.zoom = self.cam_2d.zoom.clamp(0.001, 100.0);
+            }
+        }
+
+        // Hover hit test (world-space, same as old 2D approach)
+        self.hovered_node = None;
+        if let Some(cursor) = response.hover_pos() {
+            let clip = PanZoomCamera::screen_to_clip(
+                [cursor.x, cursor.y],
+                [rect.center().x, rect.center().y],
+                [rect.width() / 2.0, rect.height() / 2.0],
+            );
+            let world = self.cam_2d.clip_to_world(clip, self.cam_2d.zoom);
 
             let hit_r_sq = 1.0f32;
             let mut best_dist_sq = f32::MAX;
@@ -552,11 +602,9 @@ impl GraphView {
             return;
         };
 
-        // Get the state for this node
         let state = match self.idx_to_state.get(node_idx) {
             Some(Some(s)) => *s,
             Some(None) => {
-                // Virtual node (WIN/DEAD) — identify using stored indices
                 let label = if Some(node_idx) == self.win_idx {
                     "WIN terminal"
                 } else {
@@ -576,11 +624,9 @@ impl GraphView {
         response.clone().on_hover_ui(move |ui: &mut egui::Ui| {
             ui.label(format!("Win prob: {:.1}%", win_prob * 100.0));
 
-            // Draw maze state preview
             let size = egui::Vec2::new(200.0, 200.0);
             let (resp, painter) = ui.allocate_painter(size, egui::Sense::hover());
             crate::render::draw_maze_state(&painter, resp.rect, &level, &state);
         });
     }
-
 }

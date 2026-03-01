@@ -238,6 +238,7 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_title("Mummy Maze Viewer"),
+        depth_buffer: 24,
         ..Default::default()
     };
 

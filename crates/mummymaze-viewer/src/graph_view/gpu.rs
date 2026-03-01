@@ -33,6 +33,17 @@ pub struct GraphBuffers {
     pub n_edges: u32,
 }
 
+/// Depth stencil state shared by both render pipelines.
+fn depth_stencil() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth24Plus,
+        depth_write_enabled: true,
+        depth_compare: wgpu::CompareFunction::LessEqual,
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
 impl GraphPipelines {
     pub fn new(render_state: &RenderState) -> Self {
         let device = &render_state.device;
@@ -166,7 +177,7 @@ impl GraphPipelines {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(depth_stencil()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -202,7 +213,7 @@ impl GraphPipelines {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(depth_stencil()),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -409,7 +420,7 @@ impl CallbackTrait for GraphPaintCallback {
             return;
         }
 
-        // Draw edges first (behind nodes)
+        // Draw edges first (behind nodes via depth test)
         if self.buffers.n_edges > 0 {
             render_pass.set_pipeline(&self.pipelines.edge_pipeline);
             render_pass.set_bind_group(0, &self.buffers.camera_bind_group, &[]);
