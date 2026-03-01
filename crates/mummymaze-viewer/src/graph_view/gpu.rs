@@ -3,82 +3,39 @@
 use super::shaders;
 use super::types::*;
 use eframe::egui;
-use egui_wgpu::{CallbackTrait, RenderState};
 use eframe::wgpu;
+use egui_wgpu::{CallbackTrait, RenderState};
 use std::sync::Arc;
 
-/// All GPU resources for graph rendering.
-pub struct GraphGpuResources {
-    // Buffers
+/// Device-level GPU objects created once and reused across level changes.
+pub struct GraphPipelines {
+    pub node_pipeline: wgpu::RenderPipeline,
+    pub edge_pipeline: wgpu::RenderPipeline,
+    pub force_pipeline: wgpu::ComputePipeline,
+    pub camera_bgl: wgpu::BindGroupLayout,
+    pub node_render_bgl: wgpu::BindGroupLayout,
+    pub edge_render_bgl: wgpu::BindGroupLayout,
+    pub compute_bgl: wgpu::BindGroupLayout,
+}
+
+/// Per-level GPU buffers and bind groups, recreated when the graph changes.
+pub struct GraphBuffers {
     pub node_buf: wgpu::Buffer,
     pub node_info_buf: wgpu::Buffer,
     pub edge_buf: wgpu::Buffer,
     pub camera_buf: wgpu::Buffer,
     pub sim_params_buf: wgpu::Buffer,
-
-    // Render pipelines
-    pub node_pipeline: wgpu::RenderPipeline,
-    pub edge_pipeline: wgpu::RenderPipeline,
-
-    // Compute pipeline
-    pub force_pipeline: wgpu::ComputePipeline,
-
-    // Bind groups
     pub camera_bind_group: wgpu::BindGroup,
     pub node_render_bind_group: wgpu::BindGroup,
     pub edge_render_bind_group: wgpu::BindGroup,
     pub compute_bind_group: wgpu::BindGroup,
-
-    // Counts
     pub n_nodes: u32,
     pub n_edges: u32,
 }
 
-impl GraphGpuResources {
-    pub fn new(render_state: &RenderState, n_nodes: u32, n_edges: u32) -> Self {
+impl GraphPipelines {
+    pub fn new(render_state: &RenderState) -> Self {
         let device = &render_state.device;
-
-        // Allocate buffers sized to actual data (minimum 1 element for valid bind groups)
-        let node_count = (n_nodes as u64).max(1);
-        let edge_count = (n_edges as u64).max(1);
-
-        // --- Buffers ---
-        let node_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("node_buf"),
-            size: node_count * std::mem::size_of::<NodeGpu>() as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let node_info_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("node_info_buf"),
-            size: node_count * std::mem::size_of::<NodeInfo>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let edge_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("edge_buf"),
-            size: edge_count * std::mem::size_of::<EdgeGpu>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("camera_buf"),
-            size: std::mem::size_of::<CameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let sim_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sim_params_buf"),
-            size: std::mem::size_of::<SimParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         // --- Bind group layouts ---
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -95,57 +52,28 @@ impl GraphGpuResources {
             }],
         });
 
-        let node_render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("node_render_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        let storage_ro_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
 
-        let edge_render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("edge_render_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        let node_render_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("node_render_bgl"),
+                entries: &[storage_ro_entry(0), storage_ro_entry(1)],
+            });
+
+        let edge_render_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("edge_render_bgl"),
+                entries: &[storage_ro_entry(0), storage_ro_entry(1)],
+            });
 
         let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("compute_bgl"),
@@ -183,66 +111,7 @@ impl GraphGpuResources {
             ],
         });
 
-        // --- Bind groups ---
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera_bg"),
-            layout: &camera_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buf.as_entire_binding(),
-            }],
-        });
-
-        let node_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("node_render_bg"),
-            layout: &node_render_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: node_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: node_info_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let edge_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("edge_render_bg"),
-            layout: &edge_render_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: node_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: edge_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("compute_bg"),
-            layout: &compute_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: node_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: edge_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: sim_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        // --- Render pipelines ---
+        // --- Shaders ---
         let node_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("node_shader"),
             source: wgpu::ShaderSource::Wgsl(shaders::NODE_SHADER.into()),
@@ -253,6 +122,12 @@ impl GraphGpuResources {
             source: wgpu::ShaderSource::Wgsl(shaders::EDGE_SHADER.into()),
         });
 
+        let force_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("force_shader"),
+            source: wgpu::ShaderSource::Wgsl(shaders::FORCE_COMPUTE_SHADER.into()),
+        });
+
+        // --- Pipelines ---
         let target_format = render_state.target_format;
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -339,12 +214,6 @@ impl GraphGpuResources {
             cache: None,
         });
 
-        // --- Compute pipeline ---
-        let force_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("force_shader"),
-            source: wgpu::ShaderSource::Wgsl(shaders::FORCE_COMPUTE_SHADER.into()),
-        });
-
         let compute_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("compute_pipeline_layout"),
@@ -361,28 +230,144 @@ impl GraphGpuResources {
             cache: None,
         });
 
-        GraphGpuResources {
+        GraphPipelines {
+            node_pipeline,
+            edge_pipeline,
+            force_pipeline,
+            camera_bgl,
+            node_render_bgl,
+            edge_render_bgl,
+            compute_bgl,
+        }
+    }
+}
+
+impl GraphBuffers {
+    pub fn new(
+        device: &wgpu::Device,
+        pipelines: &GraphPipelines,
+        n_nodes: u32,
+        n_edges: u32,
+    ) -> Self {
+        // Minimum 1 element for valid bind groups
+        let node_count = (n_nodes as u64).max(1);
+        let edge_count = (n_edges as u64).max(1);
+
+        let node_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("node_buf"),
+            size: node_count * std::mem::size_of::<NodeGpu>() as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let node_info_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("node_info_buf"),
+            size: node_count * std::mem::size_of::<NodeInfo>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let edge_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_buf"),
+            size: edge_count * std::mem::size_of::<EdgeGpu>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera_buf"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let sim_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sim_params_buf"),
+            size: std::mem::size_of::<SimParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera_bg"),
+            layout: &pipelines.camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buf.as_entire_binding(),
+            }],
+        });
+
+        let node_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("node_render_bg"),
+            layout: &pipelines.node_render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: node_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: node_info_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let edge_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("edge_render_bg"),
+            layout: &pipelines.edge_render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: node_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: edge_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compute_bg"),
+            layout: &pipelines.compute_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: node_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: edge_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: sim_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        GraphBuffers {
             node_buf,
             node_info_buf,
             edge_buf,
             camera_buf,
             sim_params_buf,
-            node_pipeline,
-            edge_pipeline,
-            force_pipeline,
             camera_bind_group,
             node_render_bind_group,
             edge_render_bind_group,
             compute_bind_group,
-            n_nodes: 0,
-            n_edges: 0,
+            n_nodes,
+            n_edges,
         }
     }
 }
 
 /// Paint callback that runs the force simulation + renders nodes and edges.
 pub struct GraphPaintCallback {
-    pub gpu: Arc<GraphGpuResources>,
+    pub pipelines: Arc<GraphPipelines>,
+    pub buffers: Arc<GraphBuffers>,
     pub camera: CameraUniform,
     pub sim_params: SimParams,
     pub run_compute: bool,
@@ -400,27 +385,27 @@ impl CallbackTrait for GraphPaintCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         // Upload camera uniform
         queue.write_buffer(
-            &self.gpu.camera_buf,
+            &self.buffers.camera_buf,
             0,
             bytemuck::bytes_of(&self.camera),
         );
 
         // Upload sim params and run compute
-        if self.run_compute && self.gpu.n_nodes > 0 {
+        if self.run_compute && self.buffers.n_nodes > 0 {
             queue.write_buffer(
-                &self.gpu.sim_params_buf,
+                &self.buffers.sim_params_buf,
                 0,
                 bytemuck::bytes_of(&self.sim_params),
             );
 
-            let workgroups = (self.gpu.n_nodes + 63) / 64;
+            let workgroups = (self.buffers.n_nodes + 63) / 64;
             for _ in 0..self.iterations_per_frame {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("force_compute"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.gpu.force_pipeline);
-                pass.set_bind_group(0, &self.gpu.compute_bind_group, &[]);
+                pass.set_pipeline(&self.pipelines.force_pipeline);
+                pass.set_bind_group(0, &self.buffers.compute_bind_group, &[]);
                 pass.dispatch_workgroups(workgroups, 1, 1);
             }
         }
@@ -434,22 +419,22 @@ impl CallbackTrait for GraphPaintCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         _callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        if self.gpu.n_nodes == 0 {
+        if self.buffers.n_nodes == 0 {
             return;
         }
 
         // Draw edges first (behind nodes)
-        if self.gpu.n_edges > 0 {
-            render_pass.set_pipeline(&self.gpu.edge_pipeline);
-            render_pass.set_bind_group(0, &self.gpu.camera_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.gpu.edge_render_bind_group, &[]);
-            render_pass.draw(0..6, 0..self.gpu.n_edges);
+        if self.buffers.n_edges > 0 {
+            render_pass.set_pipeline(&self.pipelines.edge_pipeline);
+            render_pass.set_bind_group(0, &self.buffers.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.buffers.edge_render_bind_group, &[]);
+            render_pass.draw(0..6, 0..self.buffers.n_edges);
         }
 
         // Draw nodes on top
-        render_pass.set_pipeline(&self.gpu.node_pipeline);
-        render_pass.set_bind_group(0, &self.gpu.camera_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.gpu.node_render_bind_group, &[]);
-        render_pass.draw(0..6, 0..self.gpu.n_nodes);
+        render_pass.set_pipeline(&self.pipelines.node_pipeline);
+        render_pass.set_bind_group(0, &self.buffers.camera_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.buffers.node_render_bind_group, &[]);
+        render_pass.draw(0..6, 0..self.buffers.n_nodes);
     }
 }

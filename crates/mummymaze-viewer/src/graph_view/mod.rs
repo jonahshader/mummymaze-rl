@@ -7,7 +7,7 @@ pub mod types;
 
 use eframe::egui;
 use egui_wgpu::{Callback, RenderState};
-use gpu::{GraphGpuResources, GraphPaintCallback};
+use gpu::{GraphBuffers, GraphPaintCallback, GraphPipelines};
 use mummymaze::game::State;
 use mummymaze::graph::{StateGraph, StateKey};
 use mummymaze::parse::Level;
@@ -36,7 +36,8 @@ impl LayoutMode {
 /// CPU-side state for the graph view.
 pub struct GraphView {
     render_state: RenderState,
-    gpu: Option<Arc<GraphGpuResources>>,
+    pipelines: Arc<GraphPipelines>,
+    buffers: Option<Arc<GraphBuffers>>,
 
     // CPU mirror of node positions (for hit testing)
     positions: Vec<[f32; 2]>,
@@ -48,6 +49,10 @@ pub struct GraphView {
     state_win_probs: FxHashMap<State, f64>,
     /// Level associated with current graph
     level: Option<Level>,
+    /// Index of WIN virtual node (if present)
+    win_idx: Option<usize>,
+    /// Index of DEAD virtual node (if present)
+    dead_idx: Option<usize>,
 
     // Camera
     camera: CameraUniform,
@@ -65,14 +70,18 @@ pub struct GraphView {
 
 impl GraphView {
     pub fn new(render_state: RenderState) -> Self {
+        let pipelines = Arc::new(GraphPipelines::new(&render_state));
         GraphView {
             render_state,
-            gpu: None,
+            pipelines,
+            buffers: None,
             positions: Vec::new(),
             state_to_idx: FxHashMap::default(),
             idx_to_state: Vec::new(),
             state_win_probs: FxHashMap::default(),
             level: None,
+            win_idx: None,
+            dead_idx: None,
             camera: CameraUniform {
                 pan: [0.0, 0.0],
                 zoom: 0.1,
@@ -137,7 +146,7 @@ impl GraphView {
             }
         }
 
-        let win_idx = if has_win {
+        self.win_idx = if has_win {
             let i = idx;
             idx_to_state.push(None);
             idx += 1;
@@ -146,7 +155,7 @@ impl GraphView {
             None
         };
 
-        let dead_idx = if has_dead {
+        self.dead_idx = if has_dead {
             let i = idx;
             idx_to_state.push(None);
             idx += 1;
@@ -154,6 +163,9 @@ impl GraphView {
         } else {
             None
         };
+
+        let win_idx = self.win_idx;
+        let dead_idx = self.dead_idx;
 
         let n_nodes = idx;
 
@@ -230,7 +242,6 @@ impl GraphView {
             .collect();
 
         // Build NodeInfo (colors, flags, radius)
-        let winning_set = mummymaze::metrics::winning_set(graph);
         let node_info: Vec<NodeInfo> = (0..n_nodes)
             .map(|i| {
                 if Some(i) == win_idx {
@@ -259,7 +270,7 @@ impl GraphView {
                     .get(&state)
                     .copied()
                     .unwrap_or(0.0);
-                let is_winning = winning_set.contains(&state);
+                let is_winning = win_prob > 0.0;
 
                 let color = if is_start {
                     [0.3, 0.55, 1.0, 1.0] // blue
@@ -296,20 +307,26 @@ impl GraphView {
             })
             .collect();
 
-        // Recreate GPU resources sized to this graph
+        // Recreate GPU buffers sized to this graph (pipelines are reused)
         let n_edges_u32 = edges.len() as u32;
-        let mut new_gpu =
-            GraphGpuResources::new(&self.render_state, n_nodes as u32, n_edges_u32);
+        let new_buffers = GraphBuffers::new(
+            &self.render_state.device,
+            &self.pipelines,
+            n_nodes as u32,
+            n_edges_u32,
+        );
         let queue = &self.render_state.queue;
-        queue.write_buffer(&new_gpu.node_buf, 0, bytemuck::cast_slice(&node_data));
-        queue.write_buffer(&new_gpu.node_info_buf, 0, bytemuck::cast_slice(&node_info));
+        queue.write_buffer(&new_buffers.node_buf, 0, bytemuck::cast_slice(&node_data));
+        queue.write_buffer(
+            &new_buffers.node_info_buf,
+            0,
+            bytemuck::cast_slice(&node_info),
+        );
         if !edges.is_empty() {
-            queue.write_buffer(&new_gpu.edge_buf, 0, bytemuck::cast_slice(&edges));
+            queue.write_buffer(&new_buffers.edge_buf, 0, bytemuck::cast_slice(&edges));
         }
-        new_gpu.n_nodes = n_nodes as u32;
-        new_gpu.n_edges = n_edges_u32;
 
-        self.gpu = Some(Arc::new(new_gpu));
+        self.buffers = Some(Arc::new(new_buffers));
         self.positions = positions;
         self.state_to_idx = state_to_idx;
         self.idx_to_state = idx_to_state;
@@ -364,11 +381,11 @@ impl GraphView {
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(25, 25, 35));
 
         // Issue GPU paint callback
-        if let Some(gpu) = &self.gpu {
-            if gpu.n_nodes > 0 {
+        if let Some(buffers) = &self.buffers {
+            if buffers.n_nodes > 0 {
                 let sim_params = SimParams {
-                    n_nodes: gpu.n_nodes,
-                    n_edges: gpu.n_edges,
+                    n_nodes: buffers.n_nodes,
+                    n_edges: buffers.n_edges,
                     repel: 1.0,
                     attract: 1.0,
                     decay: 0.92,
@@ -377,7 +394,8 @@ impl GraphView {
                 };
 
                 let callback = GraphPaintCallback {
-                    gpu: Arc::clone(gpu),
+                    pipelines: Arc::clone(&self.pipelines),
+                    buffers: Arc::clone(buffers),
                     camera: self.camera,
                     sim_params,
                     run_compute: self.sim_running,
@@ -439,14 +457,30 @@ impl GraphView {
 
             ui.separator();
 
-            let n = self.gpu.as_ref().map(|g| g.n_nodes).unwrap_or(0);
-            let e = self.gpu.as_ref().map(|g| g.n_edges).unwrap_or(0);
+            let n = self.buffers.as_ref().map(|b| b.n_nodes).unwrap_or(0);
+            let e = self.buffers.as_ref().map(|b| b.n_edges).unwrap_or(0);
             ui.label(format!("{n} nodes, {e} edges"));
 
             if self.sim_running {
                 ui.label("(simulating)");
             }
         });
+    }
+
+    /// Convert a screen position to normalized clip coordinates (Y-up).
+    fn screen_to_clip(pos: egui::Pos2, rect: egui::Rect) -> [f32; 2] {
+        [
+            (pos.x - rect.center().x) / (rect.width() / 2.0),
+            -(pos.y - rect.center().y) / (rect.height() / 2.0),
+        ]
+    }
+
+    /// Convert normalized clip coordinates to world coordinates.
+    fn clip_to_world(&self, clip: [f32; 2]) -> [f32; 2] {
+        [
+            clip[0] * self.camera.aspect / self.camera.zoom + self.camera.pan[0],
+            clip[1] / self.camera.zoom + self.camera.pan[1],
+        ]
     }
 
     fn handle_interaction(&mut self, ui: &egui::Ui, response: &egui::Response) {
@@ -473,32 +507,28 @@ impl GraphView {
 
             // Zoom toward cursor: adjust pan so the world point under the cursor stays fixed
             if let Some(cursor) = response.hover_pos() {
-                let cx = (cursor.x - rect.center().x) / (rect.width() / 2.0);
-                let cy = -(cursor.y - rect.center().y) / (rect.height() / 2.0);
-                let world_x = cx * self.camera.aspect / old_zoom + self.camera.pan[0];
-                let world_y = cy / old_zoom + self.camera.pan[1];
-                let new_world_x =
-                    cx * self.camera.aspect / self.camera.zoom + self.camera.pan[0];
-                let new_world_y = cy / self.camera.zoom + self.camera.pan[1];
-                self.camera.pan[0] += world_x - new_world_x;
-                self.camera.pan[1] += world_y - new_world_y;
+                let clip = Self::screen_to_clip(cursor, rect);
+                let world_before = [
+                    clip[0] * self.camera.aspect / old_zoom + self.camera.pan[0],
+                    clip[1] / old_zoom + self.camera.pan[1],
+                ];
+                let world_after = self.clip_to_world(clip);
+                self.camera.pan[0] += world_before[0] - world_after[0];
+                self.camera.pan[1] += world_before[1] - world_after[1];
             }
         }
 
         // Hover hit test
         self.hovered_node = None;
         if let Some(cursor) = response.hover_pos() {
-            let cx = (cursor.x - rect.center().x) / (rect.width() / 2.0);
-            let cy = -(cursor.y - rect.center().y) / (rect.height() / 2.0);
-            let world_x = cx * self.camera.aspect / self.camera.zoom + self.camera.pan[0];
-            let world_y = cy / self.camera.zoom + self.camera.pan[1];
+            let clip = Self::screen_to_clip(cursor, rect);
+            let world = self.clip_to_world(clip);
 
             let mut best_dist = f32::MAX;
             for (i, pos) in self.positions.iter().enumerate() {
-                let dx = pos[0] - world_x;
-                let dy = pos[1] - world_y;
+                let dx = pos[0] - world[0];
+                let dy = pos[1] - world[1];
                 let dist = (dx * dx + dy * dy).sqrt();
-                // Hit radius depends on zoom
                 let hit_r = 1.0;
                 if dist < hit_r && dist < best_dist {
                     best_dist = dist;
@@ -520,12 +550,11 @@ impl GraphView {
         let state = match self.idx_to_state.get(node_idx) {
             Some(Some(s)) => *s,
             Some(None) => {
-                // Virtual node (WIN/DEAD)
-                let n = self.gpu.as_ref().map(|g| g.n_nodes).unwrap_or(0);
-                let label = if node_idx + 2 >= n as usize {
-                    "DEAD terminal"
-                } else {
+                // Virtual node (WIN/DEAD) — identify using stored indices
+                let label = if Some(node_idx) == self.win_idx {
                     "WIN terminal"
+                } else {
+                    "DEAD terminal"
                 };
                 response.clone().on_hover_ui(|ui: &mut egui::Ui| {
                     ui.label(label);

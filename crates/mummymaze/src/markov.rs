@@ -22,25 +22,33 @@ pub struct MarkovResult {
     pub n_transient: usize,
 }
 
-/// Solve the absorbing Markov chain defined by the state graph.
-///
-/// Assigns uniform probability 1/k over the k valid actions at each state.
-/// Returns exact win probability and expected steps from the start state.
-pub fn analyze(graph: &StateGraph) -> Result<MarkovResult> {
+#[derive(Debug, Clone)]
+pub struct FullMarkovResult {
+    pub win_prob: f64,
+    pub expected_steps: f64,
+    pub state_win_probs: FxHashMap<State, f64>,
+}
+
+/// Internal solver result with full per-state vectors.
+struct SolveResult {
+    win_probs: Vec<f64>,
+    expected_steps: Vec<f64>,
+    start_idx: usize,
+    idx_to_state: Vec<State>,
+    n: usize,
+}
+
+/// Core Gauss-Seidel solver shared by `analyze()` and `analyze_full()`.
+fn solve_markov(graph: &StateGraph) -> Result<SolveResult> {
     let n = graph.n_transient;
-    if n == 0 {
-        return Ok(MarkovResult {
-            win_prob: 0.0,
-            expected_steps: 0.0,
-            n_transient: 0,
-        });
-    }
 
     // Map transient states to integer indices
     let mut state_to_idx: FxHashMap<State, usize> = FxHashMap::default();
+    let mut idx_to_state: Vec<State> = Vec::with_capacity(n);
     let mut idx = 0usize;
     for s in graph.transitions.keys() {
         state_to_idx.insert(*s, idx);
+        idx_to_state.push(*s);
         idx += 1;
     }
 
@@ -157,10 +165,12 @@ pub fn analyze(graph: &StateGraph) -> Result<MarkovResult> {
                     t[i] = new_val;
                 }
                 if max_diff2 < TOLERANCE {
-                    return Ok(MarkovResult {
-                        win_prob: x[start_idx],
-                        expected_steps: t[start_idx],
-                        n_transient: n,
+                    return Ok(SolveResult {
+                        win_probs: x,
+                        expected_steps: t,
+                        start_idx,
+                        idx_to_state,
+                        n,
                     });
                 }
                 if iter2 == MAX_ITERATIONS - 1 {
@@ -173,11 +183,25 @@ pub fn analyze(graph: &StateGraph) -> Result<MarkovResult> {
     Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
 }
 
-#[derive(Debug, Clone)]
-pub struct FullMarkovResult {
-    pub win_prob: f64,
-    pub expected_steps: f64,
-    pub state_win_probs: FxHashMap<State, f64>,
+/// Solve the absorbing Markov chain defined by the state graph.
+///
+/// Assigns uniform probability 1/k over the k valid actions at each state.
+/// Returns exact win probability and expected steps from the start state.
+pub fn analyze(graph: &StateGraph) -> Result<MarkovResult> {
+    let n = graph.n_transient;
+    if n == 0 {
+        return Ok(MarkovResult {
+            win_prob: 0.0,
+            expected_steps: 0.0,
+            n_transient: 0,
+        });
+    }
+    let s = solve_markov(graph)?;
+    Ok(MarkovResult {
+        win_prob: s.win_probs[s.start_idx],
+        expected_steps: s.expected_steps[s.start_idx],
+        n_transient: s.n,
+    })
 }
 
 /// Like `analyze()`, but returns per-state win probabilities for all transient states.
@@ -190,133 +214,14 @@ pub fn analyze_full(graph: &StateGraph) -> Result<FullMarkovResult> {
             state_win_probs: FxHashMap::default(),
         });
     }
-
-    // Map transient states to integer indices
-    let mut state_to_idx: FxHashMap<State, usize> = FxHashMap::default();
-    let mut idx_to_state: Vec<State> = Vec::with_capacity(n);
-    let mut idx = 0usize;
-    for s in graph.transitions.keys() {
-        state_to_idx.insert(*s, idx);
-        idx_to_state.push(*s);
-        idx += 1;
+    let s = solve_markov(graph)?;
+    let mut state_win_probs = FxHashMap::default();
+    for (i, &state) in s.idx_to_state.iter().enumerate() {
+        state_win_probs.insert(state, s.win_probs[i]);
     }
-
-    let start_idx = state_to_idx[&graph.start];
-
-    // Build sparse Q and win absorption vector (same as analyze())
-    let mut q_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    let mut win_absorb: Vec<f64> = vec![0.0; n];
-    let mut diag: Vec<f64> = vec![1.0; n];
-
-    for (s, s_idx) in &state_to_idx {
-        let action_map = &graph.transitions[s];
-        let k = action_map.len();
-        if k == 0 {
-            continue;
-        }
-        let prob = 1.0 / k as f64;
-
-        for &(_, next_key) in action_map {
-            match next_key {
-                StateKey::Win => {
-                    win_absorb[*s_idx] += prob;
-                }
-                StateKey::Dead => {}
-                StateKey::Transient(next_state) => {
-                    let j = state_to_idx[&next_state];
-                    if j == *s_idx {
-                        diag[*s_idx] -= prob;
-                    } else {
-                        q_rows[*s_idx].push((j, prob));
-                    }
-                }
-            }
-        }
-    }
-
-    let mut trapped = vec![false; n];
-    for i in 0..n {
-        if diag[i].abs() < 1e-15 {
-            trapped[i] = true;
-        }
-    }
-
-    // Solve (I-Q)x = win_absorb for win probabilities
-    let mut x = vec![0.0f64; n];
-    for _ in 0..MAX_ITERATIONS {
-        let mut max_diff = 0.0f64;
-        for i in 0..n {
-            if trapped[i] {
-                continue;
-            }
-            let mut sum = win_absorb[i];
-            for &(j, qij) in &q_rows[i] {
-                sum += qij * x[j];
-            }
-            let new_val = sum / diag[i];
-            let diff = (new_val - x[i]).abs();
-            if diff > max_diff {
-                max_diff = diff;
-            }
-            x[i] = new_val;
-        }
-        if max_diff < TOLERANCE {
-            // Solve for expected steps
-            let mut t = vec![0.0f64; n];
-            for i in 0..n {
-                if trapped[i] {
-                    t[i] = f64::INFINITY;
-                }
-            }
-
-            for iter2 in 0..MAX_ITERATIONS {
-                let mut max_diff2 = 0.0f64;
-                for i in 0..n {
-                    if trapped[i] {
-                        continue;
-                    }
-                    let mut sum = 1.0;
-                    for &(j, qij) in &q_rows[i] {
-                        if trapped[j] {
-                            sum = f64::INFINITY;
-                            break;
-                        }
-                        sum += qij * t[j];
-                    }
-                    let new_val = if sum.is_infinite() {
-                        f64::INFINITY
-                    } else {
-                        sum / diag[i]
-                    };
-                    let diff = if new_val.is_infinite() && t[i].is_infinite() {
-                        0.0
-                    } else {
-                        (new_val - t[i]).abs()
-                    };
-                    if diff > max_diff2 {
-                        max_diff2 = diff;
-                    }
-                    t[i] = new_val;
-                }
-                if max_diff2 < TOLERANCE {
-                    // Build the result map
-                    let mut state_win_probs = FxHashMap::default();
-                    for (i, &state) in idx_to_state.iter().enumerate() {
-                        state_win_probs.insert(state, x[i]);
-                    }
-
-                    return Ok(FullMarkovResult {
-                        win_prob: x[start_idx],
-                        expected_steps: t[start_idx],
-                        state_win_probs,
-                    });
-                }
-                if iter2 == MAX_ITERATIONS - 1 {
-                    return Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS));
-                }
-            }
-            unreachable!();
-        }
-    }
-    Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
+    Ok(FullMarkovResult {
+        win_prob: s.win_probs[s.start_idx],
+        expected_steps: s.expected_steps[s.start_idx],
+        state_win_probs,
+    })
 }
