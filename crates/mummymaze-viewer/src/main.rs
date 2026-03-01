@@ -1,11 +1,13 @@
 mod data;
 mod gameplay;
+mod graph_view;
 mod render;
 mod table;
 
 use data::DataStore;
 use eframe::egui;
 use gameplay::GameplayState;
+use graph_view::GraphView;
 use mummymaze::game::Action;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,16 +21,24 @@ struct App {
     store: DataStore,
     gameplay: Option<GameplayState>,
     tab: Tab,
+    graph_view: Option<GraphView>,
 }
 
 impl App {
-    fn new(maze_dir: &std::path::Path) -> Self {
+    fn new(maze_dir: &std::path::Path, cc: &eframe::CreationContext<'_>) -> Self {
         let mut store = DataStore::load_levels(maze_dir);
         store.start_analysis();
+
+        let graph_view = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|rs| GraphView::new(rs.clone()));
+
         App {
             store,
             gameplay: None,
             tab: Tab::Play,
+            graph_view,
         }
     }
 
@@ -98,10 +108,25 @@ impl App {
         }
     }
 
-    fn draw_graph_tab(&self, ui: &mut egui::Ui) {
-        ui.centered_and_justified(|ui: &mut egui::Ui| {
-            ui.heading("State graph viewer (coming soon)");
-        });
+    fn draw_graph_tab(&mut self, ui: &mut egui::Ui) {
+        let selected = self.store.selected;
+        if let (Some(gv), Some(sel)) = (&mut self.graph_view, selected) {
+            // load_level is a no-op if the level is already loaded
+            if !gv.is_loaded(sel) {
+                let row = &self.store.rows[sel];
+                let graph = mummymaze::graph::build_graph(&row.level);
+                let state_win_probs = match mummymaze::markov::analyze_full(&graph) {
+                    Ok(result) => result.state_win_probs,
+                    Err(_) => Default::default(),
+                };
+                gv.load_level(&row.level, sel, &graph, state_win_probs);
+            }
+            gv.draw(ui, selected);
+        } else {
+            ui.centered_and_justified(|ui: &mut egui::Ui| {
+                ui.heading("Select a level from the table");
+            });
+        }
     }
 
     fn draw_training_tab(&self, ui: &mut egui::Ui) {
@@ -219,7 +244,7 @@ fn main() {
     eframe::run_native(
         "Mummy Maze Viewer",
         native_options,
-        Box::new(move |_cc: &eframe::CreationContext<'_>| Ok(Box::new(App::new(&maze_dir)))),
+        Box::new(move |cc: &eframe::CreationContext<'_>| Ok(Box::new(App::new(&maze_dir, cc)))),
     )
     .expect("Failed to launch eframe");
 }

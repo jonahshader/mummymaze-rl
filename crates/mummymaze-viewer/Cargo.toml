@@ -9,6 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 mummymaze = { path = "../mummymaze", default-features = false }
-eframe = "0.31"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui-wgpu = "0.31"
+bytemuck = { version = "1", features = ["derive"] }
+rustc-hash = "2"
 rayon = "1.10"
 egui_extras = { version = "0.31", features = ["default"] }
