@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::graph::build_graph;
-use crate::markov::analyze;
+use crate::markov::MarkovChain;
 use crate::metrics;
 use crate::parse::{self, Level};
 use crate::solver;
@@ -25,16 +25,18 @@ pub struct LevelAnalysis {
 pub fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelAnalysis> {
     let bfs = solver::solve(lev);
     let graph = build_graph(lev);
-    let markov = analyze(&graph)?;
+    let chain = MarkovChain::from_graph(&graph);
+    let win_probs = chain.solve_win_probs()?;
+    let expected_steps = chain.solve_expected_steps()?;
     let diff = metrics::compute(&graph, lev, &bfs);
 
     Ok(LevelAnalysis {
         file_stem: file_stem.to_string(),
         sublevel,
         grid_size: lev.grid_size,
-        n_states: markov.n_transient,
-        win_prob: markov.win_prob,
-        expected_steps: markov.expected_steps,
+        n_states: chain.n_states(),
+        win_prob: win_probs[chain.start_idx],
+        expected_steps: expected_steps[chain.start_idx],
         bfs_moves: bfs.moves,
         difficulty: diff,
     })
