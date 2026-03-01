@@ -43,6 +43,14 @@ impl LayoutMode {
     }
 }
 
+/// What kind of node this is in the graph visualization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeKind {
+    Transient,
+    Win,
+    Dead,
+}
+
 /// CPU-side state for the graph view.
 pub struct GraphView {
     render_state: RenderState,
@@ -53,16 +61,14 @@ pub struct GraphView {
     positions: Vec<[f32; 3]>,
     /// Map from graph State to node index
     state_to_idx: FxHashMap<State, usize>,
-    /// Map from node index to graph State (None for WIN/DEAD virtual nodes)
+    /// Map from node index to graph State (terminal nodes store parent state)
     idx_to_state: Vec<Option<State>>,
+    /// Per-node classification (transient, win terminal, dead terminal)
+    node_kinds: Vec<NodeKind>,
     /// Per-state win probabilities (from analyze_full)
     state_win_probs: FxHashMap<State, f64>,
     /// Level associated with current graph
     level: Option<SharedLevel>,
-    /// Index of WIN virtual node (if present)
-    win_idx: Option<usize>,
-    /// Index of DEAD virtual node (if present)
-    dead_idx: Option<usize>,
 
     // Cameras (each mode uses its native camera)
     cam_2d: PanZoomCamera,
@@ -89,10 +95,9 @@ impl GraphView {
             positions: Vec::new(),
             state_to_idx: FxHashMap::default(),
             idx_to_state: Vec::new(),
+            node_kinds: Vec::new(),
             state_win_probs: FxHashMap::default(),
             level: None,
-            win_idx: None,
-            dead_idx: None,
             cam_2d: PanZoomCamera::new(),
             cam_3d: OrbitalCamera::new(),
             layout_mode: LayoutMode::ForceDirected,
@@ -122,57 +127,56 @@ impl GraphView {
     }
 
     fn build_from_graph(&mut self, graph: &StateGraph) {
-        // Assign indices: transient states first, then WIN and DEAD virtual nodes
         let mut state_to_idx = FxHashMap::default();
         let mut idx_to_state: Vec<Option<State>> = Vec::new();
+        let mut node_kinds: Vec<NodeKind> = Vec::new();
         let mut idx = 0usize;
 
         // Start state first
         state_to_idx.insert(graph.start, idx);
         idx_to_state.push(Some(graph.start));
+        node_kinds.push(NodeKind::Transient);
         idx += 1;
 
+        // Other transient states
         for state in graph.transitions.keys() {
             if *state != graph.start {
                 state_to_idx.insert(*state, idx);
                 idx_to_state.push(Some(*state));
+                node_kinds.push(NodeKind::Transient);
                 idx += 1;
             }
         }
 
-        // Check if we need WIN and DEAD virtual nodes
-        let mut has_win = false;
-        let mut has_dead = false;
-        for transitions in graph.transitions.values() {
+        // Create per-source terminal nodes: one WIN and/or one DEAD per source state.
+        // Maps source state → terminal node index, so we deduplicate multiple actions
+        // from the same source that lead to the same outcome.
+        let mut win_terminal_for: FxHashMap<State, usize> = FxHashMap::default();
+        let mut dead_terminal_for: FxHashMap<State, usize> = FxHashMap::default();
+
+        for (state, transitions) in &graph.transitions {
+            let mut needs_win = false;
+            let mut needs_dead = false;
             for &(_, dest) in transitions {
                 match dest {
-                    StateKey::Win => has_win = true,
-                    StateKey::Dead => has_dead = true,
+                    StateKey::Win => needs_win = true,
+                    StateKey::Dead => needs_dead = true,
                     _ => {}
                 }
             }
+            if needs_win {
+                win_terminal_for.insert(*state, idx);
+                idx_to_state.push(Some(*state)); // store parent state
+                node_kinds.push(NodeKind::Win);
+                idx += 1;
+            }
+            if needs_dead {
+                dead_terminal_for.insert(*state, idx);
+                idx_to_state.push(Some(*state)); // store parent state
+                node_kinds.push(NodeKind::Dead);
+                idx += 1;
+            }
         }
-
-        self.win_idx = if has_win {
-            let i = idx;
-            idx_to_state.push(None);
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-
-        self.dead_idx = if has_dead {
-            let i = idx;
-            idx_to_state.push(None);
-            idx += 1;
-            Some(i)
-        } else {
-            None
-        };
-
-        let win_idx = self.win_idx;
-        let dead_idx = self.dead_idx;
 
         let n_nodes = idx;
 
@@ -183,20 +187,8 @@ impl GraphView {
             for &(_, dest) in transitions {
                 let dst = match dest {
                     StateKey::Transient(ns) => state_to_idx[&ns],
-                    StateKey::Win => {
-                        if let Some(wi) = win_idx {
-                            wi
-                        } else {
-                            continue;
-                        }
-                    }
-                    StateKey::Dead => {
-                        if let Some(di) = dead_idx {
-                            di
-                        } else {
-                            continue;
-                        }
-                    }
+                    StateKey::Win => win_terminal_for[state],
+                    StateKey::Dead => dead_terminal_for[state],
                 };
                 edges.push(EdgeGpu {
                     src: src as u32,
@@ -206,37 +198,63 @@ impl GraphView {
         }
 
         // Compute BFS depths (only needed for BFS/radial layouts and node info)
-        let depths = if self.layout_mode != LayoutMode::ForceDirected {
+        let depths = if !self.layout_mode.is_3d() {
             graph.bfs_depths()
         } else {
             FxHashMap::default()
         };
 
-        // Compute positions based on layout mode
+        // Compute positions for transient nodes based on layout mode
         let mut positions = match self.layout_mode {
             LayoutMode::ForceDirected => layout::random_positions(n_nodes, 42),
             LayoutMode::BfsLayers => {
-                layout::bfs_layer_positions(&state_to_idx, &depths, n_nodes)
+                let mut pos = layout::bfs_layer_positions(&state_to_idx, &depths, n_nodes);
+                // Position terminal nodes one layer below their parent
+                let spacing_y = 3.0;
+                for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
+                    let pi = state_to_idx[&parent];
+                    let parent_pos = pos[pi];
+                    let parent_depth = depths.get(&parent).copied().unwrap_or(0);
+                    pos[ti] = [
+                        parent_pos[0],
+                        -((parent_depth + 1) as f32 * spacing_y),
+                        0.0,
+                    ];
+                }
+                pos
             }
             LayoutMode::RadialTree => {
-                layout::radial_tree_positions(&state_to_idx, &depths, n_nodes)
+                let mut pos = layout::radial_tree_positions(&state_to_idx, &depths, n_nodes);
+                // Position terminal nodes one ring out from their parent
+                let ring_spacing = 3.0;
+                for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
+                    let pi = state_to_idx[&parent];
+                    let pp = pos[pi];
+                    let parent_r = (pp[0] * pp[0] + pp[1] * pp[1]).sqrt();
+                    if parent_r > 0.001 {
+                        let scale = (parent_r + ring_spacing) / parent_r;
+                        pos[ti] = [pp[0] * scale, pp[1] * scale, 0.0];
+                    } else {
+                        // Parent at center — place terminal at first ring
+                        let angle = ti as f32 * 2.4; // golden angle spread
+                        pos[ti] = [
+                            ring_spacing * angle.cos(),
+                            ring_spacing * angle.sin(),
+                            0.0,
+                        ];
+                    }
+                }
+                pos
             }
         };
 
-        // Place virtual nodes outside the layout
+        // For 2D layouts, jitter terminals with same parent slightly so they don't overlap
         if !self.layout_mode.is_3d() {
-            let max_depth = depths.values().copied().max().unwrap_or(0);
-            let outer = (max_depth + 2) as f32 * 3.0;
-            if let Some(wi) = win_idx {
-                match self.layout_mode {
-                    LayoutMode::BfsLayers => positions[wi] = [-3.0, -outer, 0.0],
-                    _ => positions[wi] = [outer, 0.0, 0.0],
-                }
-            }
-            if let Some(di) = dead_idx {
-                match self.layout_mode {
-                    LayoutMode::BfsLayers => positions[di] = [3.0, -outer, 0.0],
-                    _ => positions[di] = [-outer, 0.0, 0.0],
+            for (&parent, &wi) in &win_terminal_for {
+                if let Some(&di) = dead_terminal_for.get(&parent) {
+                    // Both exist for same parent — offset horizontally
+                    positions[wi][0] -= 0.8;
+                    positions[di][0] += 0.8;
                 }
             }
         }
@@ -253,23 +271,26 @@ impl GraphView {
         // Build NodeInfo (colors, flags, radius)
         let node_info: Vec<NodeInfo> = (0..n_nodes)
             .map(|i| {
-                if Some(i) == win_idx {
-                    return NodeInfo {
-                        color: [0.2, 0.9, 0.2, 1.0],
-                        flags: FLAG_WIN,
-                        bfs_depth: u32::MAX,
-                        radius: 1.0,
-                        _pad: 0.0,
-                    };
-                }
-                if Some(i) == dead_idx {
-                    return NodeInfo {
-                        color: [0.7, 0.1, 0.1, 1.0],
-                        flags: FLAG_DEAD,
-                        bfs_depth: u32::MAX,
-                        radius: 1.0,
-                        _pad: 0.0,
-                    };
+                match node_kinds[i] {
+                    NodeKind::Win => {
+                        return NodeInfo {
+                            color: [0.2, 0.9, 0.2, 1.0],
+                            flags: FLAG_WIN,
+                            bfs_depth: u32::MAX,
+                            radius: 0.6,
+                            _pad: 0.0,
+                        };
+                    }
+                    NodeKind::Dead => {
+                        return NodeInfo {
+                            color: [0.7, 0.1, 0.1, 1.0],
+                            flags: FLAG_DEAD,
+                            bfs_depth: u32::MAX,
+                            radius: 0.6,
+                            _pad: 0.0,
+                        };
+                    }
+                    NodeKind::Transient => {}
                 }
 
                 let state = idx_to_state[i].unwrap();
@@ -355,6 +376,7 @@ impl GraphView {
         self.positions = positions;
         self.state_to_idx = state_to_idx;
         self.idx_to_state = idx_to_state;
+        self.node_kinds = node_kinds;
         self.sim_running = self.layout_mode == LayoutMode::ForceDirected;
 
         // Fit the appropriate camera
@@ -601,27 +623,29 @@ impl GraphView {
         let Some(ref level) = self.level else {
             return;
         };
+        let Some(&kind) = self.node_kinds.get(node_idx) else {
+            return;
+        };
 
+        // Get the state for this node (parent state for terminals)
         let state = match self.idx_to_state.get(node_idx) {
             Some(Some(s)) => *s,
-            Some(None) => {
-                let label = if Some(node_idx) == self.win_idx {
-                    "WIN terminal"
-                } else {
-                    "DEAD terminal"
-                };
-                response.clone().on_hover_ui(|ui: &mut egui::Ui| {
-                    ui.label(label);
-                });
-                return;
-            }
-            None => return,
+            _ => return,
+        };
+
+        let label = match kind {
+            NodeKind::Win => Some("WIN"),
+            NodeKind::Dead => Some("DEAD"),
+            NodeKind::Transient => None,
         };
 
         let win_prob = self.state_win_probs.get(&state).copied().unwrap_or(0.0);
         let level = Arc::clone(level);
 
         response.clone().on_hover_ui(move |ui: &mut egui::Ui| {
+            if let Some(l) = label {
+                ui.label(l);
+            }
             ui.label(format!("Win prob: {:.1}%", win_prob * 100.0));
 
             let size = egui::Vec2::new(200.0, 200.0);
