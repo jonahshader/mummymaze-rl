@@ -18,6 +18,40 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use types::*;
 
+/// Blue→White→Orange diverging gradient (t in 0..1).
+/// Avoids red/green so those are reserved exclusively for WIN/DEAD terminals.
+fn metric_color(t: f32) -> [f32; 4] {
+    // 0.0 = dark orange [0.8, 0.4, 0.15]
+    // 0.5 = near-white  [0.9, 0.9, 0.9]
+    // 1.0 = blue         [0.2, 0.5, 0.9]
+    let (r, g, b) = if t < 0.5 {
+        let s = t * 2.0; // 0..1 within orange→white
+        (
+            0.8 + 0.1 * s,
+            0.4 + 0.5 * s,
+            0.15 + 0.75 * s,
+        )
+    } else {
+        let s = (t - 0.5) * 2.0; // 0..1 within white→blue
+        (
+            0.9 - 0.7 * s,
+            0.9 - 0.4 * s,
+            0.9,
+        )
+    };
+    [r, g, b, 1.0]
+}
+
+/// Convert [f32;4] color to egui Color32.
+fn color32(c: [f32; 4]) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        (c[0] * 255.0) as u8,
+        (c[1] * 255.0) as u8,
+        (c[2] * 255.0) as u8,
+        (c[3] * 255.0) as u8,
+    )
+}
+
 /// Wraps a `Level` in an `Arc` to avoid cloning on every hover frame.
 type SharedLevel = Arc<Level>;
 
@@ -51,6 +85,33 @@ enum NodeKind {
     Dead,
 }
 
+/// Which metric to use for node coloring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMetric {
+    WinProb,
+    ExpectedSteps,
+    BfsDepth,
+    Safety,
+}
+
+impl ColorMetric {
+    fn label(self) -> &'static str {
+        match self {
+            ColorMetric::WinProb => "Win %",
+            ColorMetric::ExpectedSteps => "E[steps]",
+            ColorMetric::BfsDepth => "BFS Depth",
+            ColorMetric::Safety => "Safety",
+        }
+    }
+
+    const ALL: [ColorMetric; 4] = [
+        ColorMetric::WinProb,
+        ColorMetric::ExpectedSteps,
+        ColorMetric::BfsDepth,
+        ColorMetric::Safety,
+    ];
+}
+
 /// CPU-side state for the graph view.
 pub struct GraphView {
     render_state: RenderState,
@@ -67,10 +128,17 @@ pub struct GraphView {
     idx_to_state: Vec<Option<State>>,
     /// Per-node classification (transient, win terminal, dead terminal)
     node_kinds: Vec<NodeKind>,
-    /// Per-state win probabilities (from analyze_full)
-    state_win_probs: FxHashMap<State, f64>,
     /// Level associated with current graph
     level: Option<SharedLevel>,
+
+    // --- Node coloring ---
+    /// Per-node normalized metric values [0..1] for each ColorMetric.
+    /// Indexed as `node_metrics[metric_index][node_index]`.
+    node_metrics: Vec<Vec<f32>>,
+    /// Currently active coloring metric.
+    color_metric: ColorMetric,
+    /// Start node index (for special coloring).
+    start_node_idx: Option<usize>,
 
     // Cameras (each mode uses its native camera)
     cam_2d: PanZoomCamera,
@@ -133,8 +201,10 @@ impl GraphView {
             state_to_idx: FxHashMap::default(),
             idx_to_state: Vec::new(),
             node_kinds: Vec::new(),
-            state_win_probs: FxHashMap::default(),
             level: None,
+            node_metrics: Vec::new(),
+            color_metric: ColorMetric::WinProb,
+            start_node_idx: None,
             cam_2d: PanZoomCamera::new(),
             cam_3d: OrbitalCamera::new(),
             layout_mode: LayoutMode::ForceDirected,
@@ -169,18 +239,17 @@ impl GraphView {
         level: &Level,
         level_idx: usize,
         graph: &StateGraph,
-        state_win_probs: FxHashMap<State, f64>,
+        chain: &mummymaze::markov::MarkovChain,
     ) {
         self.loaded_level_idx = Some(level_idx);
         self.level = Some(Arc::new(level.clone()));
-        self.state_win_probs = state_win_probs;
         self.has_walk_highlight = false;
         self.current_node_idx = None;
         self.tracked_node_idx = None;
         self.tracked_node_pos = None;
         self.follow_target = None;
         self.auto_follow = true;
-        self.build_from_graph(graph);
+        self.build_from_graph(graph, chain);
     }
 
     /// Update the tracked/current node on the graph. Does NOT change auto-follow state.
@@ -266,7 +335,7 @@ impl GraphView {
         )
     }
 
-    fn build_from_graph(&mut self, graph: &StateGraph) {
+    fn build_from_graph(&mut self, graph: &StateGraph, chain: &mummymaze::markov::MarkovChain) {
         let mut state_to_idx = FxHashMap::default();
         let mut idx_to_state: Vec<Option<State>> = Vec::new();
         let mut node_kinds: Vec<NodeKind> = Vec::new();
@@ -304,13 +373,13 @@ impl GraphView {
             }
             if needs_win {
                 win_terminal_for.insert(*state, idx);
-                idx_to_state.push(Some(*state)); // store parent state
+                idx_to_state.push(Some(*state));
                 node_kinds.push(NodeKind::Win);
                 idx += 1;
             }
             if needs_dead {
                 dead_terminal_for.insert(*state, idx);
-                idx_to_state.push(Some(*state)); // store parent state
+                idx_to_state.push(Some(*state));
                 node_kinds.push(NodeKind::Dead);
                 idx += 1;
             }
@@ -345,19 +414,73 @@ impl GraphView {
         self.edge_lookup = edge_lookup;
         self.n_edges = edges.len();
 
-        // Compute BFS depths (only needed for BFS/radial layouts and node info)
-        let depths = if !self.layout_mode.is_3d() {
-            graph.bfs_depths()
-        } else {
-            FxHashMap::default()
-        };
+        // --- Compute per-node metrics ---
+        let win_probs = chain.solve_win_probs().ok().map(|v| chain.per_state_map(&v));
+        let expected_steps = chain.solve_expected_steps().ok().map(|v| chain.per_state_map(&v));
+        let depths = graph.bfs_depths();
+        let winning = mummymaze::metrics::winning_set(graph);
 
-        // Compute positions for transient nodes based on layout mode
+        // Compute per-state safety: fraction of actions leading to winnable states
+        let state_safety: FxHashMap<State, f64> = graph
+            .transitions
+            .iter()
+            .map(|(state, transitions)| {
+                (*state, mummymaze::metrics::state_safety(transitions, &winning))
+            })
+            .collect();
+
+        // Find ranges for normalization
+        let max_depth = depths.values().copied().max().unwrap_or(1).max(1) as f32;
+        let max_expected = expected_steps
+            .as_ref()
+            .map(|m| {
+                m.values()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .fold(1.0f64, f64::max)
+            })
+            .unwrap_or(1.0) as f32;
+
+        // Build normalized metric vectors (one per ColorMetric, indexed by node)
+        // Terminal nodes get sentinel values (handled specially in recolor)
+        let mut metric_win_prob = vec![0.0f32; n_nodes];
+        let mut metric_expected = vec![0.0f32; n_nodes];
+        let mut metric_depth = vec![0.0f32; n_nodes];
+        let mut metric_safety = vec![0.0f32; n_nodes];
+
+        for i in 0..n_nodes {
+            if node_kinds[i] != NodeKind::Transient {
+                continue;
+            }
+            let state = idx_to_state[i].unwrap();
+            metric_win_prob[i] = win_probs
+                .as_ref()
+                .and_then(|m| m.get(&state))
+                .copied()
+                .unwrap_or(0.0) as f32;
+            // Expected steps: invert so shorter = green, longer = red
+            let raw_expected = expected_steps
+                .as_ref()
+                .and_then(|m| m.get(&state))
+                .copied()
+                .unwrap_or(f64::INFINITY) as f32;
+            metric_expected[i] = if raw_expected.is_finite() {
+                1.0 - (raw_expected / max_expected).min(1.0)
+            } else {
+                0.0 // unreachable/infinite → worst
+            };
+            metric_depth[i] = 1.0 - (depths.get(&state).copied().unwrap_or(0) as f32 / max_depth).min(1.0);
+            metric_safety[i] = state_safety.get(&state).copied().unwrap_or(0.0) as f32;
+        }
+
+        self.node_metrics = vec![metric_win_prob, metric_expected, metric_depth, metric_safety];
+        self.start_node_idx = Some(0); // start state is always index 0
+
+        // Compute positions based on layout mode
         let mut positions = match self.layout_mode {
             LayoutMode::ForceDirected => layout::random_positions(n_nodes, 42),
             LayoutMode::BfsLayers => {
                 let mut pos = layout::bfs_layer_positions(&state_to_idx, &depths, n_nodes);
-                // Position terminal nodes one layer below their parent
                 let spacing_y = 3.0;
                 for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
                     let pi = state_to_idx[&parent];
@@ -373,7 +496,6 @@ impl GraphView {
             }
             LayoutMode::RadialTree => {
                 let mut pos = layout::radial_tree_positions(&state_to_idx, &depths, n_nodes);
-                // Position terminal nodes one ring out from their parent
                 let ring_spacing = 3.0;
                 for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
                     let pi = state_to_idx[&parent];
@@ -383,8 +505,7 @@ impl GraphView {
                         let scale = (parent_r + ring_spacing) / parent_r;
                         pos[ti] = [pp[0] * scale, pp[1] * scale, 0.0];
                     } else {
-                        // Parent at center — place terminal at first ring
-                        let angle = ti as f32 * 2.4; // golden angle spread
+                        let angle = ti as f32 * 2.4;
                         pos[ti] = [
                             ring_spacing * angle.cos(),
                             ring_spacing * angle.sin(),
@@ -400,14 +521,13 @@ impl GraphView {
         if !self.layout_mode.is_3d() {
             for (&parent, &wi) in &win_terminal_for {
                 if let Some(&di) = dead_terminal_for.get(&parent) {
-                    // Both exist for same parent — offset horizontally
                     positions[wi][0] -= 0.8;
                     positions[di][0] += 0.8;
                 }
             }
         }
 
-        // Build NodeGpu (positions + zero velocity, padded to vec4)
+        // Build NodeGpu (positions + zero velocity)
         let node_data: Vec<NodeGpu> = positions
             .iter()
             .map(|p| NodeGpu {
@@ -416,76 +536,7 @@ impl GraphView {
             })
             .collect();
 
-        // Build NodeInfo (colors, flags, radius)
-        let node_info: Vec<NodeInfo> = (0..n_nodes)
-            .map(|i| {
-                match node_kinds[i] {
-                    NodeKind::Win => {
-                        return NodeInfo {
-                            color: [0.2, 0.9, 0.2, 1.0],
-                            flags: FLAG_WIN,
-                            bfs_depth: u32::MAX,
-                            radius: 0.6,
-                            _pad: 0.0,
-                        };
-                    }
-                    NodeKind::Dead => {
-                        return NodeInfo {
-                            color: [0.7, 0.1, 0.1, 1.0],
-                            flags: FLAG_DEAD,
-                            bfs_depth: u32::MAX,
-                            radius: 0.6,
-                            _pad: 0.0,
-                        };
-                    }
-                    NodeKind::Transient => {}
-                }
-
-                let state = idx_to_state[i].unwrap();
-                let is_start = state == graph.start;
-                let win_prob = self
-                    .state_win_probs
-                    .get(&state)
-                    .copied()
-                    .unwrap_or(0.0);
-                let is_winning = win_prob > 0.0;
-
-                let color = if is_start {
-                    [0.3, 0.55, 1.0, 1.0]
-                } else if !is_winning {
-                    [0.25, 0.25, 0.25, 0.8]
-                } else if win_prob > 0.8 {
-                    [0.2, 0.8, 0.2, 1.0]
-                } else if win_prob > 0.3 {
-                    [0.9, 0.8, 0.2, 1.0]
-                } else {
-                    [0.8, 0.2, 0.2, 1.0]
-                };
-
-                let radius = if is_start {
-                    0.8
-                } else if !is_winning {
-                    0.35
-                } else {
-                    0.5
-                };
-
-                let mut flags = 0u32;
-                if is_start {
-                    flags |= FLAG_START;
-                }
-
-                NodeInfo {
-                    color,
-                    flags,
-                    bfs_depth: depths.get(&state).copied().unwrap_or(u32::MAX),
-                    radius,
-                    _pad: 0.0,
-                }
-            })
-            .collect();
-
-        // Recreate GPU buffers sized to this graph (pipelines are reused)
+        // Recreate GPU buffers sized to this graph
         let n_edges_u32 = edges.len() as u32;
         let new_buffers = GraphBuffers::new(
             &self.render_state.device,
@@ -495,11 +546,6 @@ impl GraphView {
         );
         let queue = &self.render_state.queue;
         queue.write_buffer(&new_buffers.node_buf, 0, bytemuck::cast_slice(&node_data));
-        queue.write_buffer(
-            &new_buffers.node_info_buf,
-            0,
-            bytemuck::cast_slice(&node_info),
-        );
         if !edges.is_empty() {
             queue.write_buffer(&new_buffers.edge_buf, 0, bytemuck::cast_slice(&edges));
         }
@@ -527,12 +573,94 @@ impl GraphView {
         self.node_kinds = node_kinds;
         self.sim_running = self.layout_mode == LayoutMode::ForceDirected;
 
+        // Upload initial node colors based on active metric
+        self.recolor_nodes();
+
         // Fit the appropriate camera
         if self.layout_mode.is_3d() {
             self.cam_3d.fit(&self.initial_positions);
         } else {
             self.cam_2d.fit(&self.initial_positions);
         }
+    }
+
+    /// Recompute node colors from the active metric and upload to GPU.
+    fn recolor_nodes(&self) {
+        let Some(buffers) = &self.buffers else {
+            return;
+        };
+        let n_nodes = buffers.n_nodes as usize;
+        let metric_idx = self.color_metric as usize;
+        let values = match self.node_metrics.get(metric_idx) {
+            Some(v) => v,
+            None => return,
+        };
+        let start_idx = self.start_node_idx.unwrap_or(usize::MAX);
+
+        let node_info: Vec<NodeInfo> = (0..n_nodes)
+            .map(|i| {
+                match self.node_kinds[i] {
+                    NodeKind::Win => {
+                        return NodeInfo {
+                            color: [0.2, 0.9, 0.2, 1.0],
+                            flags: FLAG_WIN,
+                            bfs_depth: u32::MAX,
+                            radius: 0.6,
+                            _pad: 0.0,
+                        };
+                    }
+                    NodeKind::Dead => {
+                        return NodeInfo {
+                            color: [0.7, 0.1, 0.1, 1.0],
+                            flags: FLAG_DEAD,
+                            bfs_depth: u32::MAX,
+                            radius: 0.6,
+                            _pad: 0.0,
+                        };
+                    }
+                    NodeKind::Transient => {}
+                }
+
+                let t = values[i];
+                let is_start = i == start_idx;
+                let is_zero = t <= 0.0;
+
+                let color = if is_start {
+                    [0.3, 0.55, 1.0, 1.0]
+                } else if is_zero {
+                    [0.25, 0.25, 0.25, 0.8]
+                } else {
+                    metric_color(t)
+                };
+
+                let radius = if is_start {
+                    0.8
+                } else if is_zero {
+                    0.35
+                } else {
+                    0.5
+                };
+
+                let mut flags = 0u32;
+                if is_start {
+                    flags |= FLAG_START;
+                }
+
+                NodeInfo {
+                    color,
+                    flags,
+                    bfs_depth: 0,
+                    radius,
+                    _pad: 0.0,
+                }
+            })
+            .collect();
+
+        self.render_state.queue.write_buffer(
+            &buffers.node_info_buf,
+            0,
+            bytemuck::cast_slice(&node_info),
+        );
     }
 
     /// Synchronously read back last frame's GPU hit-test result.
@@ -654,8 +782,10 @@ impl GraphView {
         self.draw_toolbar(ui, selected_level_idx);
         ui.separator();
 
-        let available = ui.available_size();
-        let (response, painter) = ui.allocate_painter(available, egui::Sense::click_and_drag());
+        // Clamp to clip rect so toolbar overflow doesn't inflate the painter width
+        let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+        let (response, painter) =
+            ui.allocate_painter(available.size(), egui::Sense::click_and_drag());
         let rect = response.rect;
 
         if rect.width() > 0.0 && rect.height() > 0.0 {
@@ -769,6 +899,42 @@ impl GraphView {
 
             if self.sim_running {
                 ui.label("(simulating)");
+            }
+
+            ui.separator();
+
+            // Color metric dropdown + gradient bar
+            ui.label("Color:");
+            let prev_metric = self.color_metric;
+            egui::ComboBox::from_id_salt("color_metric")
+                .selected_text(self.color_metric.label())
+                .show_ui(ui, |ui: &mut egui::Ui| {
+                    for m in ColorMetric::ALL {
+                        ui.selectable_value(&mut self.color_metric, m, m.label());
+                    }
+                });
+            if self.color_metric != prev_metric {
+                self.recolor_nodes();
+            }
+
+            // Gradient bar
+            let bar_width = 60.0;
+            let bar_height = 8.0;
+            let (bar_rect, _) = ui.allocate_exact_size(
+                egui::Vec2::new(bar_width, bar_height),
+                egui::Sense::hover(),
+            );
+            let steps = 16;
+            let step_w = bar_width / steps as f32;
+            for s in 0..steps {
+                let t = s as f32 / (steps - 1) as f32;
+                let c = color32(metric_color(t));
+                let x0 = bar_rect.min.x + s as f32 * step_w;
+                let seg = egui::Rect::from_min_size(
+                    egui::Pos2::new(x0, bar_rect.min.y),
+                    egui::Vec2::new(step_w, bar_height),
+                );
+                ui.painter().rect_filled(seg, 0.0, c);
             }
         });
     }
@@ -931,7 +1097,13 @@ impl GraphView {
             NodeKind::Transient => None,
         };
 
-        let win_prob = self.state_win_probs.get(&state).copied().unwrap_or(0.0);
+        // Win% is metric index 0 (WinProb), get raw value for tooltip
+        let win_prob = self
+            .node_metrics
+            .first()
+            .and_then(|v| v.get(node_idx))
+            .copied()
+            .unwrap_or(0.0);
         let level = Arc::clone(level);
 
         response.clone().on_hover_ui(move |ui: &mut egui::Ui| {

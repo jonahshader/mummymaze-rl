@@ -46,8 +46,33 @@ pub fn compute(graph: &StateGraph, lev: &Level, solve: &SolveResult) -> Difficul
     }
 }
 
+/// Whether a transition destination leads to a winnable state.
+pub fn is_winnable(dest: StateKey, winning: &FxHashSet<State>) -> bool {
+    match dest {
+        StateKey::Win => true,
+        StateKey::Transient(ns) => winning.contains(&ns),
+        StateKey::Dead => false,
+    }
+}
+
+/// Compute the safety of a state: fraction of actions leading to winnable states.
+pub fn state_safety(
+    transitions: &[(Action, StateKey)],
+    winning: &FxHashSet<State>,
+) -> f64 {
+    let total = transitions.len() as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+    let safe = transitions
+        .iter()
+        .filter(|&&(_, dest)| is_winnable(dest, winning))
+        .count() as f64;
+    safe / total
+}
+
 /// Backward BFS from WIN to find all states that can reach a win.
-fn winning_set(graph: &StateGraph) -> FxHashSet<State> {
+pub fn winning_set(graph: &StateGraph) -> FxHashSet<State> {
     // Build reverse adjacency: for each transient destination, record the source.
     let mut reverse: FxHashMap<State, Vec<State>> = FxHashMap::default();
     let mut win_predecessors: Vec<State> = Vec::new();
@@ -186,18 +211,7 @@ fn replay_path_metrics(
 
         // Path safety: fraction of actions leading to winnable states
         if let Some(transitions) = graph.transitions.get(&state) {
-            let total = transitions.len() as f64;
-            if total > 0.0 {
-                let safe = transitions
-                    .iter()
-                    .filter(|&&(_a, dest)| match dest {
-                        StateKey::Win => true,
-                        StateKey::Transient(ns) => winning.contains(&ns),
-                        StateKey::Dead => false,
-                    })
-                    .count() as f64;
-                total_safety += safe / total;
-            }
+            total_safety += state_safety(transitions, winning);
         }
 
         // Advance state

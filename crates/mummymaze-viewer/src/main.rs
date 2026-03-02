@@ -47,11 +47,7 @@ impl App {
             if !gv.is_loaded(idx) {
                 let graph = mummymaze::graph::build_graph(&row.level);
                 let chain = mummymaze::markov::MarkovChain::from_graph(&graph);
-                let state_win_probs = match chain.solve_win_probs() {
-                    Ok(probs) => chain.per_state_map(&probs),
-                    Err(_) => Default::default(),
-                };
-                gv.load_level(&row.level, idx, &graph, state_win_probs);
+                gv.load_level(&row.level, idx, &graph, &chain);
                 self.graph = Some(graph);
             }
         }
@@ -77,11 +73,7 @@ impl App {
         let row = &self.store.rows[sel];
         let graph = mummymaze::graph::build_graph(&row.level);
         let chain = mummymaze::markov::MarkovChain::from_graph(&graph);
-        let state_win_probs = match chain.solve_win_probs() {
-            Ok(probs) => chain.per_state_map(&probs),
-            Err(_) => Default::default(),
-        };
-        gv.load_level(&row.level, sel, &graph, state_win_probs);
+        gv.load_level(&row.level, sel, &graph, &chain);
         self.graph = Some(graph);
     }
 
