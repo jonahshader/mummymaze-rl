@@ -50,12 +50,16 @@ struct VsOut {
     @location(0) color: vec4<f32>,
     @location(1) local_uv: vec2<f32>,
     @location(2) outline: f32,
+    @location(3) is_current: f32,
 };
 
 @vertex
 fn vs_node(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VsOut {
     let node = nodes[iid];
     let info = node_info[iid];
+
+    // current_node_idx is packed into camera_right.w as bitcast u32
+    let current_node_idx = bitcast<u32>(camera.camera_right.w);
 
     // Unit quad: 2 triangles, 6 vertices
     var quad = array<vec2<f32>, 6>(
@@ -78,6 +82,7 @@ fn vs_node(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     out.local_uv = uv;
     // Outline for start or hovered nodes
     out.outline = select(0.0, 1.0, (info.flags & (FLAG_START | FLAG_HOVERED)) != 0u);
+    out.is_current = select(0.0, 1.0, iid == current_node_idx);
     return out;
 }
 
@@ -92,10 +97,16 @@ fn fs_node(in: VsOut) -> @location(0) vec4<f32> {
     var col = in.color;
     col.a *= aa;
 
-    // White outline ring for flagged nodes
+    // White outline ring for start/hovered nodes
     if in.outline > 0.5 {
         let ring = smoothstep(0.6, 0.7, dist) * (1.0 - smoothstep(0.85, 1.0, dist));
         col = mix(col, vec4<f32>(1.0, 1.0, 1.0, col.a), ring * 0.8);
+    }
+
+    // Blue outline ring for current game state node
+    if in.is_current > 0.5 {
+        let ring = smoothstep(0.55, 0.65, dist) * (1.0 - smoothstep(0.8, 0.9, dist));
+        col = mix(col, vec4<f32>(0.3, 0.7, 1.0, 1.0), ring * 0.9);
     }
 
     return col;
@@ -110,10 +121,12 @@ pub fn edge_shader() -> String {
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<storage, read> nodes: array<NodeGpu>;
 @group(1) @binding(1) var<storage, read> edges: array<EdgeGpu>;
+@group(1) @binding(2) var<storage, read> highlights: array<u32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) alpha: f32,
+    @location(1) highlight: f32,
 };
 
 @vertex
@@ -121,6 +134,7 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     let edge = edges[iid];
     let p0 = nodes[edge.src].pos.xyz;
     let p1 = nodes[edge.dst].pos.xyz;
+    let is_highlighted = highlights[iid];
 
     let dir = p1 - p0;
     let len = length(dir);
@@ -139,8 +153,8 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
         perp = perp / perp_len;
     }
 
-    // Thin quad along the edge
-    let thickness = 0.1;
+    // Highlighted edges are thicker
+    let thickness = select(0.1, 0.2, is_highlighted != 0u);
     var quad = array<vec2<f32>, 6>(
         vec2(0.0, -1.0), vec2(1.0, -1.0), vec2(0.0, 1.0),
         vec2(0.0, 1.0),  vec2(1.0, -1.0), vec2(1.0, 1.0),
@@ -152,12 +166,16 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 
     var out: VsOut;
     out.pos = clip;
-    out.alpha = 0.2;
+    out.alpha = select(0.2, 0.6, is_highlighted != 0u);
+    out.highlight = f32(is_highlighted);
     return out;
 }
 
 @fragment
 fn fs_edge(in: VsOut) -> @location(0) vec4<f32> {
+    if in.highlight > 0.5 {
+        return vec4<f32>(0.3, 0.7, 1.0, in.alpha);
+    }
     return vec4<f32>(0.5, 0.5, 0.5, in.alpha);
 }
 "#,

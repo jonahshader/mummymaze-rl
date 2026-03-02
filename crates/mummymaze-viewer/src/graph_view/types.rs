@@ -29,11 +29,12 @@ pub struct EdgeGpu {
 }
 
 /// Camera transform for 3D rendering: view-projection matrix + billboard vectors.
+/// `camera_right.w` carries the current node index (as f32-reinterpreted u32).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4], // 64 bytes
-    pub camera_right: [f32; 4],   // 16 bytes (w unused)
+    pub camera_right: [f32; 4],   // 16 bytes (w = current_node_idx bits)
     pub camera_up: [f32; 4],      // 16 bytes (w unused)
 }
 

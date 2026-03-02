@@ -14,8 +14,10 @@ pub struct GraphPipelines {
     pub force_pipeline: wgpu::ComputePipeline,
     pub hit_test_pipeline: wgpu::ComputePipeline,
     pub camera_bgl: wgpu::BindGroupLayout,
-    /// Shared layout for both node and edge render bind groups (2x storage read-only).
+    /// Shared layout for node render bind group (2x storage read-only).
     pub storage_ro_2_bgl: wgpu::BindGroupLayout,
+    /// Layout for edge render bind group (3x storage read-only: nodes, edges, highlights).
+    pub edge_render_bgl: wgpu::BindGroupLayout,
     pub compute_bgl: wgpu::BindGroupLayout,
     pub hit_test_bgl: wgpu::BindGroupLayout,
 }
@@ -25,6 +27,7 @@ pub struct GraphBuffers {
     pub node_buf: wgpu::Buffer,
     pub node_info_buf: wgpu::Buffer,
     pub edge_buf: wgpu::Buffer,
+    pub edge_highlight_buf: wgpu::Buffer,
     pub camera_buf: wgpu::Buffer,
     pub sim_params_buf: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
@@ -36,6 +39,8 @@ pub struct GraphBuffers {
     pub hit_test_result_buf: wgpu::Buffer,
     pub hit_test_staging_buf: wgpu::Buffer,
     pub hit_test_bind_group: wgpu::BindGroup,
+    // Tracked node readback
+    pub tracked_node_staging_buf: wgpu::Buffer,
     pub n_nodes: u32,
     pub n_edges: u32,
 }
@@ -85,6 +90,17 @@ impl GraphPipelines {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("storage_ro_2_bgl"),
                 entries: &[storage_ro_entry(0), storage_ro_entry(1)],
+            });
+
+        // Edge render: nodes(0), edges(1), highlights(2) — all storage read-only
+        let edge_render_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("edge_render_bgl"),
+                entries: &[
+                    storage_ro_entry(0),
+                    storage_ro_entry(1),
+                    storage_ro_entry(2),
+                ],
             });
 
         let compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -230,7 +246,7 @@ impl GraphPipelines {
         let edge_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("edge_pipeline_layout"),
-                bind_group_layouts: &[&camera_bgl, &storage_ro_2_bgl],
+                bind_group_layouts: &[&camera_bgl, &edge_render_bgl],
                 push_constant_ranges: &[],
             });
 
@@ -308,6 +324,7 @@ impl GraphPipelines {
             hit_test_pipeline,
             camera_bgl,
             storage_ro_2_bgl,
+            edge_render_bgl,
             compute_bgl,
             hit_test_bgl,
         }
@@ -344,6 +361,14 @@ impl GraphBuffers {
         let edge_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("edge_buf"),
             size: edge_count * std::mem::size_of::<EdgeGpu>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Edge highlight buffer: one u32 per edge (0 = normal, 1 = highlighted)
+        let edge_highlight_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge_highlight_buf"),
+            size: edge_count * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -388,7 +413,7 @@ impl GraphBuffers {
 
         let edge_render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("edge_render_bg"),
-            layout: &pipelines.storage_ro_2_bgl,
+            layout: &pipelines.edge_render_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -397,6 +422,10 @@ impl GraphBuffers {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: edge_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: edge_highlight_buf.as_entire_binding(),
                 },
             ],
         });
@@ -461,10 +490,19 @@ impl GraphBuffers {
             ],
         });
 
+        // Tracked node position readback staging buffer (16 bytes = vec4<f32>)
+        let tracked_node_staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tracked_node_staging_buf"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         GraphBuffers {
             node_buf,
             node_info_buf,
             edge_buf,
+            edge_highlight_buf,
             camera_buf,
             sim_params_buf,
             camera_bind_group,
@@ -475,6 +513,7 @@ impl GraphBuffers {
             hit_test_result_buf,
             hit_test_staging_buf,
             hit_test_bind_group,
+            tracked_node_staging_buf,
             n_nodes,
             n_edges,
         }
@@ -490,6 +529,8 @@ pub struct GraphPaintCallback {
     pub iterations_per_frame: u32,
     /// If set, dispatch the hit-test compute shader this frame.
     pub hit_test_params: Option<HitTestParams>,
+    /// If set, copy this node's position to the tracked node staging buffer.
+    pub tracked_node_idx: Option<u32>,
 }
 
 impl CallbackTrait for GraphPaintCallback {
@@ -553,6 +594,18 @@ impl CallbackTrait for GraphPaintCallback {
                 &self.buffers.hit_test_staging_buf,
                 0,
                 4,
+            );
+        }
+
+        // Copy tracked node position to staging buffer for CPU readback
+        if let Some(idx) = self.tracked_node_idx {
+            let offset = idx as u64 * std::mem::size_of::<NodeGpu>() as u64;
+            encoder.copy_buffer_to_buffer(
+                &self.buffers.node_buf,
+                offset,
+                &self.buffers.tracked_node_staging_buf,
+                0,
+                16, // copy first 16 bytes (pos vec4)
             );
         }
 

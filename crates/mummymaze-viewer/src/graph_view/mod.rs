@@ -11,7 +11,7 @@ use eframe::wgpu;
 use egui_wgpu::{Callback, RenderState};
 use gpu::{GraphBuffers, GraphPaintCallback, GraphPipelines};
 use math::{OrbitalCamera, PanZoomCamera};
-use mummymaze::game::State;
+use mummymaze::game::{Action, State};
 use mummymaze::graph::{StateGraph, StateKey};
 use mummymaze::parse::Level;
 use rustc_hash::FxHashMap;
@@ -57,8 +57,10 @@ pub struct GraphView {
     pipelines: Arc<GraphPipelines>,
     buffers: Option<Arc<GraphBuffers>>,
 
-    // CPU mirror of node positions (for hit testing)
-    positions: Vec<[f32; 3]>,
+    /// Initial node positions from layout (not updated by GPU force simulation).
+    /// Accurate for 2D layouts (BFS/Radial); stale for force-directed after first frame.
+    /// Used for: 2D hit-testing, initial camera fitting.
+    initial_positions: Vec<[f32; 3]>,
     /// Map from graph State to node index
     state_to_idx: FxHashMap<State, usize>,
     /// Map from node index to graph State (terminal nodes store parent state)
@@ -87,6 +89,37 @@ pub struct GraphView {
     hit_test_in_flight: bool,
     /// Which level index we last built the graph for
     loaded_level_idx: Option<usize>,
+
+    // --- Tracked node / auto-follow ---
+    /// Index of the node being tracked (current game state)
+    tracked_node_idx: Option<usize>,
+    /// Whether a GPU readback for tracked node position is in flight
+    tracked_node_in_flight: bool,
+    /// Last readback result for tracked node position (3D mode)
+    tracked_node_pos: Option<[f32; 3]>,
+    /// Whether camera auto-follows the tracked node
+    auto_follow: bool,
+    /// Smoothed follow target position
+    follow_target: Option<[f32; 3]>,
+    /// Whether the follow lerp still needs frames to converge
+    follow_animating: bool,
+
+    // --- Current node index (for shader highlight) ---
+    current_node_idx: Option<u32>,
+
+    // --- Walk edge highlighting ---
+    /// Lookup from (src_node_idx, dst_node_idx) to edge indices in the edge buffer
+    edge_lookup: FxHashMap<(u32, u32), Vec<usize>>,
+    /// Number of edges (for sizing highlight buffer)
+    n_edges: usize,
+    /// Whether highlight data has been uploaded and needs display
+    has_walk_highlight: bool,
+
+    // --- Click handling ---
+    /// Node clicked this frame (set by handle_interaction, consumed by main.rs)
+    clicked_node: Option<usize>,
+    /// Whether a click occurred this frame on the graph viewport
+    click_pending: bool,
 }
 
 impl GraphView {
@@ -96,7 +129,7 @@ impl GraphView {
             render_state,
             pipelines,
             buffers: None,
-            positions: Vec::new(),
+            initial_positions: Vec::new(),
             state_to_idx: FxHashMap::default(),
             idx_to_state: Vec::new(),
             node_kinds: Vec::new(),
@@ -111,6 +144,18 @@ impl GraphView {
             pending_hit_test: None,
             hit_test_in_flight: false,
             loaded_level_idx: None,
+            tracked_node_idx: None,
+            tracked_node_in_flight: false,
+            tracked_node_pos: None,
+            auto_follow: true,
+            follow_target: None,
+            follow_animating: false,
+            current_node_idx: None,
+            edge_lookup: FxHashMap::default(),
+            n_edges: 0,
+            has_walk_highlight: false,
+            clicked_node: None,
+            click_pending: false,
         }
     }
 
@@ -129,7 +174,89 @@ impl GraphView {
         self.loaded_level_idx = Some(level_idx);
         self.level = Some(Arc::new(level.clone()));
         self.state_win_probs = state_win_probs;
+        self.has_walk_highlight = false;
+        self.current_node_idx = None;
+        self.tracked_node_idx = None;
+        self.tracked_node_pos = None;
+        self.follow_target = None;
+        self.auto_follow = true;
         self.build_from_graph(graph);
+    }
+
+    /// Set the current game state node on the graph (called after moves/undo/reset).
+    pub fn set_current_state(&mut self, state: State) {
+        if let Some(&idx) = self.state_to_idx.get(&state) {
+            self.tracked_node_idx = Some(idx);
+            self.current_node_idx = Some(idx as u32);
+            self.auto_follow = true;
+            self.follow_animating = true;
+        } else {
+            self.tracked_node_idx = None;
+            self.current_node_idx = None;
+        }
+    }
+
+    /// Update walk highlight from gameplay history.
+    pub fn update_walk_highlight(&mut self, history: &[(Action, State)], current_state: State) {
+        if self.n_edges == 0 {
+            return;
+        }
+
+        let mut highlight_data = vec![0u32; self.n_edges];
+
+        // Build pairs of consecutive states from the walk
+        // history stores (action, state_before_action)
+        // So the walk is: history[0].1 -> history[1].1 -> ... -> current_state
+        for i in 0..history.len() {
+            let src_state = history[i].1;
+            let dst_state = if i + 1 < history.len() {
+                history[i + 1].1
+            } else {
+                current_state
+            };
+
+            let src_idx = self.state_to_idx.get(&src_state).copied();
+            let dst_idx = self.state_to_idx.get(&dst_state).copied();
+
+            if let (Some(si), Some(di)) = (src_idx, dst_idx) {
+                let key = (si as u32, di as u32);
+                if let Some(edge_indices) = self.edge_lookup.get(&key) {
+                    for &ei in edge_indices {
+                        if ei < highlight_data.len() {
+                            highlight_data[ei] = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Upload to GPU
+        if let Some(ref buffers) = self.buffers {
+            self.render_state.queue.write_buffer(
+                &buffers.edge_highlight_buf,
+                0,
+                bytemuck::cast_slice(&highlight_data),
+            );
+            self.has_walk_highlight = true;
+        }
+    }
+
+    /// Take the clicked node index (consumed once).
+    pub fn take_clicked_node(&mut self) -> Option<usize> {
+        self.clicked_node.take()
+    }
+
+    /// Get the state for a node index (parent state for terminals).
+    pub fn node_state(&self, idx: usize) -> Option<State> {
+        self.idx_to_state.get(idx).copied().flatten()
+    }
+
+    /// Check if a node is a terminal (Win/Dead).
+    pub fn is_terminal(&self, idx: usize) -> bool {
+        matches!(
+            self.node_kinds.get(idx),
+            Some(NodeKind::Win) | Some(NodeKind::Dead)
+        )
     }
 
     fn build_from_graph(&mut self, graph: &StateGraph) {
@@ -155,8 +282,6 @@ impl GraphView {
         }
 
         // Create per-source terminal nodes: one WIN and/or one DEAD per source state.
-        // Maps source state → terminal node index, so we deduplicate multiple actions
-        // from the same source that lead to the same outcome.
         let mut win_terminal_for: FxHashMap<State, usize> = FxHashMap::default();
         let mut dead_terminal_for: FxHashMap<State, usize> = FxHashMap::default();
 
@@ -186,8 +311,10 @@ impl GraphView {
 
         let n_nodes = idx;
 
-        // Build edges
+        // Build edges + edge lookup
         let mut edges: Vec<EdgeGpu> = Vec::new();
+        let mut edge_lookup: FxHashMap<(u32, u32), Vec<usize>> = FxHashMap::default();
+
         for (state, transitions) in &graph.transitions {
             let src = state_to_idx[state];
             for &(_, dest) in transitions {
@@ -196,12 +323,20 @@ impl GraphView {
                     StateKey::Win => win_terminal_for[state],
                     StateKey::Dead => dead_terminal_for[state],
                 };
+                let edge_idx = edges.len();
+                edge_lookup
+                    .entry((src as u32, dst as u32))
+                    .or_default()
+                    .push(edge_idx);
                 edges.push(EdgeGpu {
                     src: src as u32,
                     dst: dst as u32,
                 });
             }
         }
+
+        self.edge_lookup = edge_lookup;
+        self.n_edges = edges.len();
 
         // Compute BFS depths (only needed for BFS/radial layouts and node info)
         let depths = if !self.layout_mode.is_3d() {
@@ -379,7 +514,7 @@ impl GraphView {
         );
 
         self.buffers = Some(Arc::new(new_buffers));
-        self.positions = positions;
+        self.initial_positions = positions;
         self.state_to_idx = state_to_idx;
         self.idx_to_state = idx_to_state;
         self.node_kinds = node_kinds;
@@ -387,17 +522,13 @@ impl GraphView {
 
         // Fit the appropriate camera
         if self.layout_mode.is_3d() {
-            self.cam_3d.fit(&self.positions);
+            self.cam_3d.fit(&self.initial_positions);
         } else {
-            self.cam_2d.fit(&self.positions);
+            self.cam_2d.fit(&self.initial_positions);
         }
     }
 
     /// Synchronously read back last frame's GPU hit-test result.
-    ///
-    /// The staging buffer must be unmapped before `prepare()` runs (egui defers
-    /// the paint callback), so we do the full map→read→unmap cycle here at the
-    /// start of `draw()`, before creating the next callback.
     fn poll_hit_test_result(&mut self) {
         if !self.hit_test_in_flight {
             return;
@@ -430,10 +561,85 @@ impl GraphView {
         }
     }
 
-    /// Main draw function, called from the Graph tab.
+    /// Read back tracked node position from GPU (3D force-directed mode).
+    fn poll_tracked_node_pos(&mut self) {
+        if !self.tracked_node_in_flight {
+            return;
+        }
+        self.tracked_node_in_flight = false;
+
+        let Some(buffers) = &self.buffers else {
+            return;
+        };
+
+        let staging = &buffers.tracked_node_staging_buf;
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.render_state.device.poll(wgpu::Maintain::Wait);
+
+        let data = slice.get_mapped_range();
+        let bytes: [u8; 16] = data[0..16].try_into().unwrap();
+        drop(data);
+        staging.unmap();
+
+        let floats: [f32; 4] = bytemuck::cast(bytes);
+        self.tracked_node_pos = Some([floats[0], floats[1], floats[2]]);
+    }
+
+    /// Update auto-follow camera smoothly toward the tracked node.
+    fn update_auto_follow(&mut self) {
+        if !self.auto_follow {
+            self.follow_animating = false;
+            return;
+        }
+        let Some(tracked_idx) = self.tracked_node_idx else {
+            self.follow_animating = false;
+            return;
+        };
+
+        // Get the node's current position
+        let node_pos = if self.layout_mode.is_3d() {
+            // Use GPU readback position for force-directed mode
+            self.tracked_node_pos
+        } else {
+            // Use CPU-side initial positions for 2D modes
+            self.initial_positions.get(tracked_idx).copied()
+        };
+
+        let Some(pos) = node_pos else {
+            self.follow_animating = false;
+            return;
+        };
+
+        // Lerp follow target
+        let alpha = 0.12;
+        let target = self.follow_target.get_or_insert(pos);
+        let dx = pos[0] - target[0];
+        let dy = pos[1] - target[1];
+        let dz = pos[2] - target[2];
+        target[0] += dx * alpha;
+        target[1] += dy * alpha;
+        target[2] += dz * alpha;
+
+        // Check if we've converged (distance < threshold)
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        self.follow_animating = dist_sq > 0.0001;
+
+        if self.layout_mode.is_3d() {
+            self.cam_3d.target = glam::Vec3::from_array(*target);
+        } else {
+            self.cam_2d.pan = [target[0], target[1]];
+        }
+    }
+
+    /// Main draw function, called from the combined view.
     pub fn draw(&mut self, ui: &mut egui::Ui, selected_level_idx: Option<usize>) {
-        // Read back GPU hit-test result from previous frame (3D mode)
+        // Read back GPU results from previous frame
         self.poll_hit_test_result();
+        self.poll_tracked_node_pos();
+
+        // Update camera auto-follow
+        self.update_auto_follow();
 
         self.draw_toolbar(ui, selected_level_idx);
         ui.separator();
@@ -456,19 +662,34 @@ impl GraphView {
 
         if let Some(buffers) = &self.buffers {
             if buffers.n_nodes > 0 {
-                let camera = if self.layout_mode.is_3d() {
+                let mut camera = if self.layout_mode.is_3d() {
                     self.cam_3d.to_uniform()
                 } else {
                     self.cam_2d.to_uniform()
                 };
 
-                // Fill in view_proj for the hit-test params (deferred from handle_interaction
-                // to avoid computing to_uniform() twice)
+                // Pack current_node_idx into camera_right.w (bitcast u32 -> f32)
+                let current_idx = self.current_node_idx.unwrap_or(u32::MAX);
+                camera.camera_right[3] = f32::from_bits(current_idx);
+
+                // Fill in view_proj for the hit-test params
                 let mut hit_test_params = self.pending_hit_test.take();
                 if let Some(ref mut params) = hit_test_params {
                     params.view_proj = camera.view_proj;
                     self.hit_test_in_flight = true;
                 }
+
+                // Set up tracked node readback for 3D mode
+                let tracked_node_idx = if self.layout_mode.is_3d() {
+                    if let Some(idx) = self.tracked_node_idx {
+                        self.tracked_node_in_flight = true;
+                        Some(idx as u32)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
                 let callback = GraphPaintCallback {
                     pipelines: Arc::clone(&self.pipelines),
@@ -477,11 +698,12 @@ impl GraphView {
                     run_compute: self.sim_running,
                     iterations_per_frame: self.iterations_per_frame,
                     hit_test_params,
+                    tracked_node_idx,
                 };
 
                 painter.add(Callback::new_paint_callback(rect, callback));
 
-                if self.sim_running {
+                if self.sim_running || self.follow_animating {
                     ui.ctx().request_repaint();
                 }
             }
@@ -544,10 +766,23 @@ impl GraphView {
     fn handle_interaction(&mut self, ui: &egui::Ui, response: &egui::Response) {
         let rect = response.rect;
 
+        // Detect clicks for node navigation
+        if response.clicked() {
+            self.click_pending = true;
+        }
+
         if self.layout_mode.is_3d() {
             self.handle_3d_interaction(ui, response, rect);
         } else {
             self.handle_2d_interaction(ui, response, rect);
+        }
+
+        // Process click
+        if self.click_pending {
+            self.click_pending = false;
+            if let Some(hovered) = self.hovered_node {
+                self.clicked_node = Some(hovered);
+            }
         }
     }
 
@@ -564,6 +799,7 @@ impl GraphView {
             self.cam_3d.pitch += delta.y * 0.005;
             let limit = std::f32::consts::FRAC_PI_2 - 0.01;
             self.cam_3d.pitch = self.cam_3d.pitch.clamp(-limit, limit);
+            self.auto_follow = false;
         }
 
         // Pan: right-drag or middle-drag
@@ -575,6 +811,7 @@ impl GraphView {
             let r = self.cam_3d.right();
             let u = self.cam_3d.up();
             self.cam_3d.target -= r * delta.x * speed - u * delta.y * speed;
+            self.auto_follow = false;
         }
 
         // Dolly: scroll wheel
@@ -585,7 +822,6 @@ impl GraphView {
         }
 
         // Hover hit test — store cursor/rect info; view_proj is filled in draw()
-        // to avoid computing to_uniform() twice per frame.
         if let Some(cursor) = response.hover_pos() {
             if let Some(buffers) = &self.buffers {
                 self.pending_hit_test = Some(HitTestParams {
@@ -618,6 +854,7 @@ impl GraphView {
             self.cam_2d.pan[0] -=
                 delta.x * self.cam_2d.aspect / (self.cam_2d.zoom * rect.width() / 2.0);
             self.cam_2d.pan[1] += delta.y / (self.cam_2d.zoom * rect.height() / 2.0);
+            self.auto_follow = false;
         }
 
         // Zoom toward cursor
@@ -649,7 +886,7 @@ impl GraphView {
 
             let hit_r_sq = 1.0f32;
             let mut best_dist_sq = f32::MAX;
-            for (i, pos) in self.positions.iter().enumerate() {
+            for (i, pos) in self.initial_positions.iter().enumerate() {
                 let dx = pos[0] - world[0];
                 let dy = pos[1] - world[1];
                 let dist_sq = dx * dx + dy * dy;
