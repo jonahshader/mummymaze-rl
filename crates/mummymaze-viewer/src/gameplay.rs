@@ -8,6 +8,7 @@ pub struct GameplayState {
     pub turn: u32,
     pub result: Option<StepResult>,
     pub history: Vec<(Action, State)>, // (action taken, state BEFORE action)
+    pub redo_stack: Vec<(Action, State)>, // (action to replay, state BEFORE it was undone)
 }
 
 impl GameplayState {
@@ -20,6 +21,7 @@ impl GameplayState {
             turn: 0,
             result: None,
             history: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -32,6 +34,7 @@ impl GameplayState {
         let res = step(&self.level, &mut self.current_state, action);
 
         self.history.push((action, prev_state));
+        self.redo_stack.clear();
         self.turn += 1;
 
         match res {
@@ -43,10 +46,26 @@ impl GameplayState {
     }
 
     pub fn undo(&mut self) {
-        if let Some((_action, prev_state)) = self.history.pop() {
+        if let Some((action, prev_state)) = self.history.pop() {
+            self.redo_stack.push((action, self.current_state));
             self.current_state = prev_state;
             self.turn -= 1;
             self.result = None;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some((action, _saved_state)) = self.redo_stack.pop() {
+            let prev_state = self.current_state;
+            let res = step(&self.level, &mut self.current_state, action);
+            self.history.push((action, prev_state));
+            self.turn += 1;
+            match res {
+                StepResult::Ok => {}
+                StepResult::Dead | StepResult::Win => {
+                    self.result = Some(res);
+                }
+            }
         }
     }
 
@@ -55,6 +74,7 @@ impl GameplayState {
         self.turn = 0;
         self.result = None;
         self.history.clear();
+        self.redo_stack.clear();
     }
 
     pub fn status_text(&self) -> String {

@@ -107,10 +107,13 @@ impl App {
                     };
                     ui.colored_label(color, egui::RichText::new(&status).size(16.0));
                     ui.separator();
-                    if ui.button("Undo").clicked() {
+                    if ui.button("Undo (Z)").clicked() {
                         gs.undo();
                     }
-                    if ui.button("Reset").clicked() {
+                    if ui.button("Redo (Y)").clicked() {
+                        gs.redo();
+                    }
+                    if ui.button("Reset (R)").clicked() {
                         gs.reset();
                     }
                 });
@@ -164,9 +167,18 @@ impl eframe::App for App {
 
         // Consume keyboard input for gameplay BEFORE panels process it
         let mut gameplay_action = None;
+        let mut undo_pressed = false;
+        let mut redo_pressed = false;
+        let mut reset_pressed = false;
         if let Some(ref gs) = self.gameplay {
-            if !gs.is_over() {
-                ctx.input(|i: &egui::InputState| {
+            ctx.input(|i: &egui::InputState| {
+                if i.key_pressed(egui::Key::Z) {
+                    undo_pressed = true;
+                } else if i.key_pressed(egui::Key::Y) {
+                    redo_pressed = true;
+                } else if i.key_pressed(egui::Key::R) {
+                    reset_pressed = true;
+                } else if !gs.is_over() {
                     if i.key_pressed(egui::Key::ArrowUp) {
                         gameplay_action = Some(Action::North);
                     } else if i.key_pressed(egui::Key::ArrowDown) {
@@ -178,8 +190,8 @@ impl eframe::App for App {
                     } else if i.key_pressed(egui::Key::Space) {
                         gameplay_action = Some(Action::Wait);
                     }
-                });
-            }
+                }
+            });
         }
 
         // Track whether state changed this frame (for graph sync)
@@ -193,6 +205,21 @@ impl eframe::App for App {
                 if let Some(ref mut gv) = self.graph_view {
                     gv.reengage_auto_follow();
                 }
+            }
+        } else if undo_pressed {
+            if let Some(ref mut gs) = self.gameplay {
+                gs.undo();
+                state_changed = true;
+            }
+        } else if redo_pressed {
+            if let Some(ref mut gs) = self.gameplay {
+                gs.redo();
+                state_changed = true;
+            }
+        } else if reset_pressed {
+            if let Some(ref mut gs) = self.gameplay {
+                gs.reset();
+                state_changed = true;
             }
         }
 
