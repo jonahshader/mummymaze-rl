@@ -183,17 +183,24 @@ impl GraphView {
         self.build_from_graph(graph);
     }
 
-    /// Set the current game state node on the graph (called after moves/undo/reset).
+    /// Update the tracked/current node on the graph. Does NOT change auto-follow state.
     pub fn set_current_state(&mut self, state: State) {
         if let Some(&idx) = self.state_to_idx.get(&state) {
             self.tracked_node_idx = Some(idx);
             self.current_node_idx = Some(idx as u32);
-            self.auto_follow = true;
-            self.follow_animating = true;
+            if self.auto_follow {
+                self.follow_animating = true;
+            }
         } else {
             self.tracked_node_idx = None;
             self.current_node_idx = None;
         }
+    }
+
+    /// Re-engage auto-follow (called only on player moves).
+    pub fn reengage_auto_follow(&mut self) {
+        self.auto_follow = true;
+        self.follow_animating = true;
     }
 
     /// Update walk highlight from gameplay history.
@@ -587,7 +594,8 @@ impl GraphView {
     }
 
     /// Update auto-follow camera smoothly toward the tracked node.
-    fn update_auto_follow(&mut self) {
+    /// Uses frame-rate-independent exponential decay: `alpha = 1 - e^(-speed * dt)`.
+    fn update_auto_follow(&mut self, dt: f32) {
         if !self.auto_follow {
             self.follow_animating = false;
             return;
@@ -611,8 +619,9 @@ impl GraphView {
             return;
         };
 
-        // Lerp follow target
-        let alpha = 0.12;
+        // Frame-rate-independent exponential decay
+        // speed=8.0 gives ~63% closure per 1/8s, visually similar to old alpha=0.12 at 60fps
+        let alpha = 1.0 - (-8.0_f32 * dt).exp();
         let target = self.follow_target.get_or_insert(pos);
         let dx = pos[0] - target[0];
         let dy = pos[1] - target[1];
@@ -638,8 +647,9 @@ impl GraphView {
         self.poll_hit_test_result();
         self.poll_tracked_node_pos();
 
-        // Update camera auto-follow
-        self.update_auto_follow();
+        // Update camera auto-follow (dt-scaled)
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        self.update_auto_follow(dt);
 
         self.draw_toolbar(ui, selected_level_idx);
         ui.separator();

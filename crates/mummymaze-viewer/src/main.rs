@@ -197,6 +197,10 @@ impl eframe::App for App {
             if let Some(ref mut gs) = self.gameplay {
                 gs.apply_action(action);
                 state_changed = true;
+                // Only player moves re-engage auto-follow
+                if let Some(ref mut gv) = self.graph_view {
+                    gv.reengage_auto_follow();
+                }
             }
         }
 
