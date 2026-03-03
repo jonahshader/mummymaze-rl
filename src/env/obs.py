@@ -8,40 +8,38 @@ from src.env.types import MAX_MUMMIES, MAX_SCORPIONS, MAX_TRAPS, EnvState, Level
 
 def observe(
   grid_size: int, level: LevelData, state: EnvState
-) -> Float[Array, "11 N N"]:
-  """Build an 11-channel grid observation.
+) -> Float[Array, "10 Np1 Np1"]:
+  """Build a 10-channel grid observation.
+
+  Wall channels use the raw (N+1)-sized arrays, padded to (N+1)×(N+1).
+  Entity channels are N×N padded to (N+1)×(N+1) with zeros.
 
   Channels:
-    0: North wall (h_walls[r][c] for each cell)
-    1: South wall (h_walls[r+1][c] for each cell)
-    2: West wall  (v_walls[r][c] for each cell)
-    3: East wall  (v_walls[r][c+1] for each cell) — includes gate when closed
-    4: Player position
-    5: Alive mummies
-    6: Alive scorpions
-    7: Active traps
-    8: Key (if has_key_gate)
-    9: Exit cell
-   10: Gate open (scalar broadcast to full grid)
+    0: h_walls — horizontal walls, (N+1, N) padded to (N+1, N+1)
+    1: v_walls — vertical walls, (N, N+1) padded to (N+1, N+1)
+    2: Player position
+    3: Alive mummies (is_red broadcast distinguishes white/red)
+    4: Alive scorpions
+    5: Active traps
+    6: Key position (if has_key_gate)
+    7: Exit cell
+    8: Gate: 1=open, -1=closed, 0=no gate
+    9: Is red (scalar broadcast)
   """
   n = grid_size
-  h_walls = level.h_walls_base
-  v_walls = level.v_walls_base
+  n1 = n + 1
 
-  # Bake gate into v_walls for observations: gate blocks east/west at
-  # v_walls[gate_row, gate_col+1]. Active when has_key_gate & ~gate_open.
-  gate_active = level.has_key_gate & ~state.gate_open
-  gr = level.gate_row
-  gc = level.gate_col
-  v_walls = v_walls.at[gr, gc + 1].set(v_walls[gr, gc + 1] | gate_active)
+  # Wall channels — pad to (N+1, N+1)
+  h_walls = jnp.zeros((n1, n1), dtype=jnp.float32)
+  h_walls = h_walls.at[:n1, :n].set(level.h_walls_base.astype(jnp.float32))
 
-  # Wall channels
-  north_wall = h_walls[:n, :].astype(jnp.float32)
-  south_wall = h_walls[1:, :].astype(jnp.float32)
-  west_wall = v_walls[:, :n].astype(jnp.float32)
-  east_wall = v_walls[:, 1:].astype(jnp.float32)
+  v_walls = jnp.zeros((n1, n1), dtype=jnp.float32)
+  v_walls = v_walls.at[:n, :n1].set(level.v_walls_base.astype(jnp.float32))
 
-  # Entity channels
+  # Entity channels — build at N×N then pad to (N+1, N+1)
+  def pad(ch: Float[Array, "N N"]) -> Float[Array, "Np1 Np1"]:
+    return jnp.pad(ch, ((0, 1), (0, 1)))
+
   player_ch = jnp.zeros((n, n), dtype=jnp.float32)
   player_ch = player_ch.at[state.player[0], state.player[1]].set(1.0)
 
@@ -71,20 +69,26 @@ def observe(
   exit_ch = jnp.zeros((n, n), dtype=jnp.float32)
   exit_ch = exit_ch.at[level.exit_cell[0], level.exit_cell[1]].set(1.0)
 
-  gate_ch = jnp.full((n, n), state.gate_open.astype(jnp.float32))
+  # Gate channel: 1=open, -1=closed, 0=no gate
+  gate_ch = jnp.zeros((n, n), dtype=jnp.float32)
+  gate_val = jnp.where(state.gate_open, 1.0, -1.0)
+  gate_val = gate_val * level.has_key_gate.astype(jnp.float32)
+  gate_ch = gate_ch.at[level.gate_row, level.gate_col].set(gate_val)
+
+  # Is red — scalar broadcast
+  is_red_ch = jnp.full((n1, n1), level.is_red.astype(jnp.float32))
 
   return jnp.stack(
     [
-      north_wall,
-      south_wall,
-      west_wall,
-      east_wall,
-      player_ch,
-      mummy_ch,
-      scorpion_ch,
-      trap_ch,
-      key_ch,
-      exit_ch,
-      gate_ch,
+      h_walls,
+      v_walls,
+      pad(player_ch),
+      pad(mummy_ch),
+      pad(scorpion_ch),
+      pad(trap_ch),
+      pad(key_ch),
+      pad(exit_ch),
+      pad(gate_ch),
+      is_red_ch,
     ]
   )

@@ -80,7 +80,7 @@ class TestJit:
 
     jitted_obs = jax.jit(lambda lv, s: observe(gs, lv, s))
     obs = jitted_obs(level, state)
-    assert obs.shape == (11, 6, 6)
+    assert obs.shape == (10, 7, 7)
 
   def test_jit_env_step(self) -> None:
     """Full env.step compiles under jit."""
@@ -89,7 +89,7 @@ class TestJit:
 
     jitted = jax.jit(env.step)
     out = jitted(level, state, jnp.int32(0))
-    assert out.obs.shape == (11, 6, 6)
+    assert out.obs.shape == (10, 7, 7)
     assert out.reward.shape == ()
     assert out.done.shape == ()
 
@@ -148,7 +148,7 @@ class TestVmap:
 
     vmapped_obs = jax.vmap(lambda s: observe(gs, level, s))
     batch_obs = vmapped_obs(batch_states)
-    assert batch_obs.shape == (batch_size, 11, 6, 6)
+    assert batch_obs.shape == (batch_size, 10, 7, 7)
 
   def test_vmap_env_step(self) -> None:
     """Vmap full env.step with level batching."""
@@ -167,7 +167,7 @@ class TestVmap:
     vmapped = jax.vmap(env.step)
     out = vmapped(batch_levels, batch_states, batch_actions)
 
-    assert out.obs.shape == (batch_size, 11, 6, 6)
+    assert out.obs.shape == (batch_size, 10, 7, 7)
     assert out.reward.shape == (batch_size,)
     assert out.done.shape == (batch_size,)
 
@@ -286,10 +286,10 @@ class TestLevelBank:
 
     # Reset all envs
     batch_states, batch_obs = jax.vmap(env.reset)(batch_levels)
-    assert batch_obs.shape == (batch_size, 11, gs, gs)
+    assert batch_obs.shape == (batch_size, 10, gs + 1, gs + 1)
 
     # Step all envs
     batch_actions = jnp.full(batch_size, 4, dtype=jnp.int32)
     out = jax.vmap(env.step)(batch_levels, batch_states, batch_actions)
-    assert out.obs.shape == (batch_size, 11, gs, gs)
+    assert out.obs.shape == (batch_size, 10, gs + 1, gs + 1)
     assert out.reward.shape == (batch_size,)

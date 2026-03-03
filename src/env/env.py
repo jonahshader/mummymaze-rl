@@ -16,7 +16,7 @@ class EnvOut:
   """Output from a single environment step."""
 
   state: EnvState
-  obs: Float[Array, "11 N N"]
+  obs: Float[Array, "10 Np1 Np1"]
   reward: Float[Array, ""]
   done: Bool[Array, ""]
 
@@ -59,7 +59,7 @@ class MummyMazeEnv:
 
   grid_size: int
 
-  def reset(self, level: LevelData) -> tuple[EnvState, Float[Array, "11 N N"]]:
+  def reset(self, level: LevelData) -> tuple[EnvState, Float[Array, "10 Np1 Np1"]]:
     """Return initial state and observation from level data."""
     state = EnvState(
       player=level.initial_player,
