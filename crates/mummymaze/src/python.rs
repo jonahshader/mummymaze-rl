@@ -97,6 +97,45 @@ fn solve_all_actions(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Ve
     Ok(out)
 }
 
+/// Compute optimal actions for all solvable levels. Releases the GIL, uses rayon internally.
+/// Returns list of dicts: {"file": str, "sublevel": int, "grid_size": int,
+///   "states": [(pr, pc, m1r, m1c, m1_alive, m2r, m2c, m2_alive, sr, sc, s_alive, gate_open), ...],
+///   "action_masks": [int, ...]}
+#[pyfunction]
+#[pyo3(signature = (maze_dir, jobs=0))]
+fn optimal_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyObject>> {
+    let path = Path::new(maze_dir);
+    let results = py
+        .allow_threads(|| batch::optimal_actions_all(path, jobs))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    let mut out = Vec::with_capacity(results.len());
+    for (stem, sub_idx, grid_size, state_actions) in &results {
+        let dict = PyDict::new(py);
+        dict.set_item("file", stem)?;
+        dict.set_item("sublevel", sub_idx)?;
+        dict.set_item("grid_size", grid_size)?;
+
+        let states: Vec<(i32,i32,i32,i32,bool,i32,i32,bool,i32,i32,bool,bool)> = state_actions
+            .iter()
+            .map(|(s, _)| {
+                (s.player_row, s.player_col,
+                 s.mummy1_row, s.mummy1_col, s.mummy1_alive,
+                 s.mummy2_row, s.mummy2_col, s.mummy2_alive,
+                 s.scorpion_row, s.scorpion_col, s.scorpion_alive,
+                 s.gate_open)
+            })
+            .collect();
+        dict.set_item("states", states)?;
+
+        let masks: Vec<u8> = state_actions.iter().map(|(_, m)| *m).collect();
+        dict.set_item("action_masks", masks)?;
+
+        out.push(dict.into());
+    }
+    Ok(out)
+}
+
 /// Build and return the full state graph as a Python dict.
 /// Returns: {"states": [state_tuple, ...], "edges": [(src_idx, action_name, dst)], "start_idx": int}
 /// where dst is an int (index into states) or "WIN" or "DEAD".
@@ -169,5 +208,6 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_level_actions, m)?)?;
     m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(optimal_actions_all, m)?)?;
     Ok(())
 }

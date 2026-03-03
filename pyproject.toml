@@ -14,6 +14,7 @@ dependencies = [
     "mummy-maze-parser",
     "mummymaze-rust",
     "optax>=0.2.6",
+    "wandb>=0.25.0",
 ]
 
 [dependency-groups]

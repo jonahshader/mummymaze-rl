@@ -68,6 +68,83 @@ impl StateGraph {
         }
         depths
     }
+
+    /// Backward BFS from WIN: distance to win for each winnable transient state.
+    /// States with a direct WIN transition get distance 1; predecessors propagate outward.
+    pub fn dist_to_win(&self) -> FxHashMap<State, u32> {
+        // Build reverse adjacency: for each transient destination, record sources.
+        let mut reverse: FxHashMap<State, Vec<State>> = FxHashMap::default();
+        let mut win_predecessors: Vec<State> = Vec::new();
+
+        for (src, transitions) in &self.transitions {
+            for &(_action, dest) in transitions {
+                match dest {
+                    StateKey::Win => {
+                        win_predecessors.push(*src);
+                    }
+                    StateKey::Transient(dst) => {
+                        reverse.entry(dst).or_default().push(*src);
+                    }
+                    StateKey::Dead => {}
+                }
+            }
+        }
+
+        // BFS backward from WIN predecessors
+        let mut dist: FxHashMap<State, u32> = FxHashMap::default();
+        let mut queue = VecDeque::new();
+        for s in win_predecessors {
+            if !dist.contains_key(&s) {
+                dist.insert(s, 1);
+                queue.push_back(s);
+            }
+        }
+
+        while let Some(cur) = queue.pop_front() {
+            let d = dist[&cur];
+            if let Some(preds) = reverse.get(&cur) {
+                for &p in preds {
+                    if !dist.contains_key(&p) {
+                        dist.insert(p, d + 1);
+                        queue.push_back(p);
+                    }
+                }
+            }
+        }
+
+        dist
+    }
+
+    /// For each winnable state, compute a 5-bit action bitmask of optimal actions.
+    /// Bit i is set if action i (N=0,S=1,E=2,W=3,Wait=4) leads to a successor
+    /// with dist_to_win = current_dist - 1 (or directly to WIN for dist=1).
+    pub fn optimal_actions(&self) -> Vec<(State, u8)> {
+        let dist = self.dist_to_win();
+        let mut result = Vec::with_capacity(dist.len());
+
+        for (state, &d) in &dist {
+            if let Some(transitions) = self.transitions.get(state) {
+                let mut mask: u8 = 0;
+                for &(action, dest) in transitions {
+                    let is_optimal = match dest {
+                        StateKey::Win => d == 1,
+                        StateKey::Transient(ns) => {
+                            dist.get(&ns).is_some_and(|&nd| nd == d - 1)
+                        }
+                        StateKey::Dead => false,
+                    };
+                    if is_optimal {
+                        mask |= 1 << action.to_index();
+                    }
+                }
+                if mask != 0 {
+                    result.push((*state, mask));
+                }
+            }
+        }
+
+        result
+    }
 }
 
 /// BFS over all reachable states, recording transitions for every valid action.

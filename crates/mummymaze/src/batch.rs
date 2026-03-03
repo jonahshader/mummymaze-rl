@@ -197,6 +197,41 @@ pub fn solve_all_with_actions(
     Ok(results)
 }
 
+/// Compute optimal actions for all solvable levels in parallel.
+/// Returns (file_stem, sublevel, grid_size, Vec<(State, action_bitmask)>) per level.
+pub fn optimal_actions_all(
+    maze_dir: &Path,
+    jobs: usize,
+) -> Result<Vec<(String, usize, i32, Vec<(crate::game::State, u8)>)>> {
+    let all_levels = collect_levels(maze_dir)?;
+
+    if jobs > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global()
+            .ok();
+    }
+
+    let results: Vec<(String, usize, i32, Vec<(crate::game::State, u8)>)> = all_levels
+        .par_iter()
+        .filter_map(|(stem, sub_idx, lev)| {
+            // Only process solvable levels
+            let bfs = solver::solve(lev);
+            if bfs.moves.is_none() {
+                return None;
+            }
+            let graph = build_graph(lev);
+            let optimal = graph.optimal_actions();
+            if optimal.is_empty() {
+                return None;
+            }
+            Some((stem.clone(), *sub_idx, lev.grid_size, optimal))
+        })
+        .collect();
+
+    Ok(results)
+}
+
 /// BFS-only solve for a single level.
 pub fn solve_one(path: &Path, sublevel: usize) -> Result<Option<u32>> {
     let (_, levels) = parse::parse_file(path)?;
