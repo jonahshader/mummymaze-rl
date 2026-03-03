@@ -3,6 +3,8 @@ mod gameplay;
 mod graph_view;
 mod render;
 mod table;
+mod training_metrics;
+mod training_tab;
 
 use data::DataStore;
 use eframe::egui;
@@ -11,12 +13,19 @@ use graph_view::GraphView;
 use mummymaze::game::Action;
 use mummymaze::graph::StateGraph;
 
+#[derive(PartialEq, Clone, Copy)]
+enum RightTab {
+    Graph,
+    Training,
+}
+
 struct App {
     store: DataStore,
     gameplay: Option<GameplayState>,
     graph_view: Option<GraphView>,
     /// Stored graph for click-to-navigate BFS lookups.
     graph: Option<StateGraph>,
+    right_tab: RightTab,
 }
 
 impl App {
@@ -34,6 +43,7 @@ impl App {
             gameplay: None,
             graph_view,
             graph: None,
+            right_tab: RightTab::Graph,
         }
     }
 
@@ -164,6 +174,10 @@ impl eframe::App for App {
         if self.store.is_analyzing() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Poll training metrics file periodically
+        if self.store.training_metrics.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        }
 
         // Consume keyboard input for gameplay BEFORE panels process it
         let mut gameplay_action = None;
@@ -270,8 +284,21 @@ impl eframe::App for App {
                     self.draw_maze_panel(ui);
                 });
 
-            // Remaining space: graph view
-            self.draw_graph_panel(ui);
+            // Remaining space: tabbed graph/training view
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.selectable_value(&mut self.right_tab, RightTab::Graph, "Graph");
+                ui.selectable_value(&mut self.right_tab, RightTab::Training, "Training");
+            });
+            ui.separator();
+
+            match self.right_tab {
+                RightTab::Graph => self.draw_graph_panel(ui),
+                RightTab::Training => {
+                    if let Some(clicked) = training_tab::draw_training_panel(ui, &self.store) {
+                        self.select_level(clicked);
+                    }
+                }
+            }
         });
 
         // Detect state changes from undo/reset button clicks

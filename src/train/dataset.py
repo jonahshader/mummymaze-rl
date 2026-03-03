@@ -160,7 +160,8 @@ def load_bc_dataset(
     tuples_np = np.array(states, dtype=np.int32).reshape(n, 12)
 
     # Convert action bitmasks to soft label vectors (vectorized)
-    masks_np = np.array(action_masks_raw, dtype=np.int32)
+    # PyO3 returns Vec<u8> as Python bytes; use frombuffer to decode
+    masks_np = np.frombuffer(action_masks_raw, dtype=np.uint8).astype(np.int32)
     bits = ((masks_np[:, None] >> np.arange(5)[None, :]) & 1).astype(np.float32)
     counts = bits.sum(axis=1, keepdims=True)
     counts = np.maximum(counts, 1)  # avoid division by zero

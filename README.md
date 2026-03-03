@@ -19,10 +19,19 @@ This installs all Python dependencies and builds the Rust PyO3 crate (`mummymaze
 
 ### Python
 
-**`main.py`** — RL training entry point (stub, WIP).
+**`src/train/train_bc.py`** — Behavioral cloning training. Trains a CNN to predict
+optimal BFS actions from observations. Writes `level_metrics.json` (per-level
+accuracy/loss) after each epoch for the viewer's Training tab.
 
 ```bash
-uv run python main.py
+# Basic training (10 epochs, writes level_metrics.json to CWD)
+uv run python -m src.train.train_bc
+
+# With wandb logging
+uv run python -m src.train.train_bc --wandb-project mummymaze
+
+# Custom settings
+uv run python -m src.train.train_bc --epochs 20 --batch-size 2048 --lr 1e-3
 ```
 
 **`solve_all.py`** — Batch BFS solver. Solves all 10,100 sublevels via the Rust engine

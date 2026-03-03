@@ -1,3 +1,4 @@
+use crate::training_metrics::TrainingMetrics;
 use mummymaze::batch::{self, LevelAnalysis};
 use mummymaze::parse::Level;
 use mummymaze::solver;
@@ -57,13 +58,20 @@ pub enum SortColumn {
     WinProb,
     DeadEnd,
     Safety,
+    AgentAcc,
+    AgentLoss,
 }
 
 impl SortColumn {
     fn is_tier2(self) -> bool {
         matches!(
             self,
-            SortColumn::States | SortColumn::WinProb | SortColumn::DeadEnd | SortColumn::Safety
+            SortColumn::States
+                | SortColumn::WinProb
+                | SortColumn::DeadEnd
+                | SortColumn::Safety
+                | SortColumn::AgentAcc
+                | SortColumn::AgentLoss
         )
     }
 }
@@ -112,6 +120,7 @@ pub struct DataStore {
     row_index: HashMap<(String, usize), usize>,
     pub selected: Option<usize>,
     analysis_received: usize,
+    pub training_metrics: Option<TrainingMetrics>,
 }
 
 impl DataStore {
@@ -146,6 +155,18 @@ impl DataStore {
 
         let sorted_indices: Vec<usize> = (0..rows.len()).collect();
 
+        // Look for level_metrics.json next to the maze directory or in CWD
+        let training_metrics = {
+            let candidates = [
+                maze_dir.join("level_metrics.json"),
+                std::path::PathBuf::from("level_metrics.json"),
+            ];
+            candidates
+                .into_iter()
+                .find(|p| p.exists())
+                .map(TrainingMetrics::new)
+        };
+
         let mut store = DataStore {
             rows,
             sorted_indices,
@@ -157,6 +178,7 @@ impl DataStore {
             row_index,
             selected: None,
             analysis_received: 0,
+            training_metrics,
         };
         store.refresh_sort_filter();
         store
@@ -192,12 +214,24 @@ impl DataStore {
     /// Poll for analysis results from background thread. Returns true if new data arrived.
     /// Drains up to 200 results per call to stay responsive.
     pub fn poll_analysis(&mut self) -> bool {
+        let mut received_any = false;
+
+        // Poll training metrics file
+        if let Some(ref mut tm) = self.training_metrics
+            && tm.poll()
+        {
+            received_any = true;
+            if self.sort_col.is_tier2() {
+                self.refresh_sort_filter();
+            }
+        }
+
         let rx = match &self.analysis_rx {
             Some(rx) => rx,
-            None => return false,
+            None => return received_any,
         };
 
-        let mut received_any = false;
+        let mut analysis_received = false;
         for _ in 0..200 {
             match rx.try_recv() {
                 Ok(analysis) => {
@@ -206,18 +240,19 @@ impl DataStore {
                         self.rows[idx].analysis = Some(analysis);
                     }
                     self.analysis_received += 1;
-                    received_any = true;
+                    analysis_received = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.analysis_rx = None;
-                    received_any = true;
+                    analysis_received = true;
                     break;
                 }
             }
         }
 
-        if received_any {
+        if analysis_received {
+            received_any = true;
             let total = self.rows.len();
             if self.analysis_received >= total || self.analysis_rx.is_none() {
                 self.analysis_progress = None;
@@ -265,6 +300,7 @@ impl DataStore {
         let sort_col = self.sort_col;
         let sort_dir = self.sort_dir;
         let rows = &self.rows;
+        let tm = self.training_metrics.as_ref();
 
         self.sorted_indices.sort_by(|&a, &b| {
             let ra = &rows[a];
@@ -301,6 +337,16 @@ impl DataStore {
                         .analysis
                         .as_ref()
                         .and_then(|a| a.difficulty.path_safety);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortColumn::AgentAcc => {
+                    let sa = tm.and_then(|t| t.get(&ra.file_stem, ra.sublevel).map(|m| m.accuracy));
+                    let sb = tm.and_then(|t| t.get(&rb.file_stem, rb.sublevel).map(|m| m.accuracy));
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                SortColumn::AgentLoss => {
+                    let sa = tm.and_then(|t| t.get(&ra.file_stem, ra.sublevel).map(|m| m.mean_loss));
+                    let sb = tm.and_then(|t| t.get(&rb.file_stem, rb.sublevel).map(|m| m.mean_loss));
                     sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
                 }
             };

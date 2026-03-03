@@ -130,7 +130,9 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
         .column(Column::auto().at_least(50.0)) // States
         .column(Column::auto().at_least(50.0)) // Win%
         .column(Column::auto().at_least(50.0)) // Dead%
-        .column(Column::remainder().at_least(50.0)) // Safety
+        .column(Column::auto().at_least(50.0)) // Safety
+        .column(Column::auto().at_least(45.0)) // Acc%
+        .column(Column::remainder().at_least(45.0)) // Loss
         .header(row_height, |mut header: egui_extras::TableRow<'_, '_>| {
             header.col(|ui: &mut Ui| {
                 sort_header(ui, "File", SortColumn::File, store, Some("Pyramid .dat file (B-0 through B-100)"));
@@ -156,12 +158,19 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
             header.col(|ui: &mut Ui| {
                 sort_header(ui, "Safety", SortColumn::Safety, store, Some("Average fraction of actions leading to winnable states along the optimal path"));
             });
+            header.col(|ui: &mut Ui| {
+                sort_header(ui, "Acc%", SortColumn::AgentAcc, store, Some("Agent accuracy on this level (from training metrics)"));
+            });
+            header.col(|ui: &mut Ui| {
+                sort_header(ui, "Loss", SortColumn::AgentLoss, store, Some("Agent mean loss on this level (from training metrics)"));
+            });
         })
         .body(|body: egui_extras::TableBody<'_>| {
             // Split borrows: take a snapshot of indices to avoid cloning
             let indices = &store.sorted_indices;
             let rows = &store.rows;
             let selected = store.selected;
+            let tm = store.training_metrics.as_ref();
             let num_rows = indices.len();
 
             body.rows(
@@ -213,6 +222,20 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
                         ui.label(match a.and_then(|a| a.difficulty.path_safety) {
                             Some(s) => format!("{:.2}", s),
                             None => "...".to_string(),
+                        });
+                    });
+
+                    let metric = tm.and_then(|t| t.get(&level_row.file_stem, level_row.sublevel));
+                    row.col(|ui: &mut Ui| {
+                        ui.label(match metric {
+                            Some(m) => format!("{:.1}%", m.accuracy * 100.0),
+                            None => "-".to_string(),
+                        });
+                    });
+                    row.col(|ui: &mut Ui| {
+                        ui.label(match metric {
+                            Some(m) => format!("{:.2}", m.mean_loss),
+                            None => "-".to_string(),
                         });
                     });
 

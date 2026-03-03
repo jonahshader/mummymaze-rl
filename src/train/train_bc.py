@@ -15,6 +15,8 @@ import optax
 from collections.abc import Callable
 from typing import Any
 
+from tqdm import tqdm
+
 from jaxtyping import Array, Float, Int
 
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
@@ -80,6 +82,7 @@ def compute_level_metrics(
   model: MazeCNN,
   ds: BCDataset,
   batch_size: int,
+  pbar: tqdm | None = None,
 ) -> dict[int, dict[str, object]]:
   """Compute per-level accuracy and loss for level_metrics.json."""
   # Run inference on all states in chunks
@@ -93,6 +96,8 @@ def compute_level_metrics(
     obs = make_batch_obs(ds.grid_size, ds.bank, batch_tuples, batch_level_idx)
     logits = jax.vmap(model)(obs)
     all_logits.append(logits)
+    if pbar is not None:
+      pbar.update(end - start)
 
   all_logits_arr = jnp.concatenate(all_logits, axis=0)
 
@@ -248,73 +253,76 @@ def train(
     epoch_losses: list[float] = []
     epoch_accs: list[float] = []
 
-    # Train on each grid_size
+    # Build train batches across all grid sizes for a single progress bar
+    train_batches: list[tuple[int, Int[Array, "B"]]] = []
     for gs in sorted(datasets):
       ds = datasets[gs]
       ti = train_indices[gs]
       n_train = ti.shape[0]
       if n_train < batch_size:
         continue
-
-      # Shuffle train indices
       key, shuffle_key = jr.split(key)
       perm = jr.permutation(shuffle_key, n_train)
       shuffled = ti[perm]
-
-      # Mini-batch loop
       n_batches = n_train // batch_size
       for b in range(n_batches):
-        batch_idx = shuffled[b * batch_size : (b + 1) * batch_size]
-        batch_tuples = ds.state_tuples[batch_idx]
-        batch_targets = ds.action_targets[batch_idx]
-        batch_level_idx = ds.level_idx[batch_idx]
+        train_batches.append((gs, shuffled[b * batch_size : (b + 1) * batch_size]))
 
-        obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-        model, opt_state, loss, acc = train_step(
-          model, opt_state, optimizer, obs, batch_targets
+    pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{epochs}", unit="batch")
+    for gs, batch_idx in pbar:
+      ds = datasets[gs]
+      batch_tuples = ds.state_tuples[batch_idx]
+      batch_targets = ds.action_targets[batch_idx]
+      batch_level_idx = ds.level_idx[batch_idx]
+
+      obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
+      model, opt_state, loss, acc = train_step(
+        model, opt_state, optimizer, obs, batch_targets
+      )
+      global_step += 1
+
+      loss_val = float(loss)
+      acc_val = float(acc)
+      epoch_losses.append(loss_val)
+      epoch_accs.append(acc_val)
+      pbar.set_postfix(loss=f"{loss_val:.3f}", acc=f"{acc_val:.3f}", gs=gs)
+
+      if wandb_project is not None:
+        import wandb
+
+        wandb.log(
+          {
+            "train/loss": loss_val,
+            "train/accuracy": acc_val,
+            "train/grid_size": gs,
+            "lr": float(schedule(global_step)),  # type: ignore[arg-type]
+          },
+          step=global_step,
         )
-        global_step += 1
-
-        loss_val = float(loss)
-        acc_val = float(acc)
-        epoch_losses.append(loss_val)
-        epoch_accs.append(acc_val)
-
-        if wandb_project is not None:
-          import wandb
-
-          wandb.log(
-            {
-              "train/loss": loss_val,
-              "train/accuracy": acc_val,
-              "train/grid_size": gs,
-              "lr": float(schedule(global_step)),  # type: ignore[arg-type]
-            },
-            step=global_step,
-          )
 
     # Validation
-    val_losses: list[float] = []
-    val_accs: list[float] = []
+    val_batches: list[tuple[int, Int[Array, "B"]]] = []
     for gs in sorted(datasets):
-      ds = datasets[gs]
       vi = val_indices[gs]
       n_val = vi.shape[0]
       if n_val == 0:
         continue
-
-      # Evaluate in chunks
       for start in range(0, n_val, batch_size):
         end = min(start + batch_size, n_val)
-        batch_idx = vi[start:end]
-        batch_tuples = ds.state_tuples[batch_idx]
-        batch_targets = ds.action_targets[batch_idx]
-        batch_level_idx = ds.level_idx[batch_idx]
+        val_batches.append((gs, vi[start:end]))
 
-        obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-        loss, acc = eval_step(model, obs, batch_targets)
-        val_losses.append(float(loss))
-        val_accs.append(float(acc))
+    val_losses: list[float] = []
+    val_accs: list[float] = []
+    for gs, batch_idx in tqdm(val_batches, desc="  Validating", unit="batch"):
+      ds = datasets[gs]
+      batch_tuples = ds.state_tuples[batch_idx]
+      batch_targets = ds.action_targets[batch_idx]
+      batch_level_idx = ds.level_idx[batch_idx]
+
+      obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
+      loss, acc = eval_step(model, obs, batch_targets)
+      val_losses.append(float(loss))
+      val_accs.append(float(acc))
 
     mean_train_loss = np.mean(epoch_losses) if epoch_losses else 0.0
     mean_train_acc = np.mean(epoch_accs) if epoch_accs else 0.0
@@ -323,9 +331,8 @@ def train(
     epoch_time = time.time() - epoch_t0
 
     print(
-      f"Epoch {epoch + 1}/{epochs} ({epoch_time:.1f}s) — "
-      f"train loss={mean_train_loss:.4f} acc={mean_train_acc:.4f} — "
-      f"val loss={mean_val_loss:.4f} acc={mean_val_acc:.4f}"
+      f"  train loss={mean_train_loss:.4f} acc={mean_train_acc:.4f} — "
+      f"val loss={mean_val_loss:.4f} acc={mean_val_acc:.4f} ({epoch_time:.1f}s)"
     )
 
     if wandb_project is not None:
@@ -348,10 +355,12 @@ def train(
     eqx.tree_serialise_leaves(ckpt_path, model)
 
     # Write level_metrics.json
-    print("  Computing per-level metrics...")
     all_metrics: dict[int, dict[int, dict[str, object]]] = {}
+    total_states = sum(ds.n_states for ds in datasets.values())
+    metrics_pbar = tqdm(total=total_states, desc="  Level metrics", unit="state")
     for gs, ds in datasets.items():
-      all_metrics[gs] = compute_level_metrics(model, ds, batch_size)
+      all_metrics[gs] = compute_level_metrics(model, ds, batch_size, metrics_pbar)
+    metrics_pbar.close()
     write_level_metrics(all_metrics, sources, global_step, run_id, metrics_path)
     print(f"  Wrote {metrics_path}")
 
