@@ -5,6 +5,20 @@ use pyo3::types::PyDict;
 use std::path::Path;
 
 use crate::batch::{self, LevelAnalysis};
+use crate::game::State;
+
+type StateTuple = (i32, i32, i32, i32, bool, i32, i32, bool, i32, i32, bool, bool);
+
+/// Convert a State to a Python-compatible tuple.
+fn state_to_tuple(s: &State) -> StateTuple {
+    (
+        s.player_row, s.player_col,
+        s.mummy1_row, s.mummy1_col, s.mummy1_alive,
+        s.mummy2_row, s.mummy2_col, s.mummy2_alive,
+        s.scorpion_row, s.scorpion_col, s.scorpion_alive,
+        s.gate_open,
+    )
+}
 
 /// Convert a LevelAnalysis to a Python dict.
 fn level_analysis_to_dict(py: Python<'_>, r: &LevelAnalysis) -> PyResult<PyObject> {
@@ -116,15 +130,9 @@ fn optimal_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<
         dict.set_item("sublevel", sub_idx)?;
         dict.set_item("grid_size", grid_size)?;
 
-        let states: Vec<(i32,i32,i32,i32,bool,i32,i32,bool,i32,i32,bool,bool)> = state_actions
+        let states: Vec<StateTuple> = state_actions
             .iter()
-            .map(|(s, _)| {
-                (s.player_row, s.player_col,
-                 s.mummy1_row, s.mummy1_col, s.mummy1_alive,
-                 s.mummy2_row, s.mummy2_col, s.mummy2_alive,
-                 s.scorpion_row, s.scorpion_col, s.scorpion_alive,
-                 s.gate_open)
-            })
+            .map(|(s, _)| state_to_tuple(s))
             .collect();
         dict.set_item("states", states)?;
 
@@ -157,13 +165,7 @@ fn build_graph(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<PyOb
     let state_list = &indices.idx_to_state;
 
     // Convert states to Python tuples
-    let py_states: Vec<(i32,i32,i32,i32,bool,i32,i32,bool,i32,i32,bool,bool)> = state_list.iter().map(|s| {
-        (s.player_row, s.player_col,
-         s.mummy1_row, s.mummy1_col, s.mummy1_alive,
-         s.mummy2_row, s.mummy2_col, s.mummy2_alive,
-         s.scorpion_row, s.scorpion_col, s.scorpion_alive,
-         s.gate_open)
-    }).collect();
+    let py_states: Vec<StateTuple> = state_list.iter().map(state_to_tuple).collect();
 
     // Build edges
     let action_name = |a: crate::game::Action| -> &'static str {

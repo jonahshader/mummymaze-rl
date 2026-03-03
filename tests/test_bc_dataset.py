@@ -319,6 +319,8 @@ class TestOverfitSingleLevel:
       acc = top1_accuracy(logits, targets)
       return new_model, new_opt_state, loss, acc
 
+    loss = jnp.zeros(())
+    acc = jnp.zeros(())
     for _i in range(200):
       model, opt_state, loss, acc = _step(model, opt_state, obs_batch, targets)
 

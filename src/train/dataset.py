@@ -105,7 +105,7 @@ def load_bc_dataset(
   maze_dir: Path,
   val_fraction: float = 0.1,
   seed: int = 42,
-) -> dict[int, BCDataset]:
+) -> tuple[dict[int, BCDataset], dict[int, list[tuple[str, int]]]]:
   """Load the full behavioral cloning dataset.
 
   1. Calls Rust optimal_actions_all for per-state optimal action data
@@ -113,7 +113,9 @@ def load_bc_dataset(
   3. Filters to canonical (deduplicated) levels
   4. Builds BCDataset per grid_size
 
-  Returns dict mapping grid_size -> BCDataset.
+  Returns (datasets, sources) where:
+    datasets: dict mapping grid_size -> BCDataset
+    sources: dict mapping grid_size -> list of (file_stem, sublevel_idx)
   """
   # Load Rust optimal actions
   rust_data = mummymaze_rust.optimal_actions_all(str(maze_dir))
@@ -126,12 +128,10 @@ def load_bc_dataset(
   for gs, src_list in sources.items():
     source_to_bank_idx[gs] = {(stem, sub): i for i, (stem, sub) in enumerate(src_list)}
 
-  # Build train/val index sets per grid_size for level-based split
+  # Build train index sets per grid_size for level-based split
   train_idx_sets: dict[int, set[int]] = {}
-  val_idx_sets: dict[int, set[int]] = {}
   for gs, bank in banks.items():
     train_idx_sets[gs] = set(np.array(bank.train_indices).tolist())
-    val_idx_sets[gs] = set(np.array(bank.val_indices).tolist())
 
   # Accumulate per-grid_size data
   gs_tuples: dict[int, list[np.ndarray]] = {}
@@ -153,37 +153,18 @@ def load_bc_dataset(
 
     bank_idx = lookup[key]
     states = entry["states"]
-    action_masks = entry["action_masks"]
+    action_masks_raw = entry["action_masks"]
     n = len(states)
 
-    # Convert state tuples to numpy array
-    tuples_np = np.zeros((n, 12), dtype=np.int32)
-    for i, s in enumerate(states):
-      # (pr, pc, m1r, m1c, m1_alive, m2r, m2c, m2_alive, sr, sc, s_alive, gate_open)
-      tuples_np[i] = [
-        s[0],
-        s[1],
-        s[2],
-        s[3],
-        int(s[4]),
-        s[5],
-        s[6],
-        int(s[7]),
-        s[8],
-        s[9],
-        int(s[10]),
-        int(s[11]),
-      ]
+    # Convert state tuples to numpy array (vectorized)
+    tuples_np = np.array(states, dtype=np.int32).reshape(n, 12)
 
-    # Convert action bitmasks to soft label vectors
-    targets_np = np.zeros((n, 5), dtype=np.float32)
-    for i, mask in enumerate(action_masks):
-      bits = [(mask >> j) & 1 for j in range(5)]
-      k = sum(bits)
-      if k > 0:
-        for j in range(5):
-          if bits[j]:
-            targets_np[i, j] = 1.0 / k
+    # Convert action bitmasks to soft label vectors (vectorized)
+    masks_np = np.array(action_masks_raw, dtype=np.int32)
+    bits = ((masks_np[:, None] >> np.arange(5)[None, :]) & 1).astype(np.float32)
+    counts = bits.sum(axis=1, keepdims=True)
+    counts = np.maximum(counts, 1)  # avoid division by zero
+    targets_np = bits / counts
 
     if grid_size not in gs_tuples:
       gs_tuples[grid_size] = []
@@ -220,4 +201,4 @@ def load_bc_dataset(
       val_mask=jnp.array(~all_is_train),
     )
 
-  return datasets
+  return datasets, sources

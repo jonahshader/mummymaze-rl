@@ -215,15 +215,10 @@ pub fn optimal_actions_all(
     let results: Vec<(String, usize, i32, Vec<(crate::game::State, u8)>)> = all_levels
         .par_iter()
         .filter_map(|(stem, sub_idx, lev)| {
-            // Only process solvable levels
-            let bfs = solver::solve(lev);
-            if bfs.moves.is_none() {
-                return None;
-            }
             let graph = build_graph(lev);
             let optimal = graph.optimal_actions();
             if optimal.is_empty() {
-                return None;
+                return None; // unsolvable levels have no winnable states
             }
             Some((stem.clone(), *sub_idx, lev.grid_size, optimal))
         })

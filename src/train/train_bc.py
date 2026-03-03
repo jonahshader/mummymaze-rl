@@ -105,21 +105,24 @@ def compute_level_metrics(
   log_probs = jax.nn.log_softmax(all_logits_arr, axis=-1)
   per_state_loss = -jnp.sum(ds.action_targets * log_probs, axis=-1)
 
-  # Aggregate by level
+  # Aggregate by level using bincount
   level_idx_np = np.array(ds.level_idx)
   correct_np = np.array(per_state_correct)
   loss_np = np.array(per_state_loss)
 
+  n_levels = ds.n_levels
+  counts = np.bincount(level_idx_np, minlength=n_levels)
+  correct_sums = np.bincount(level_idx_np, weights=correct_np, minlength=n_levels)
+  loss_sums = np.bincount(level_idx_np, weights=loss_np, minlength=n_levels)
+
   metrics: dict[int, dict[str, object]] = {}
-  for lvl_idx in np.unique(level_idx_np):
-    mask = level_idx_np == lvl_idx
-    n_states_level = int(mask.sum())
-    acc = float(correct_np[mask].mean())
-    mean_loss = float(loss_np[mask].mean())
-    metrics[int(lvl_idx)] = {
-      "n_states": n_states_level,
-      "accuracy": round(acc, 4),
-      "mean_loss": round(mean_loss, 4),
+  for lvl_idx in range(n_levels):
+    if counts[lvl_idx] == 0:
+      continue
+    metrics[lvl_idx] = {
+      "n_states": int(counts[lvl_idx]),
+      "accuracy": round(float(correct_sums[lvl_idx] / counts[lvl_idx]), 4),
+      "mean_loss": round(float(loss_sums[lvl_idx] / counts[lvl_idx]), 4),
     }
 
   return metrics
@@ -154,18 +157,6 @@ def write_level_metrics(
   metrics_path.write_text(json.dumps(output, indent=2))
 
 
-def _get_sources(
-  maze_dir: Path,
-  val_fraction: float,
-  seed: int,
-) -> dict[int, list[tuple[str, int]]]:
-  """Get source mapping without building full banks (reuse load_all_levels)."""
-  from src.env.level_bank import load_all_levels
-
-  _, sources = load_all_levels(maze_dir, val_fraction=val_fraction, seed=seed)
-  return sources
-
-
 def train(
   maze_dir: Path,
   epochs: int = 10,
@@ -182,7 +173,7 @@ def train(
   # Load dataset
   print("Loading dataset...")
   t0 = time.time()
-  datasets = load_bc_dataset(maze_dir)
+  datasets, sources = load_bc_dataset(maze_dir)
   print(f"Dataset loaded in {time.time() - t0:.1f}s")
   for gs, ds in sorted(datasets.items()):
     n_train = int(ds.train_mask.sum())
@@ -232,9 +223,6 @@ def train(
         "total_train_states": total_train_states,
       },
     )
-
-  # Get source mapping for level_metrics.json keys
-  sources = _get_sources(maze_dir, val_fraction=0.1, seed=42)
 
   # Pre-extract train/val indices per grid_size
   train_indices: dict[int, Int[Array, "n_train"]] = {}
