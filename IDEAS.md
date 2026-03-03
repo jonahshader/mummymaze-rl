@@ -3,8 +3,11 @@
 ## Project Goal
 
 Use Mummy Maze Deluxe as a testbed for RL architectures, particularly those
-targeting long-horizon planning and partial observability. Parse official levels
-via `mummy-maze-parser` and convert them to JAX-friendly representations.
+targeting long-horizon planning and partial observability. The game is fully
+parsed, solved, and analyzed — 10,100 levels with exact ground-truth metrics
+(optimal solutions, state graphs, win probabilities, difficulty features).
+The next phase is training agents and using their performance to understand
+both the architectures and the levels.
 
 ## Why Mummy Maze?
 
@@ -12,45 +15,71 @@ via `mummy-maze-parser` and convert them to JAX-friendly representations.
 - Difficulty scales smoothly: trivial levels to 66+ move optimal solutions
 - Partial observability in "dark pyramid" levels (only player cell + 8 neighbors visible)
 - State space is small enough to train quickly, but planning problem is hard
-- Ground truth optimal solutions available for evaluation
+- Ground truth optimal solutions and exact Markov analysis available for evaluation
+- Rich per-level analytics: win probability under random play, dead-end ratio, path safety, etc.
 
-## Environment Design
+## What's Built
 
-- **Framework:** Gymnax-style functional API (`step`/`reset`, pytree state, `jax.vmap` for batching)
-- **State:** Carries both true game state and agent's observation history (for partial observability)
-- **Grid sizes:** 6, 8, or 10 (from .dat file header)
-- **Entities:** Player, mummy (white/red), scorpion, trap, key, gate
+### JAX Environment (`src/env/`)
+- Gymnax-style functional API (`step`/`reset`, pytree state, `jax.vmap` for batching)
+- 11-channel CNN grid observation encoder
+- Grid sizes 6/8/10, runtime masking for heterogeneous levels
+- 100% verified against 9,814 BFS solutions
 
-## Architecture Ideas
+### Rust Crate (`crates/mummymaze/`)
+- Game engine, BFS solver, full state graph builder, Markov chain solver
+- Per-level metrics: n_states, win_prob, expected_steps, dead-end ratio, branching factor, optimal solution count, greedy deviation, path safety
+- PyO3 bindings for Python access; all 10,100 levels analyzed in ~25s
 
-### Observation Encoding
+### Interactive Viewer (`crates/mummymaze-viewer/`)
+- Playable maze with undo/redo, filterable level table
+- 3D force-directed state graph visualization (GPU-accelerated)
+- Node coloring by win%, expected steps, BFS depth, safety
+- Click-to-navigate: click a graph node to jump gameplay to that state
 
-Per-cell token: `position_embed(row, col) + entity_embed(type) + wall_embed(bitmask)`
-with a mask for unobserved cells in dark levels.
+## Next Up
 
-### CNN Baseline
+### Behavioral Cloning from BFS (CNN)
+- Supervised learning: CNN predicts optimal action from the 11-channel grid observation
+- Train on all winnable states (not just the optimal path) — BFS backward from WIN gives optimal action(s) at every reachable winnable state
+- Soft labels: if k actions are equally optimal at a state, target is 1/k for each (cross-entropy against soft targets)
+- Needs a new Rust export: for each winnable state in a level, return the observation + set of optimal actions
+- Serves as architecture sanity check (if CNN can't clone BFS, it can't learn PPO) and gives a first difficulty signal (per-level cloning accuracy)
 
-- 3-4 conv layers on a multi-channel grid encoding (one channel per wall direction, one per entity type)
-- Stateless — sufficient for fully observable levels
-- Simple, fast, good baseline to measure against
+### PPO + CNN Baseline
+- Train PPO with the existing 11-channel CNN observation on fully observable levels
+- Log per-level episode success rate at regular training checkpoints
+- Start with a mixed set of levels across difficulty range
 
-### Transformer
+### Empirical Difficulty Metric
+- Use trained agent pass rates as ground truth for "level difficulty"
+- Random-policy win probability (already computed via Markov) is the zero-intelligence baseline
+- Regress agent pass rates against existing graph features to find which matter
+- Multiple training snapshots give a learning curve per level — the inflection point (when the agent starts reliably solving a level) may be the best single difficulty signal
+- Compare architectures: if CNN finds a level hard but transformer doesn't, that isolates planning depth as the difficulty factor
 
-- Entity embeddings + spatial embeddings summed per cell (ViT-style)
-- Established pattern: ViT, Gato, AlphaFold pair representations, board game agents
-- Memory component for partial observability (context window of recent observations)
+### Per-Cell Token Observation Encoder
+- `position_embed(row, col) + entity_embed(type) + wall_embed(bitmask)`
+- Mask for unobserved cells in dark pyramid levels
+- Needed for transformer and attention-based architectures
 
-### Models to Test
+## Future Directions
 
-- **Deep residual networks** — "1000 Layer Networks for Self-Supervised RL" (scaling depth as implicit planning/computation)
-- **Continuous Thought Machines** — Sakana AI CTM (adaptive computation time, "think longer" on harder states)
-- **Standard baselines** — PPO with CNN, PPO with transformer
+### Architectures
+- **Transformer** — ViT-style over per-cell tokens, memory component for partial observability
+- **Deep residual networks** — "1000 Layer Networks for Self-Supervised RL" (depth as implicit planning)
+- **Continuous Thought Machines** — Sakana AI CTM (adaptive computation, "think longer" on harder states)
 
-### Stateless vs Stateful
+### Partial Observability
+- Dark pyramid levels: only player cell + 8 neighbors visible
+- Requires stateful architecture (RNN, memory-augmented, or observation history window)
+- Fully observable levels should work with stateless (reactive) policies
 
-- Fully observable levels: stateless (reactive) policy should suffice
-- Dark pyramid levels: stateful architecture required (RNN, memory-augmented, or observation history window)
-- Design architecture to support both modes
+### State Graph Analysis
+- Deception metric: states where apparent progress is high but win probability is low
+- Critical decision analysis: win-prob gap between best and second-best action per state
+- Winning corridor width: how narrow is the set of winnable states at each BFS depth?
+- Trap depth: how far into a losing basin can you go before getting stuck?
 
 ## Open Questions
 
