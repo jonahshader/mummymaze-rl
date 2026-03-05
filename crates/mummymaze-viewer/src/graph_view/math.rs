@@ -1,6 +1,6 @@
 //! Camera types for graph visualization: 2D pan/zoom and 3D orbital.
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Quat, Vec3, Vec4};
 
 use super::types::CameraUniform;
 
@@ -113,10 +113,10 @@ impl PanZoomCamera {
 // 3D orbital camera (for force-directed layout)
 // ---------------------------------------------------------------------------
 
-/// Orbital camera with spherical coordinates around a target point.
+/// Trackball camera using quaternion orientation around a target point.
+/// Drag rotates around camera-local axes, allowing free orbit without gimbal lock.
 pub struct OrbitalCamera {
-    pub yaw: f32,
-    pub pitch: f32,
+    pub orientation: Quat,
     pub distance: f32,
     pub target: Vec3,
     pub fov_y: f32,
@@ -128,8 +128,7 @@ pub struct OrbitalCamera {
 impl OrbitalCamera {
     pub fn new() -> Self {
         OrbitalCamera {
-            yaw: 0.0,
-            pitch: 0.3,
+            orientation: Quat::from_euler(glam::EulerRot::YXZ, 0.0, -0.3, 0.0),
             distance: 30.0,
             target: Vec3::ZERO,
             fov_y: std::f32::consts::FRAC_PI_4,
@@ -139,33 +138,25 @@ impl OrbitalCamera {
         }
     }
 
-    /// Eye position from spherical coordinates.
+    /// Eye position: target + orientation * (0, 0, distance).
     pub fn eye(&self) -> Vec3 {
-        let cp = self.pitch.cos();
-        self.target
-            + Vec3::new(
-                self.distance * cp * self.yaw.sin(),
-                self.distance * self.pitch.sin(),
-                self.distance * cp * self.yaw.cos(),
-            )
+        self.target + self.orientation * Vec3::new(0.0, 0.0, self.distance)
     }
 
-    /// Camera right vector (world space, in XZ plane).
+    /// Camera right vector (local +X rotated into world).
     pub fn right(&self) -> Vec3 {
-        Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin())
+        self.orientation * Vec3::X
     }
 
-    /// Camera up vector (world space, accounting for pitch).
+    /// Camera up vector (local +Y rotated into world).
     pub fn up(&self) -> Vec3 {
-        let r = self.right();
-        let fwd = (self.target - self.eye()).normalize_or_zero();
-        r.cross(fwd)
+        self.orientation * Vec3::Y
     }
 
     /// Build the view-projection matrix and billboard vectors for the GPU.
     pub fn to_uniform(&self) -> CameraUniform {
         let eye = self.eye();
-        let view = Mat4::look_at_rh(eye, self.target, Vec3::Y);
+        let view = Mat4::look_at_rh(eye, self.target, self.up());
         let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
         let view_proj = proj * view;
 
@@ -199,7 +190,6 @@ impl OrbitalCamera {
 
         self.target = centroid;
         self.distance = radius / (self.fov_y / 2.0).sin() * 1.3;
-        self.yaw = 0.0;
-        self.pitch = 0.3;
+        self.orientation = Quat::from_euler(glam::EulerRot::YXZ, 0.0, -0.3, 0.0);
     }
 }

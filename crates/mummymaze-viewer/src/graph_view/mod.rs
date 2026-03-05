@@ -968,13 +968,14 @@ impl GraphView {
         response: &egui::Response,
         rect: egui::Rect,
     ) {
-        // Orbit: left-drag
+        // Orbit: left-drag (trackball — rotate around camera-local axes)
         if response.dragged_by(egui::PointerButton::Primary) {
             let delta = response.drag_delta();
-            self.cam_3d.yaw -= delta.x * 0.005;
-            self.cam_3d.pitch += delta.y * 0.005;
-            let limit = std::f32::consts::FRAC_PI_2 - 0.01;
-            self.cam_3d.pitch = self.cam_3d.pitch.clamp(-limit, limit);
+            let right = self.cam_3d.right();
+            let up = self.cam_3d.up();
+            let rot_x = glam::Quat::from_axis_angle(up, -delta.x * 0.005);
+            let rot_y = glam::Quat::from_axis_angle(right, -delta.y * 0.005);
+            self.cam_3d.orientation = (rot_x * rot_y * self.cam_3d.orientation).normalize();
             self.auto_follow = false;
         }
 
