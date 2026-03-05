@@ -1,5 +1,6 @@
 //! PyO3 bindings for the mummymaze crate.
 
+use numpy::PyReadonlyArray2;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::Path;
@@ -111,16 +112,17 @@ fn solve_all_actions(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Ve
     Ok(out)
 }
 
-/// Compute optimal actions for all solvable levels. Releases the GIL, uses rayon internally.
+/// Compute best (distance-reducing) actions for every winnable state across all levels.
+/// Releases the GIL, uses rayon internally.
 /// Returns list of dicts: {"file": str, "sublevel": int, "grid_size": int,
 ///   "states": [(pr, pc, m1r, m1c, m1_alive, m2r, m2c, m2_alive, sr, sc, s_alive, gate_open), ...],
 ///   "action_masks": [int, ...]}
 #[pyfunction]
 #[pyo3(signature = (maze_dir, jobs=0))]
-fn optimal_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyObject>> {
+fn best_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyObject>> {
     let path = Path::new(maze_dir);
     let results = py
-        .allow_threads(|| batch::optimal_actions_all(path, jobs))
+        .allow_threads(|| batch::best_actions_all(path, jobs))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let mut out = Vec::with_capacity(results.len());
@@ -201,6 +203,57 @@ fn build_graph(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<PyOb
     Ok(dict.into())
 }
 
+/// Compute exact win probability under an arbitrary policy for a batch of levels.
+///
+/// Arguments:
+/// - maze_dir: path to directory of .dat files
+/// - level_keys: list of (file_stem, sublevel) tuples identifying each level
+/// - state_tuples: numpy array of shape (total_states, 12) dtype i32
+/// - action_probs: numpy array of shape (total_states, 5) dtype f32
+/// - offsets: list of n_levels+1 ints slicing into the flat arrays
+///
+/// Returns a list of f64 win probabilities, one per level.
+#[pyfunction]
+#[pyo3(signature = (maze_dir, level_keys, state_tuples, action_probs, offsets))]
+fn policy_win_prob_batch(
+    py: Python<'_>,
+    maze_dir: &str,
+    level_keys: Vec<(String, usize)>,
+    state_tuples: PyReadonlyArray2<i32>,
+    action_probs: PyReadonlyArray2<f32>,
+    offsets: Vec<usize>,
+) -> PyResult<Vec<f64>> {
+    let path = Path::new(maze_dir);
+
+    // Extract contiguous slices from numpy arrays
+    let st_array = state_tuples.as_array();
+    let ap_array = action_probs.as_array();
+
+    let n_states = st_array.nrows();
+    let mut st_vec: Vec<[i32; 12]> = Vec::with_capacity(n_states);
+    for row in st_array.rows() {
+        let mut arr = [0i32; 12];
+        for (i, &v) in row.iter().enumerate() {
+            arr[i] = v;
+        }
+        st_vec.push(arr);
+    }
+
+    let mut ap_vec: Vec<[f32; 5]> = Vec::with_capacity(n_states);
+    for row in ap_array.rows() {
+        let mut arr = [0f32; 5];
+        for (i, &v) in row.iter().enumerate() {
+            arr[i] = v;
+        }
+        ap_vec.push(arr);
+    }
+
+    py.allow_threads(|| {
+        batch::policy_win_prob_batch(path, &level_keys, &st_vec, &ap_vec, &offsets)
+    })
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+}
+
 /// Python module definition
 #[pymodule]
 fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -210,6 +263,7 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_level_actions, m)?)?;
     m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
-    m.add_function(wrap_pyfunction!(optimal_actions_all, m)?)?;
+    m.add_function(wrap_pyfunction!(best_actions_all, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_win_prob_batch, m)?)?;
     Ok(())
 }

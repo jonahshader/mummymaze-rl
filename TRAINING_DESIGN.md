@@ -17,7 +17,7 @@ observation (or raw state) and the set of optimal BFS actions.
 Algorithm: BFS backward from WIN to compute depth per state, then for each
 transient state, collect actions whose successor has depth = current_depth - 1.
 
-PyO3 binding: `optimal_actions_dataset(maze_dir) -> list[dict]` or similar,
+PyO3 binding: `best_actions_all(maze_dir) -> list[dict]`,
 returning per-state data across all solvable levels.
 
 ### Dataset Construction

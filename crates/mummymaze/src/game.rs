@@ -86,6 +86,25 @@ impl State {
         }
     }
 
+    /// Construct a State from a 12-element i32 array (matching the Python tuple order).
+    /// Bool fields are stored as 0/1 ints.
+    pub fn from_i32_array(t: &[i32; 12]) -> State {
+        State {
+            player_row: t[0],
+            player_col: t[1],
+            mummy1_row: t[2],
+            mummy1_col: t[3],
+            mummy1_alive: t[4] != 0,
+            mummy2_row: t[5],
+            mummy2_col: t[6],
+            mummy2_alive: t[7] != 0,
+            scorpion_row: t[8],
+            scorpion_col: t[9],
+            scorpion_alive: t[10] != 0,
+            gate_open: t[11] != 0,
+        }
+    }
+
     /// Normalize dead entities to sentinel positions so that states with
     /// dead entities at different positions hash/compare as equal.
     /// The binary doesn't reset positions on death, but for state graph

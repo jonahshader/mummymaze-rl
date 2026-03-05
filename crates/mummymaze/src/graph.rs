@@ -115,10 +115,14 @@ impl StateGraph {
         dist
     }
 
-    /// For each winnable state, compute a 5-bit action bitmask of optimal actions.
+    /// For every winnable state, compute a 5-bit bitmask of distance-reducing actions.
     /// Bit i is set if action i (N=0,S=1,E=2,W=3,Wait=4) leads to a successor
     /// with dist_to_win = current_dist - 1 (or directly to WIN for dist=1).
-    pub fn optimal_actions(&self) -> Vec<(State, u8)> {
+    ///
+    /// Returns ALL states with win_prob > 0 (not just those on a single shortest path).
+    /// Every winnable state has at least one distance-reducing action, so the mask
+    /// is always non-zero. Dead-end states (win_prob = 0) are excluded.
+    pub fn best_actions_per_state(&self) -> Vec<(State, u8)> {
         let dist = self.dist_to_win();
         let mut result = Vec::with_capacity(dist.len());
 

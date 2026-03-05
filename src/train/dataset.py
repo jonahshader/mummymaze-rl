@@ -108,7 +108,7 @@ def load_bc_dataset(
 ) -> tuple[dict[int, BCDataset], dict[int, list[tuple[str, int]]]]:
   """Load the full behavioral cloning dataset.
 
-  1. Calls Rust optimal_actions_all for per-state optimal action data
+  1. Calls Rust best_actions_all for per-state best action data
   2. Calls load_all_levels for dedup set + LevelBank data
   3. Filters to canonical (deduplicated) levels
   4. Builds BCDataset per grid_size
@@ -118,7 +118,7 @@ def load_bc_dataset(
     sources: dict mapping grid_size -> list of (file_stem, sublevel_idx)
   """
   # Load Rust optimal actions
-  rust_data = mummymaze_rust.optimal_actions_all(str(maze_dir))
+  rust_data = mummymaze_rust.best_actions_all(str(maze_dir))
 
   # Load level banks (with dedup) for LevelData and train/val split
   banks, sources = load_all_levels(maze_dir, val_fraction=val_fraction, seed=seed)

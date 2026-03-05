@@ -8,7 +8,7 @@
 //! so Gauss-Seidel is guaranteed to converge.
 
 use crate::error::{MummyMazeError, Result};
-use crate::game::State;
+use crate::game::{Action, State};
 use crate::graph::{StateGraph, StateKey};
 use rustc_hash::FxHashMap;
 
@@ -34,9 +34,17 @@ pub struct MarkovChain {
     pub idx_to_state: Vec<State>,
 }
 
+/// Computes action probability for a single action given the state's transition list.
+type ProbFn<'a> = &'a dyn Fn(&State, Action, usize, usize) -> f64;
+
 impl MarkovChain {
-    /// Build the sparse Markov chain representation from a state graph.
-    pub fn from_graph(graph: &StateGraph) -> Self {
+    /// Shared construction logic: builds the sparse Markov chain using a caller-provided
+    /// function that returns the probability for each (state, action) pair.
+    ///
+    /// `prob_fn(state, action, action_index, k)` returns the probability for the given
+    /// action, where `action_index` is its position in the transition list and `k` is
+    /// the total number of valid actions for that state.
+    fn build(graph: &StateGraph, prob_fn: ProbFn<'_>) -> Self {
         let indices = graph.state_indices();
         let state_to_idx = &indices.state_to_idx;
         let idx_to_state = indices.idx_to_state;
@@ -44,11 +52,8 @@ impl MarkovChain {
 
         let start_idx = state_to_idx[&graph.start];
 
-        // Build sparse Q (transient -> transient) and win absorption vector
-        // q_rows[i] = vec of (j, prob) for transitions from state i to state j (j != i)
         let mut q_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut win_absorb: Vec<f64> = vec![0.0; n];
-        // diag[i] = (I-Q)[i,i] = 1 - Q[i,i]
         let mut diag: Vec<f64> = vec![1.0; n];
 
         for (s, s_idx) in state_to_idx {
@@ -57,20 +62,17 @@ impl MarkovChain {
             if k == 0 {
                 continue;
             }
-            let prob = 1.0 / k as f64;
 
-            for &(_, next_key) in action_map {
+            for (idx, &(action, next_key)) in action_map.iter().enumerate() {
+                let prob = prob_fn(s, action, idx, k);
                 match next_key {
                     StateKey::Win => {
                         win_absorb[*s_idx] += prob;
                     }
-                    StateKey::Dead => {
-                        // absorbed into dead state, contributes nothing
-                    }
+                    StateKey::Dead => {}
                     StateKey::Transient(next_state) => {
                         let j = state_to_idx[&next_state];
                         if j == *s_idx {
-                            // Self-loop: Q[i,i] increases, so diag (I-Q)[i,i] decreases
                             diag[*s_idx] -= prob;
                         } else {
                             q_rows[*s_idx].push((j, prob));
@@ -80,7 +82,6 @@ impl MarkovChain {
             }
         }
 
-        // Identify trapped states (diag ≈ 0 means all transitions are self-loops)
         let mut trapped = vec![false; n];
         for i in 0..n {
             if diag[i].abs() < 1e-15 {
@@ -96,6 +97,50 @@ impl MarkovChain {
             start_idx,
             idx_to_state,
         }
+    }
+
+    /// Build the sparse Markov chain representation from a state graph.
+    pub fn from_graph(graph: &StateGraph) -> Self {
+        Self::build(graph, &|_state, _action, _idx, k| 1.0 / k as f64)
+    }
+
+    /// Build the sparse Markov chain using arbitrary per-state action probabilities.
+    ///
+    /// `policy` maps each state to raw (unnormalized) probabilities for the 5 actions
+    /// [N, S, E, W, Wait]. Only actions present in the state's transition map are kept;
+    /// the rest are zeroed and the remaining probs are renormalized. Falls back to
+    /// uniform 1/k for states not in the policy map or when all kept probs are ~0.
+    pub fn from_graph_with_policy(
+        graph: &StateGraph,
+        policy: &FxHashMap<State, [f64; 5]>,
+    ) -> Self {
+        // Pre-compute per-state normalization sums so the prob_fn closure is cheap.
+        // For each state in the graph, sum the policy probs over valid actions only.
+        let sums: FxHashMap<State, f64> = graph
+            .transitions
+            .iter()
+            .filter_map(|(s, action_map)| {
+                let raw = policy.get(s)?;
+                let sum: f64 = action_map
+                    .iter()
+                    .map(|(action, _)| raw[action.to_index() as usize])
+                    .sum();
+                Some((*s, sum))
+            })
+            .collect();
+
+        Self::build(graph, &|state, action, _idx, k| {
+            let uniform = 1.0 / k as f64;
+            let Some(raw) = policy.get(state) else {
+                return uniform;
+            };
+            let sum = sums[state];
+            if sum > 1e-30 {
+                raw[action.to_index() as usize] / sum
+            } else {
+                uniform
+            }
+        })
     }
 
     /// Number of transient states.
