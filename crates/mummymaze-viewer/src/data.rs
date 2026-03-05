@@ -121,6 +121,7 @@ pub enum TrainingStatus {
         loss: f64,
         acc: f64,
         gs: i32,
+        status_text: String,
     },
     Done,
     Error(String),
@@ -420,6 +421,7 @@ impl DataStore {
                     loss: 0.0,
                     acc: 0.0,
                     gs: 0,
+                    status_text: "Loading dataset...".into(),
                 };
             }
             Err(e) => {
@@ -492,6 +494,7 @@ impl DataStore {
                         loss: ref mut l,
                         acc: ref mut a,
                         gs: ref mut g,
+                        status_text: ref mut st,
                         ..
                     } = self.training_status
                     {
@@ -499,6 +502,16 @@ impl DataStore {
                         *l = loss;
                         *a = acc;
                         *g = gs;
+                        st.clear();
+                    }
+                }
+                TrainingEvent::Status(text) => {
+                    if let TrainingStatus::Running {
+                        status_text: ref mut st,
+                        ..
+                    } = self.training_status
+                    {
+                        *st = text;
                     }
                 }
                 TrainingEvent::EpochEnd { .. } => {}

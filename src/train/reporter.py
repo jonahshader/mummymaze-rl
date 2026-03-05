@@ -67,6 +67,7 @@ class MetricsReporter(Protocol):
     metrics: dict,
     sources: dict,
   ) -> None: ...
+  def report_status(self, status: str) -> None: ...
   def report_done(self) -> None: ...
   def check_command(self) -> str | None: ...
 
@@ -105,6 +106,9 @@ class FileReporter:
     sources: dict,
   ) -> None:
     write_level_metrics(metrics, sources, step, run_id, self.metrics_path)
+
+  def report_status(self, status: str) -> None:
+    pass
 
   def report_done(self) -> None:
     pass
@@ -189,6 +193,9 @@ class StdioReporter:
         "levels": build_levels_dict(metrics, sources),
       }
     )
+
+  def report_status(self, status: str) -> None:
+    self._emit({"type": "status", "status": status})
 
   def report_done(self) -> None:
     self._flush_batch()

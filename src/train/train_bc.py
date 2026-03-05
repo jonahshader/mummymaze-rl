@@ -281,6 +281,8 @@ def train(
   for gs, ds in datasets.items():
     logits_buffers[gs] = np.zeros((ds.n_states, 5), dtype=np.float32)
 
+  jitted_grid_sizes: set[int] = set()
+
   global_step = 0
   stop_requested = False
   if use_tqdm:
@@ -329,6 +331,10 @@ def train(
       batch_targets = ds.action_targets[batch_idx]
       batch_level_idx = ds.level_idx[batch_idx]
 
+      if gs not in jitted_grid_sizes:
+        reporter.report_status(f"Jitting grid_size={gs}...")
+        jitted_grid_sizes.add(gs)
+
       obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
       model, opt_state, loss, acc, logits = train_step(
         model, opt_state, optimizer, obs, batch_targets
@@ -364,6 +370,7 @@ def train(
       break
 
     # Validation
+    reporter.report_status("Validating...")
     val_batches: list[tuple[int, Int[Array, "B"]]] = []
     for gs in sorted(datasets):
       vi = val_indices[gs]
@@ -431,7 +438,8 @@ def train(
     ckpt_path = checkpoint_dir / f"model_epoch{epoch + 1:03d}.eqx"
     eqx.tree_serialise_leaves(ckpt_path, model)
 
-    # Compute level metrics (use accumulated train logits, only infer val)
+    # Compute level metrics
+    reporter.report_status("Computing level metrics...")
     all_metrics: dict[int, dict[int, dict[str, object]]] = {}
     total_val_states = sum(int(ds.val_mask.sum()) for ds in datasets.values())
     if use_tqdm:

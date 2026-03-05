@@ -241,6 +241,7 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
             loss,
             acc,
             gs,
+            status_text,
         } => {
             let epoch = *epoch;
             let total_epochs = *total_epochs;
@@ -248,6 +249,7 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
             let loss = *loss;
             let acc = *acc;
             let gs = *gs;
+            let status_text = status_text.clone();
 
             ui.horizontal(|ui: &mut Ui| {
                 // Progress bar
@@ -262,15 +264,23 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
                         .desired_width(150.0),
                 );
 
-                ui.separator();
-                ui.label(format!("Step: {step}"));
-                ui.separator();
-                ui.label(format!("Loss: {loss:.3}"));
-                ui.separator();
-                ui.label(format!("Acc: {acc:.3}"));
-                if gs > 0 {
+                if status_text.is_empty() {
+                    // Normal training — show live metrics
                     ui.separator();
-                    ui.label(format!("GS: {gs}"));
+                    ui.label(format!("Step: {step}"));
+                    ui.separator();
+                    ui.label(format!("Loss: {loss:.3}"));
+                    ui.separator();
+                    ui.label(format!("Acc: {acc:.3}"));
+                    if gs > 0 {
+                        ui.separator();
+                        ui.label(format!("GS: {gs}"));
+                    }
+                } else {
+                    // Between-epoch phase (validating, computing metrics, etc.)
+                    ui.separator();
+                    ui.spinner();
+                    ui.label(&status_text);
                 }
 
                 ui.separator();

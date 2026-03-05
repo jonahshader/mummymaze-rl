@@ -45,6 +45,9 @@ enum RawEvent {
         timestamp: String,
         levels: HashMap<String, LevelMetric>,
     },
+    Status {
+        status: String,
+    },
     Done,
     Error {
         message: String,
@@ -91,6 +94,7 @@ pub enum TrainingEvent {
         run_id: String,
         levels: HashMap<String, LevelMetric>,
     },
+    Status(String),
     Done,
     Error(String),
 }
@@ -205,6 +209,7 @@ impl TrainingProcess {
                             run_id,
                             levels,
                         },
+                        RawEvent::Status { status } => TrainingEvent::Status(status),
                         RawEvent::Done => TrainingEvent::Done,
                         RawEvent::Error { message } => TrainingEvent::Error(message),
                     },
