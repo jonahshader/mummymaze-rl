@@ -150,9 +150,14 @@ impl MarkovChain {
 
     /// Solve (I-Q)x = win_absorb for per-state win probabilities.
     pub fn solve_win_probs(&self) -> Result<Vec<f64>> {
+        self.solve_win_probs_tol(TOLERANCE, MAX_ITERATIONS)
+    }
+
+    /// Solve (I-Q)x = win_absorb with custom convergence parameters.
+    pub fn solve_win_probs_tol(&self, tol: f64, max_iter: usize) -> Result<Vec<f64>> {
         let n = self.n_states();
         let mut x = vec![0.0f64; n];
-        for _ in 0..MAX_ITERATIONS {
+        for _ in 0..max_iter {
             let mut max_diff = 0.0f64;
             for i in 0..n {
                 if self.trapped[i] {
@@ -169,11 +174,11 @@ impl MarkovChain {
                 }
                 x[i] = new_val;
             }
-            if max_diff < TOLERANCE {
+            if max_diff < tol {
                 return Ok(x);
             }
         }
-        Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
+        Err(MummyMazeError::ConvergenceFailure(max_iter))
     }
 
     /// Solve (I-Q)t = 1 for per-state expected steps to absorption.

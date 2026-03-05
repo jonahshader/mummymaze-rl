@@ -18,6 +18,7 @@ use mummymaze::graph::StateGraph;
 enum RightTab {
     Graph,
     Training,
+    Logs,
 }
 
 struct App {
@@ -299,6 +300,12 @@ impl eframe::App for App {
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.selectable_value(&mut self.right_tab, RightTab::Graph, "Graph");
                 ui.selectable_value(&mut self.right_tab, RightTab::Training, "Training");
+                let log_label = if self.store.log_messages.is_empty() {
+                    "Logs".to_string()
+                } else {
+                    format!("Logs ({})", self.store.log_messages.len())
+                };
+                ui.selectable_value(&mut self.right_tab, RightTab::Logs, log_label);
             });
             ui.separator();
 
@@ -310,6 +317,23 @@ impl eframe::App for App {
                     {
                         self.select_level(clicked);
                     }
+                }
+                RightTab::Logs => {
+                    ui.horizontal(|ui: &mut egui::Ui| {
+                        ui.label(format!("{} messages", self.store.log_messages.len()));
+                        if ui.button("Clear").clicked() {
+                            self.store.log_messages.clear();
+                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui: &mut egui::Ui| {
+                            for msg in &self.store.log_messages {
+                                ui.label(egui::RichText::new(msg).monospace().size(12.0));
+                            }
+                        });
                 }
             }
         });

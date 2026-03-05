@@ -19,6 +19,7 @@ pub struct LevelMetric {
     pub n_states: usize,
     pub accuracy: f64,
     pub mean_loss: f64,
+    pub agent_win_prob: Option<f64>,
 }
 
 pub struct TrainingMetrics {

@@ -65,6 +65,7 @@ pub struct DataStore {
     pub epoch_history: Vec<EpochRecord>,
     pub batch_loss_history: Vec<[f64; 2]>,
     pub curve_plot_height: f32,
+    pub log_messages: Vec<String>,
 }
 
 impl DataStore {
@@ -132,6 +133,7 @@ impl DataStore {
             epoch_history: Vec::new(),
             batch_loss_history: Vec::new(),
             curve_plot_height: 150.0,
+            log_messages: Vec::new(),
         };
         store.refresh_sort_filter();
         store

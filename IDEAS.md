@@ -87,3 +87,14 @@ both the architectures and the levels.
 - Curriculum: train on easy levels first, or mixed difficulty?
 - How to represent enemy movement rules to the agent (implicit via experience, or explicit)?
 - Evaluation metric: % levels solved, move optimality gap, generalization to unseen levels?
+
+## Backlog / Nice-to-have
+
+- **Agent expected_steps**: same Markov solver with `(I-Q)t = 1` using agent
+  probs. Cheap to add once win% is working. Gives "how many moves does the
+  agent typically need" — arguably more intuitive than win%.
+- **Async Markov computation**: fire off Rust call in a background thread
+  (Rust releases the GIL), continue training next epoch, collect results
+  before next level_metrics report. Would need to snapshot/copy the logits
+  buffer (~50MB per gs) since it gets overwritten during training. Not worth
+  it unless the synchronous ~5-6s overhead becomes a bottleneck.

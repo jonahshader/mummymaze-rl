@@ -8,7 +8,7 @@ use std::path::Path;
 struct ScatterPoint {
     row_idx: usize,
     win_prob: f64,
-    accuracy: f64,
+    agent_win_prob: f64,
     grid_size: i32,
 }
 
@@ -82,10 +82,13 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
         let Some(metric) = tm.get(&row.file_stem, row.sublevel) else {
             continue;
         };
+        let Some(agent_wp) = metric.agent_win_prob else {
+            continue;
+        };
         points.push(ScatterPoint {
             row_idx: i,
             win_prob: analysis.win_prob,
-            accuracy: metric.accuracy,
+            agent_win_prob: agent_wp,
             grid_size: row.level.grid_size,
         });
     }
@@ -95,7 +98,7 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
     // Scatter plot
     let plot = Plot::new("training_scatter")
         .x_axis_label("Random Win%")
-        .y_axis_label("Agent Accuracy")
+        .y_axis_label("Agent Win%")
         .data_aspect(1.0)
         .allow_boxed_zoom(true)
         .allow_drag(true)
@@ -127,7 +130,7 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
             let pts: Vec<[f64; 2]> = points
                 .iter()
                 .filter(|p| p.grid_size == gs)
-                .map(|p| [p.win_prob, p.accuracy])
+                .map(|p| [p.win_prob, p.agent_win_prob])
                 .collect();
 
             if !pts.is_empty() {
@@ -145,7 +148,7 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
             && let Some(p) = points.iter().find(|p| p.row_idx == sel)
         {
             plot_ui.points(
-                Points::new(vec![[p.win_prob, p.accuracy]])
+                Points::new(vec![[p.win_prob, p.agent_win_prob]])
                     .color(egui::Color32::YELLOW)
                     .radius(6.0)
                     .name("Selected"),
@@ -163,7 +166,7 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
         let mut best_idx = None;
         for p in &points {
             let dx = p.win_prob - plot_pos.x;
-            let dy = p.accuracy - plot_pos.y;
+            let dy = p.agent_win_prob - plot_pos.y;
             let dist = dx * dx + dy * dy;
             if dist < best_dist {
                 best_dist = dist;
@@ -182,7 +185,11 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
         let row = &store.rows[sel];
         if let Some(metric) = tm.get(&row.file_stem, row.sublevel) {
             ui.horizontal(|ui: &mut Ui| {
-                ui.label(format!("Agent Accuracy: {:.1}%", metric.accuracy * 100.0));
+                if let Some(wp) = metric.agent_win_prob {
+                    ui.label(format!("Win% (agent): {:.1}%", wp * 100.0));
+                    ui.separator();
+                }
+                ui.label(format!("Accuracy: {:.1}%", metric.accuracy * 100.0));
                 ui.separator();
                 ui.label(format!("Mean Loss: {:.3}", metric.mean_loss));
             });

@@ -206,6 +206,9 @@ impl DataStore {
                     tm.update_from_event(run_id, step, levels);
                     needs_resort = true;
                 }
+                TrainingEvent::Log(msg) => {
+                    self.log_messages.push(msg);
+                }
                 TrainingEvent::Done => {
                     self.training_status = TrainingStatus::Done;
                     self.training_process = None;

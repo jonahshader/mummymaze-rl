@@ -10,6 +10,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import mummymaze_rust
 import numpy as np
 import optax
 from collections.abc import Callable
@@ -463,6 +464,44 @@ def train(
       )
     if metrics_pbar is not None:
       metrics_pbar.close()
+
+    # Compute agent win% via Markov solver
+    reporter.report_status("Computing agent win%...")
+    from scipy.special import softmax as scipy_softmax
+
+    for gs, ds in datasets.items():
+      probs = scipy_softmax(logits_buffers[gs], axis=-1)  # (n_states, 5) f32
+
+      level_idx_np = np.array(ds.level_idx)
+      counts = np.bincount(level_idx_np, minlength=ds.n_levels)
+      offsets = np.zeros(ds.n_levels + 1, dtype=np.intp)
+      np.cumsum(counts, out=offsets[1:])
+
+      level_keys = list(sources[gs])
+      state_tuples_np = np.asarray(ds.state_tuples, dtype=np.int32)
+
+      win_probs = mummymaze_rust.policy_win_prob_batch(
+        str(maze_dir), level_keys, state_tuples_np, probs, offsets.tolist()
+      )
+
+      failed_levels: list[str] = []
+      for lvl_idx, wp in enumerate(win_probs):
+        if lvl_idx in all_metrics[gs]:
+          if np.isnan(wp):
+            stem, sub = level_keys[lvl_idx]
+            failed_levels.append(f"{stem}:{sub}")
+          else:
+            all_metrics[gs][lvl_idx]["agent_win_prob"] = round(wp, 6)
+      if failed_levels:
+        msg = (
+          f"WARNING: {len(failed_levels)} gs={gs} levels failed convergence: "
+          f"{', '.join(failed_levels[:10])}"
+          f"{'...' if len(failed_levels) > 10 else ''}"
+        )
+        reporter.report_log(msg)
+        if use_tqdm:
+          print(f"  {msg}")
+
     reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
     if use_tqdm:
       print(f"  Wrote {metrics_path}")
