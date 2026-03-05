@@ -60,6 +60,7 @@ type SharedLevel = Arc<Level>;
 pub enum LayoutMode {
     ForceDirected,
     BfsLayers,
+    BfsCylinder,
     RadialTree,
 }
 
@@ -68,12 +69,13 @@ impl LayoutMode {
         match self {
             LayoutMode::ForceDirected => "Force-Directed",
             LayoutMode::BfsLayers => "BFS Layers",
+            LayoutMode::BfsCylinder => "BFS Cylinder",
             LayoutMode::RadialTree => "Radial Tree",
         }
     }
 
     fn is_3d(self) -> bool {
-        self == LayoutMode::ForceDirected
+        matches!(self, LayoutMode::ForceDirected | LayoutMode::BfsCylinder)
     }
 }
 
@@ -494,6 +496,36 @@ impl GraphView {
                 }
                 pos
             }
+            LayoutMode::BfsCylinder => {
+                let mut pos = layout::bfs_cylinder_positions(&state_to_idx, &depths, n_nodes);
+                let spacing_y = 3.0;
+                let min_radius = 2.0;
+                for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
+                    let pi = state_to_idx[&parent];
+                    let pp = pos[pi];
+                    let parent_depth = depths.get(&parent).copied().unwrap_or(0);
+                    let child_depth = parent_depth + 1;
+                    // Place terminal at same angle as parent but one layer down
+                    let r_xz = (pp[0] * pp[0] + pp[2] * pp[2]).sqrt();
+                    if r_xz > 0.001 {
+                        let angle = pp[2].atan2(pp[0]);
+                        pos[ti] = [
+                            r_xz * angle.cos(),
+                            -(child_depth as f32 * spacing_y),
+                            r_xz * angle.sin(),
+                        ];
+                    } else {
+                        // Parent at origin (depth 0), push terminal outward
+                        let angle = ti as f32 * 2.4;
+                        pos[ti] = [
+                            min_radius * angle.cos(),
+                            -(child_depth as f32 * spacing_y),
+                            min_radius * angle.sin(),
+                        ];
+                    }
+                }
+                pos
+            }
             LayoutMode::RadialTree => {
                 let mut pos = layout::radial_tree_positions(&state_to_idx, &depths, n_nodes);
                 let ring_spacing = 3.0;
@@ -868,6 +900,11 @@ impl GraphView {
                         &mut self.layout_mode,
                         LayoutMode::BfsLayers,
                         LayoutMode::BfsLayers.label(),
+                    );
+                    ui.selectable_value(
+                        &mut self.layout_mode,
+                        LayoutMode::BfsCylinder,
+                        LayoutMode::BfsCylinder.label(),
                     );
                     ui.selectable_value(
                         &mut self.layout_mode,

@@ -63,6 +63,42 @@ pub fn bfs_layer_positions(
     positions
 }
 
+/// BFS cylinder layout: each depth layer is a ring in XZ, stacked along -Y.
+pub fn bfs_cylinder_positions(
+    state_indices: &FxHashMap<State, usize>,
+    depths: &FxHashMap<State, u32>,
+    n: usize,
+) -> Vec<[f32; 3]> {
+    let (_max_depth, layers) = group_by_depth(state_indices, depths);
+    let mut positions = vec![[0.0f32; 3]; n];
+
+    let spacing_y = 3.0;
+    let min_radius = 2.0;
+    let arc_spacing = 2.0; // desired arc-length between adjacent nodes
+
+    for (d, layer) in layers.iter().enumerate() {
+        let n_in_layer = layer.len();
+        if n_in_layer == 0 {
+            continue;
+        }
+        if d == 0 {
+            // Start node(s) at origin
+            for &idx in layer {
+                positions[idx] = [0.0, 0.0, 0.0];
+            }
+            continue;
+        }
+        // Radius scales so adjacent nodes are ~arc_spacing apart on the ring
+        let radius = (n_in_layer as f32 * arc_spacing / (2.0 * std::f32::consts::PI)).max(min_radius);
+        let y = -(d as f32 * spacing_y);
+        for (i, &idx) in layer.iter().enumerate() {
+            let angle = 2.0 * std::f32::consts::PI * (i as f32 / n_in_layer as f32);
+            positions[idx] = [radius * angle.cos(), y, radius * angle.sin()];
+        }
+    }
+    positions
+}
+
 /// Radial tree layout: concentric rings in XZ plane, Y=0.
 pub fn radial_tree_positions(
     state_indices: &FxHashMap<State, usize>,
