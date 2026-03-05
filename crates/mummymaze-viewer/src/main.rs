@@ -185,8 +185,8 @@ impl eframe::App for App {
         if self.store.is_training() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // Poll training metrics file periodically
-        if self.store.training_metrics.is_some() {
+        // Poll training metrics file periodically (skip when subprocess provides data)
+        if self.store.training_metrics.is_some() && !self.store.is_training() {
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
 

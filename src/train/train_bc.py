@@ -4,7 +4,6 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import equinox as eqx
@@ -171,35 +170,6 @@ def compute_level_metrics(
   return metrics
 
 
-def write_level_metrics(
-  all_metrics: dict[int, dict[int, dict[str, object]]],
-  sources: dict[int, list[tuple[str, int]]],
-  step: int,
-  run_id: str,
-  metrics_path: Path,
-) -> None:
-  """Write level_metrics.json with per-level stats."""
-  levels: dict[str, object] = {}
-  for gs, gs_metrics in all_metrics.items():
-    src_list = sources.get(gs, [])
-    for bank_idx, stats in gs_metrics.items():
-      if bank_idx < len(src_list):
-        file_stem, sublevel = src_list[bank_idx]
-        key = f"{file_stem}:{sublevel}"
-      else:
-        key = f"gs{gs}:idx{bank_idx}"
-      levels[key] = {"grid_size": gs, **stats}
-
-  output = {
-    "run_id": run_id,
-    "step": step,
-    "timestamp": datetime.now(timezone.utc).isoformat(),
-    "levels": levels,
-  }
-  metrics_path.parent.mkdir(parents=True, exist_ok=True)
-  metrics_path.write_text(json.dumps(output, indent=2))
-
-
 def train(
   maze_dir: Path,
   epochs: int = 10,
@@ -326,7 +296,8 @@ def train(
     reporter.report_epoch_start(epoch + 1, epochs)
 
     # Build train batches across all grid sizes for a single progress bar
-    train_batches: list[tuple[int, Int[Array, "B"]]] = []
+    # Each entry: (grid_size, jax_indices, numpy_indices_for_scatter)
+    train_batches: list[tuple[int, Int[Array, "B"], np.ndarray]] = []
     for gs in sorted(datasets):
       ds = datasets[gs]
       ti = train_indices[gs]
@@ -336,15 +307,17 @@ def train(
       key, shuffle_key = jr.split(key)
       perm = jr.permutation(shuffle_key, n_train)
       shuffled = ti[perm]
+      shuffled_np = np.array(shuffled)
       n_batches = n_train // batch_size
       for b in range(n_batches):
-        train_batches.append((gs, shuffled[b * batch_size : (b + 1) * batch_size]))
+        slc = slice(b * batch_size, (b + 1) * batch_size)
+        train_batches.append((gs, shuffled[slc], shuffled_np[slc]))
 
     if use_tqdm:
       pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{epochs}", unit="batch")
     else:
       pbar = train_batches
-    for gs, batch_idx in pbar:
+    for gs, batch_idx, batch_idx_np in pbar:
       # Check for stop command
       cmd = reporter.check_command()
       if cmd == "stop":
@@ -361,7 +334,7 @@ def train(
         model, opt_state, optimizer, obs, batch_targets
       )
       # Scatter logits into buffer for level metrics
-      logits_buffers[gs][np.array(batch_idx)] = np.array(logits)
+      logits_buffers[gs][batch_idx_np] = np.array(logits)
       global_step += 1
 
       loss_val = float(loss)

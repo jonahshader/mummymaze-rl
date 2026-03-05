@@ -1,3 +1,4 @@
+use crate::data::TrainingConfig;
 use crate::training_metrics::LevelMetric;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -102,14 +103,7 @@ pub struct TrainingProcess {
 
 impl TrainingProcess {
     /// Spawn the Python training subprocess.
-    pub fn spawn(
-        maze_dir: &Path,
-        epochs: u32,
-        batch_size: u32,
-        lr: f64,
-        seed: u32,
-        wandb_project: Option<&str>,
-    ) -> Result<Self, String> {
+    pub fn spawn(maze_dir: &Path, config: &TrainingConfig) -> Result<Self, String> {
         let mut cmd = Command::new("uv");
         cmd.args([
             "run",
@@ -121,12 +115,12 @@ impl TrainingProcess {
             "--mazes",
         ])
         .arg(maze_dir.as_os_str())
-        .args(["--epochs", &epochs.to_string()])
-        .args(["--batch-size", &batch_size.to_string()])
-        .args(["--lr", &lr.to_string()])
-        .args(["--seed", &seed.to_string()]);
-        if let Some(project) = wandb_project {
-            cmd.args(["--wandb-project", project]);
+        .args(["--epochs", &config.epochs.to_string()])
+        .args(["--batch-size", &config.batch_size.to_string()])
+        .args(["--lr", &config.lr.to_string()])
+        .args(["--seed", &config.seed.to_string()]);
+        if config.wandb {
+            cmd.args(["--wandb-project", &config.wandb_project]);
         }
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -246,10 +240,18 @@ impl TrainingProcess {
     }
 
     /// Drain available events without blocking.
+    /// Consecutive Batch events are collapsed to only the last one.
     pub fn poll(&mut self) -> Vec<TrainingEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.event_rx.try_recv() {
-            events.push(event);
+            // Collapse consecutive batch events — only the latest matters
+            if matches!(event, TrainingEvent::Batch { .. })
+                && matches!(events.last(), Some(TrainingEvent::Batch { .. }))
+            {
+                *events.last_mut().unwrap() = event;
+            } else {
+                events.push(event);
+            }
         }
         events
     }

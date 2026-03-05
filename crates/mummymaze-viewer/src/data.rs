@@ -410,19 +410,7 @@ impl DataStore {
     /// Start a training subprocess.
     pub fn start_training(&mut self, maze_dir: &Path) {
         let config = &self.training_config;
-        let wandb = if config.wandb {
-            Some(config.wandb_project.as_str())
-        } else {
-            None
-        };
-        match TrainingProcess::spawn(
-            maze_dir,
-            config.epochs,
-            config.batch_size,
-            config.lr,
-            config.seed,
-            wandb,
-        ) {
+        match TrainingProcess::spawn(maze_dir, config) {
             Ok(proc) => {
                 self.training_process = Some(proc);
                 self.training_status = TrainingStatus::Running {
@@ -522,7 +510,7 @@ impl DataStore {
                     // Update training metrics directly from event data
                     let tm = self
                         .training_metrics
-                        .get_or_insert_with(TrainingMetrics::empty);
+                        .get_or_insert_with(|| TrainingMetrics::new(std::path::PathBuf::new()));
                     tm.update_from_event(run_id, step, levels);
                     if self.sort_col.is_tier2() {
                         self.refresh_sort_filter();

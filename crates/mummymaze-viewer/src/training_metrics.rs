@@ -83,17 +83,6 @@ impl TrainingMetrics {
         self.levels = levels;
     }
 
-    /// Create an empty TrainingMetrics (no file backing).
-    pub fn empty() -> Self {
-        TrainingMetrics {
-            run_id: String::new(),
-            step: 0,
-            levels: HashMap::new(),
-            path: PathBuf::new(),
-            last_mtime: None,
-        }
-    }
-
     pub fn get(&self, file_stem: &str, sublevel: usize) -> Option<&LevelMetric> {
         let key = format!("{file_stem}:{sublevel}");
         self.levels.get(&key)
