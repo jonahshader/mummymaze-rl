@@ -4,6 +4,7 @@ mod graph_view;
 mod render;
 mod table;
 mod training_metrics;
+mod training_process;
 mod training_tab;
 
 use data::DataStore;
@@ -26,6 +27,7 @@ struct App {
     /// Stored graph for click-to-navigate BFS lookups.
     graph: Option<StateGraph>,
     right_tab: RightTab,
+    maze_dir: std::path::PathBuf,
 }
 
 impl App {
@@ -44,6 +46,7 @@ impl App {
             graph_view,
             graph: None,
             right_tab: RightTab::Graph,
+            maze_dir: maze_dir.to_path_buf(),
         }
     }
 
@@ -174,6 +177,14 @@ impl eframe::App for App {
         if self.store.is_analyzing() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Poll training process events
+        if self.store.poll_training() {
+            ctx.request_repaint();
+        }
+        // Fast repaint while training is running for responsive batch updates
+        if self.store.is_training() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         // Poll training metrics file periodically
         if self.store.training_metrics.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
@@ -294,7 +305,9 @@ impl eframe::App for App {
             match self.right_tab {
                 RightTab::Graph => self.draw_graph_panel(ui),
                 RightTab::Training => {
-                    if let Some(clicked) = training_tab::draw_training_panel(ui, &self.store) {
+                    if let Some(clicked) =
+                        training_tab::draw_training_panel(ui, &mut self.store, &self.maze_dir)
+                    {
                         self.select_level(clicked);
                     }
                 }

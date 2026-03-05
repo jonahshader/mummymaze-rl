@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from jaxtyping import Array, Float, Int
 
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
 from src.train.model import MazeCNN
+from src.train.reporter import FileReporter, StdioReporter
 
 
 def cross_entropy_loss(
@@ -50,8 +52,14 @@ def train_step(
   optimizer: optax.GradientTransformation,
   obs: Float[Array, "B 10 H W"],
   targets: Float[Array, "B 5"],
-) -> tuple[MazeCNN, optax.OptState, Float[Array, ""], Float[Array, ""]]:
-  """Single training step: forward, loss, backward, update."""
+) -> tuple[
+  MazeCNN,
+  optax.OptState,
+  Float[Array, ""],
+  Float[Array, ""],
+  Float[Array, "B 5"],
+]:
+  """Single training step: forward, loss, backward, update. Returns logits too."""
 
   def loss_fn(m: MazeCNN) -> tuple[Float[Array, ""], Float[Array, "B 5"]]:
     logits = jax.vmap(m)(obs)
@@ -62,7 +70,7 @@ def train_step(
   updates, new_opt_state = optimizer.update(grads, opt_state, model)  # type: ignore[arg-type]
   new_model = eqx.apply_updates(model, updates)
   acc = top1_accuracy(logits, targets)
-  return new_model, new_opt_state, loss, acc
+  return new_model, new_opt_state, loss, acc, logits
 
 
 @eqx.filter_jit
@@ -83,23 +91,53 @@ def compute_level_metrics(
   ds: BCDataset,
   batch_size: int,
   pbar: tqdm | None = None,
+  logits_buffer: np.ndarray | None = None,
+  jit_make_obs_fn: Callable[..., Any] | None = None,
 ) -> dict[int, dict[str, object]]:
-  """Compute per-level accuracy and loss for level_metrics.json."""
-  # Run inference on all states in chunks
+  """Compute per-level accuracy and loss for level_metrics.json.
+
+  If logits_buffer is provided, train logits are taken from the buffer
+  and only val states need fresh inference (~10x speedup).
+  """
   n = ds.n_states
-  all_logits = []
 
-  for start in range(0, n, batch_size):
-    end = min(start + batch_size, n)
-    batch_tuples = ds.state_tuples[start:end]
-    batch_level_idx = ds.level_idx[start:end]
-    obs = make_batch_obs(ds.grid_size, ds.bank, batch_tuples, batch_level_idx)
-    logits = jax.vmap(model)(obs)
-    all_logits.append(logits)
-    if pbar is not None:
-      pbar.update(end - start)
+  if logits_buffer is not None:
+    # Use accumulated train logits from buffer, only run inference on val states
+    all_logits_arr = jnp.array(logits_buffer)
 
-  all_logits_arr = jnp.concatenate(all_logits, axis=0)
+    # Run inference only on val states
+    val_indices = jnp.where(ds.val_mask, size=int(ds.val_mask.sum()))[0]
+    n_val = val_indices.shape[0]
+
+    for start in range(0, n_val, batch_size):
+      end = min(start + batch_size, n_val)
+      batch_idx = val_indices[start:end]
+      batch_tuples = ds.state_tuples[batch_idx]
+      batch_level_idx = ds.level_idx[batch_idx]
+      if jit_make_obs_fn is not None:
+        obs = jit_make_obs_fn(batch_tuples, batch_level_idx)
+      else:
+        obs = make_batch_obs(ds.grid_size, ds.bank, batch_tuples, batch_level_idx)
+      logits = jax.vmap(model)(obs)
+      all_logits_arr = all_logits_arr.at[batch_idx].set(logits)
+      if pbar is not None:
+        pbar.update(end - start)
+  else:
+    # Full inference on all states (no buffer available)
+    all_logits = []
+    for start in range(0, n, batch_size):
+      end = min(start + batch_size, n)
+      batch_tuples = ds.state_tuples[start:end]
+      batch_level_idx = ds.level_idx[start:end]
+      if jit_make_obs_fn is not None:
+        obs = jit_make_obs_fn(batch_tuples, batch_level_idx)
+      else:
+        obs = make_batch_obs(ds.grid_size, ds.bank, batch_tuples, batch_level_idx)
+      logits = jax.vmap(model)(obs)
+      all_logits.append(logits)
+      if pbar is not None:
+        pbar.update(end - start)
+    all_logits_arr = jnp.concatenate(all_logits, axis=0)
 
   # Compute per-state correctness and loss
   preds = jnp.argmax(all_logits_arr, axis=-1)
@@ -171,25 +209,33 @@ def train(
   wandb_project: str | None = None,
   metrics_path: Path = Path("level_metrics.json"),
   checkpoint_dir: Path = Path("checkpoints"),
+  reporter: FileReporter | StdioReporter | None = None,
 ) -> MazeCNN:
   """Main training loop."""
+  if reporter is None:
+    reporter = FileReporter(metrics_path)
+
+  use_tqdm = isinstance(reporter, FileReporter)
   key = jr.key(seed)
 
   # Load dataset
-  print("Loading dataset...")
+  if use_tqdm:
+    print("Loading dataset...")
   t0 = time.time()
   datasets, sources = load_bc_dataset(maze_dir)
-  print(f"Dataset loaded in {time.time() - t0:.1f}s")
-  for gs, ds in sorted(datasets.items()):
-    n_train = int(ds.train_mask.sum())
-    n_val = int(ds.val_mask.sum())
-    print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
+  if use_tqdm:
+    print(f"Dataset loaded in {time.time() - t0:.1f}s")
+    for gs, ds in sorted(datasets.items()):
+      n_train = int(ds.train_mask.sum())
+      n_val = int(ds.val_mask.sum())
+      print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
 
   # Initialize model
   key, model_key = jr.split(key)
   model = MazeCNN(model_key)
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
-  print(f"Model: {n_params:,} parameters")
+  if use_tqdm:
+    print(f"Model: {n_params:,} parameters")
 
   # Optimizer
   total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
@@ -229,6 +275,21 @@ def train(
       },
     )
 
+  # Report init
+  reporter.report_init(
+    {
+      "n_params": n_params,
+      "epochs": epochs,
+      "batch_size": batch_size,
+      "lr": lr,
+      "seed": seed,
+      "datasets": {
+        str(gs): {"n_states": ds.n_states, "n_levels": ds.n_levels}
+        for gs, ds in datasets.items()
+      },
+    }
+  )
+
   # Pre-extract train/val indices per grid_size
   train_indices: dict[int, Int[Array, "n_train"]] = {}
   val_indices: dict[int, Int[Array, "n_val"]] = {}
@@ -245,13 +306,24 @@ def train(
       )
     )
 
+  # Pre-allocate logits buffers for accumulation (~56MB total)
+  logits_buffers: dict[int, np.ndarray] = {}
+  for gs, ds in datasets.items():
+    logits_buffers[gs] = np.zeros((ds.n_states, 5), dtype=np.float32)
+
   global_step = 0
-  print(f"\nTraining for {epochs} epochs ({total_steps} steps)...")
+  stop_requested = False
+  if use_tqdm:
+    print(f"\nTraining for {epochs} epochs ({total_steps} steps)...")
 
   for epoch in range(epochs):
+    if stop_requested:
+      break
+
     epoch_t0 = time.time()
     epoch_losses: list[float] = []
     epoch_accs: list[float] = []
+    reporter.report_epoch_start(epoch + 1, epochs)
 
     # Build train batches across all grid sizes for a single progress bar
     train_batches: list[tuple[int, Int[Array, "B"]]] = []
@@ -268,24 +340,39 @@ def train(
       for b in range(n_batches):
         train_batches.append((gs, shuffled[b * batch_size : (b + 1) * batch_size]))
 
-    pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{epochs}", unit="batch")
+    if use_tqdm:
+      pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{epochs}", unit="batch")
+    else:
+      pbar = train_batches
     for gs, batch_idx in pbar:
+      # Check for stop command
+      cmd = reporter.check_command()
+      if cmd == "stop":
+        stop_requested = True
+        break
+
       ds = datasets[gs]
       batch_tuples = ds.state_tuples[batch_idx]
       batch_targets = ds.action_targets[batch_idx]
       batch_level_idx = ds.level_idx[batch_idx]
 
       obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-      model, opt_state, loss, acc = train_step(
+      model, opt_state, loss, acc, logits = train_step(
         model, opt_state, optimizer, obs, batch_targets
       )
+      # Scatter logits into buffer for level metrics
+      logits_buffers[gs][np.array(batch_idx)] = np.array(logits)
       global_step += 1
 
       loss_val = float(loss)
       acc_val = float(acc)
       epoch_losses.append(loss_val)
       epoch_accs.append(acc_val)
-      pbar.set_postfix(loss=f"{loss_val:.3f}", acc=f"{acc_val:.3f}", gs=gs)
+
+      if use_tqdm:
+        pbar.set_postfix(loss=f"{loss_val:.3f}", acc=f"{acc_val:.3f}", gs=gs)  # type: ignore[union-attr]
+
+      reporter.report_batch(global_step, loss_val, acc_val, gs)
 
       if wandb_project is not None:
         import wandb
@@ -300,6 +387,9 @@ def train(
           step=global_step,
         )
 
+    if stop_requested:
+      break
+
     # Validation
     val_batches: list[tuple[int, Int[Array, "B"]]] = []
     for gs in sorted(datasets):
@@ -313,7 +403,11 @@ def train(
 
     val_losses: list[float] = []
     val_accs: list[float] = []
-    for gs, batch_idx in tqdm(val_batches, desc="  Validating", unit="batch"):
+    if use_tqdm:
+      val_iter = tqdm(val_batches, desc="  Validating", unit="batch")
+    else:
+      val_iter = val_batches
+    for gs, batch_idx in val_iter:
       ds = datasets[gs]
       batch_tuples = ds.state_tuples[batch_idx]
       batch_targets = ds.action_targets[batch_idx]
@@ -324,15 +418,25 @@ def train(
       val_losses.append(float(loss))
       val_accs.append(float(acc))
 
-    mean_train_loss = np.mean(epoch_losses) if epoch_losses else 0.0
-    mean_train_acc = np.mean(epoch_accs) if epoch_accs else 0.0
-    mean_val_loss = np.mean(val_losses) if val_losses else 0.0
-    mean_val_acc = np.mean(val_accs) if val_accs else 0.0
+    mean_train_loss = float(np.mean(epoch_losses)) if epoch_losses else 0.0
+    mean_train_acc = float(np.mean(epoch_accs)) if epoch_accs else 0.0
+    mean_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
+    mean_val_acc = float(np.mean(val_accs)) if val_accs else 0.0
     epoch_time = time.time() - epoch_t0
 
-    print(
-      f"  train loss={mean_train_loss:.4f} acc={mean_train_acc:.4f} — "
-      f"val loss={mean_val_loss:.4f} acc={mean_val_acc:.4f} ({epoch_time:.1f}s)"
+    if use_tqdm:
+      print(
+        f"  train loss={mean_train_loss:.4f} acc={mean_train_acc:.4f} — "
+        f"val loss={mean_val_loss:.4f} acc={mean_val_acc:.4f} ({epoch_time:.1f}s)"
+      )
+
+    reporter.report_epoch_end(
+      epoch + 1,
+      mean_train_loss,
+      mean_train_acc,
+      mean_val_loss,
+      mean_val_acc,
+      epoch_time,
     )
 
     if wandb_project is not None:
@@ -354,15 +458,33 @@ def train(
     ckpt_path = checkpoint_dir / f"model_epoch{epoch + 1:03d}.eqx"
     eqx.tree_serialise_leaves(ckpt_path, model)
 
-    # Write level_metrics.json
+    # Compute level metrics (use accumulated train logits, only infer val)
     all_metrics: dict[int, dict[int, dict[str, object]]] = {}
-    total_states = sum(ds.n_states for ds in datasets.values())
-    metrics_pbar = tqdm(total=total_states, desc="  Level metrics", unit="state")
+    total_val_states = sum(int(ds.val_mask.sum()) for ds in datasets.values())
+    if use_tqdm:
+      metrics_pbar = tqdm(
+        total=total_val_states,
+        desc="  Level metrics",
+        unit="state",
+      )
+    else:
+      metrics_pbar = None
     for gs, ds in datasets.items():
-      all_metrics[gs] = compute_level_metrics(model, ds, batch_size, metrics_pbar)
-    metrics_pbar.close()
-    write_level_metrics(all_metrics, sources, global_step, run_id, metrics_path)
-    print(f"  Wrote {metrics_path}")
+      all_metrics[gs] = compute_level_metrics(
+        model,
+        ds,
+        batch_size,
+        metrics_pbar,
+        logits_buffer=logits_buffers[gs],
+        jit_make_obs_fn=jit_make_obs[gs],
+      )
+    if metrics_pbar is not None:
+      metrics_pbar.close()
+    reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
+    if use_tqdm:
+      print(f"  Wrote {metrics_path}")
+
+  reporter.report_done()
 
   if wandb_project is not None:
     import wandb
@@ -388,18 +510,37 @@ def main() -> None:
   parser.add_argument("--wandb-project", type=str, default=None)
   parser.add_argument("--metrics-path", type=Path, default=Path("level_metrics.json"))
   parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
+  parser.add_argument(
+    "--mode",
+    choices=["standalone", "subprocess"],
+    default="standalone",
+    help="standalone: tqdm + file output; subprocess: JSON lines to stdout",
+  )
   args = parser.parse_args()
 
-  train(
-    maze_dir=args.mazes,
-    epochs=args.epochs,
-    batch_size=args.batch_size,
-    lr=args.lr,
-    seed=args.seed,
-    wandb_project=args.wandb_project,
-    metrics_path=args.metrics_path,
-    checkpoint_dir=args.checkpoint_dir,
-  )
+  # Create reporter based on mode
+  if args.mode == "subprocess":
+    reporter: FileReporter | StdioReporter = StdioReporter()
+  else:
+    reporter = FileReporter(args.metrics_path)
+
+  try:
+    train(
+      maze_dir=args.mazes,
+      epochs=args.epochs,
+      batch_size=args.batch_size,
+      lr=args.lr,
+      seed=args.seed,
+      wandb_project=args.wandb_project,
+      metrics_path=args.metrics_path,
+      checkpoint_dir=args.checkpoint_dir,
+      reporter=reporter,
+    )
+  except Exception as e:
+    if args.mode == "subprocess":
+      sys.stdout.write(json.dumps({"type": "error", "message": str(e)}) + "\n")
+      sys.stdout.flush()
+    raise
 
 
 if __name__ == "__main__":

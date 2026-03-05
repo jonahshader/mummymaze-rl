@@ -11,7 +11,7 @@ struct MetricsFile {
     levels: HashMap<String, LevelMetric>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct LevelMetric {
     #[allow(dead_code)]
     pub grid_size: i32,
@@ -69,6 +69,29 @@ impl TrainingMetrics {
         self.levels = parsed.levels;
         self.last_mtime = Some(mtime);
         true
+    }
+
+    /// Update directly from parsed event data (subprocess mode).
+    pub fn update_from_event(
+        &mut self,
+        run_id: String,
+        step: u64,
+        levels: HashMap<String, LevelMetric>,
+    ) {
+        self.run_id = run_id;
+        self.step = step;
+        self.levels = levels;
+    }
+
+    /// Create an empty TrainingMetrics (no file backing).
+    pub fn empty() -> Self {
+        TrainingMetrics {
+            run_id: String::new(),
+            step: 0,
+            levels: HashMap::new(),
+            path: PathBuf::new(),
+            last_mtime: None,
+        }
     }
 
     pub fn get(&self, file_stem: &str, sublevel: usize) -> Option<&LevelMetric> {

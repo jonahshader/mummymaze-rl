@@ -1,4 +1,5 @@
 use crate::training_metrics::TrainingMetrics;
+use crate::training_process::{TrainingEvent, TrainingProcess};
 use mummymaze::batch::{self, LevelAnalysis};
 use mummymaze::parse::Level;
 use mummymaze::solver;
@@ -109,6 +110,45 @@ impl Default for FilterState {
     }
 }
 
+#[derive(Default)]
+pub enum TrainingStatus {
+    #[default]
+    Idle,
+    Running {
+        epoch: u32,
+        total_epochs: u32,
+        step: u64,
+        loss: f64,
+        acc: f64,
+        gs: i32,
+    },
+    Done,
+    Error(String),
+}
+
+/// Config for launching training from the UI.
+pub struct TrainingConfig {
+    pub epochs: u32,
+    pub batch_size: u32,
+    pub lr: f64,
+    pub seed: u32,
+    pub wandb: bool,
+    pub wandb_project: String,
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        TrainingConfig {
+            epochs: 10,
+            batch_size: 1024,
+            lr: 3e-4,
+            seed: 0,
+            wandb: false,
+            wandb_project: "mummy-maze-rl".into(),
+        }
+    }
+}
+
 pub struct DataStore {
     pub rows: Vec<LevelRow>,
     pub sorted_indices: Vec<usize>,
@@ -121,6 +161,9 @@ pub struct DataStore {
     pub selected: Option<usize>,
     analysis_received: usize,
     pub training_metrics: Option<TrainingMetrics>,
+    pub training_process: Option<TrainingProcess>,
+    pub training_status: TrainingStatus,
+    pub training_config: TrainingConfig,
 }
 
 impl DataStore {
@@ -179,6 +222,9 @@ impl DataStore {
             selected: None,
             analysis_received: 0,
             training_metrics,
+            training_process: None,
+            training_status: TrainingStatus::default(),
+            training_config: TrainingConfig::default(),
         };
         store.refresh_sort_filter();
         store
@@ -359,6 +405,145 @@ impl DataStore {
 
     pub fn is_analyzing(&self) -> bool {
         self.analysis_rx.is_some()
+    }
+
+    /// Start a training subprocess.
+    pub fn start_training(&mut self, maze_dir: &Path) {
+        let config = &self.training_config;
+        let wandb = if config.wandb {
+            Some(config.wandb_project.as_str())
+        } else {
+            None
+        };
+        match TrainingProcess::spawn(
+            maze_dir,
+            config.epochs,
+            config.batch_size,
+            config.lr,
+            config.seed,
+            wandb,
+        ) {
+            Ok(proc) => {
+                self.training_process = Some(proc);
+                self.training_status = TrainingStatus::Running {
+                    epoch: 0,
+                    total_epochs: config.epochs,
+                    step: 0,
+                    loss: 0.0,
+                    acc: 0.0,
+                    gs: 0,
+                };
+            }
+            Err(e) => {
+                self.training_status = TrainingStatus::Error(e);
+            }
+        }
+    }
+
+    /// Send stop command to training process.
+    pub fn stop_training(&mut self) {
+        if let Some(ref proc) = self.training_process {
+            proc.send_stop();
+        }
+    }
+
+    /// Kill and clean up training process.
+    #[allow(dead_code)]
+    pub fn kill_training(&mut self) {
+        if let Some(ref mut proc) = self.training_process {
+            proc.kill();
+        }
+        self.training_process = None;
+        self.training_status = TrainingStatus::Idle;
+    }
+
+    /// Poll training process for events. Returns true if any received.
+    pub fn poll_training(&mut self) -> bool {
+        let Some(ref mut proc) = self.training_process else {
+            return false;
+        };
+
+        let events = proc.poll();
+        if events.is_empty() {
+            // Check if process died
+            if !proc.is_running() {
+                if matches!(self.training_status, TrainingStatus::Running { .. }) {
+                    self.training_status =
+                        TrainingStatus::Error("Training process exited unexpectedly".into());
+                }
+                self.training_process = None;
+            }
+            return false;
+        }
+
+        for event in events {
+            match event {
+                TrainingEvent::Init { .. } => {}
+                TrainingEvent::EpochStart {
+                    epoch,
+                    total_epochs,
+                } => {
+                    if let TrainingStatus::Running {
+                        epoch: ref mut e,
+                        total_epochs: ref mut te,
+                        ..
+                    } = self.training_status
+                    {
+                        *e = epoch;
+                        *te = total_epochs;
+                    }
+                }
+                TrainingEvent::Batch {
+                    step,
+                    loss,
+                    acc,
+                    gs,
+                } => {
+                    if let TrainingStatus::Running {
+                        step: ref mut s,
+                        loss: ref mut l,
+                        acc: ref mut a,
+                        gs: ref mut g,
+                        ..
+                    } = self.training_status
+                    {
+                        *s = step;
+                        *l = loss;
+                        *a = acc;
+                        *g = gs;
+                    }
+                }
+                TrainingEvent::EpochEnd { .. } => {}
+                TrainingEvent::LevelMetrics {
+                    step,
+                    run_id,
+                    levels,
+                } => {
+                    // Update training metrics directly from event data
+                    let tm = self
+                        .training_metrics
+                        .get_or_insert_with(TrainingMetrics::empty);
+                    tm.update_from_event(run_id, step, levels);
+                    if self.sort_col.is_tier2() {
+                        self.refresh_sort_filter();
+                    }
+                }
+                TrainingEvent::Done => {
+                    self.training_status = TrainingStatus::Done;
+                    self.training_process = None;
+                }
+                TrainingEvent::Error(msg) => {
+                    self.training_status = TrainingStatus::Error(msg);
+                    self.training_process = None;
+                }
+            }
+        }
+        true
+    }
+
+    /// Check if training is actively running.
+    pub fn is_training(&self) -> bool {
+        self.training_process.is_some()
     }
 
     pub fn toggle_sort(&mut self, col: SortColumn) {
