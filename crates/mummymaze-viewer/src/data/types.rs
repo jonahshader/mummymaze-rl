@@ -8,6 +8,8 @@ pub struct LevelRow {
     pub bfs_moves: Option<u32>,
     pub analysis: Option<LevelAnalysis>,
     pub is_duplicate: bool,
+    /// Pre-computed lowercase "{file_stem} {sublevel}" for filter matching.
+    pub search_text: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

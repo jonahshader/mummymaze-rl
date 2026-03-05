@@ -122,6 +122,8 @@ impl DataStore {
             return false;
         }
 
+        let mut needs_resort = false;
+
         for event in events {
             match event {
                 TrainingEvent::Init { .. } => {}
@@ -198,14 +200,11 @@ impl DataStore {
                     run_id,
                     levels,
                 } => {
-                    // Update training metrics directly from event data
                     let tm = self
                         .training_metrics
                         .get_or_insert_with(|| TrainingMetrics::new(std::path::PathBuf::new()));
                     tm.update_from_event(run_id, step, levels);
-                    if self.sort_col.is_tier2() {
-                        self.refresh_sort_filter();
-                    }
+                    needs_resort = true;
                 }
                 TrainingEvent::Done => {
                     self.training_status = TrainingStatus::Done;
@@ -217,6 +216,11 @@ impl DataStore {
                 }
             }
         }
+
+        if needs_resort && self.sort_col.is_tier2() {
+            self.refresh_sort_filter();
+        }
+
         true
     }
 

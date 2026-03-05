@@ -80,6 +80,7 @@ impl DataStore {
                 let bfs = solver::solve(&lev).moves;
                 let fp = level_fingerprint(&lev);
                 let is_duplicate = !seen.insert(fp);
+                let search_text = format!("{stem} {sub}").to_lowercase();
                 LevelRow {
                     file_stem: stem,
                     sublevel: sub,
@@ -87,6 +88,7 @@ impl DataStore {
                     bfs_moves: bfs,
                     analysis: None,
                     is_duplicate,
+                    search_text,
                 }
             })
             .collect();
@@ -165,21 +167,23 @@ impl DataStore {
     /// Poll for analysis results from background thread. Returns true if new data arrived.
     /// Drains up to 200 results per call to stay responsive.
     pub fn poll_analysis(&mut self) -> bool {
-        let mut received_any = false;
+        let mut needs_resort = false;
 
         // Poll training metrics file
         if let Some(ref mut tm) = self.training_metrics
             && tm.poll()
         {
-            received_any = true;
-            if self.sort_col.is_tier2() {
-                self.refresh_sort_filter();
-            }
+            needs_resort = true;
         }
 
         let rx = match &self.analysis_rx {
             Some(rx) => rx,
-            None => return received_any,
+            None => {
+                if needs_resort && self.sort_col.is_tier2() {
+                    self.refresh_sort_filter();
+                }
+                return needs_resort;
+            }
         };
 
         let mut analysis_received = false;
@@ -203,7 +207,7 @@ impl DataStore {
         }
 
         if analysis_received {
-            received_any = true;
+            needs_resort = true;
             let total = self.rows.len();
             if self.analysis_received >= total || self.analysis_rx.is_none() {
                 self.analysis_progress = None;
@@ -211,13 +215,13 @@ impl DataStore {
             } else {
                 self.analysis_progress = Some((self.analysis_received, total));
             }
-            // Only re-sort if user is sorting by a Tier 2 column
-            if self.sort_col.is_tier2() {
-                self.refresh_sort_filter();
-            }
         }
 
-        received_any
+        if needs_resort && self.sort_col.is_tier2() {
+            self.refresh_sort_filter();
+        }
+
+        needs_resort
     }
 
     /// Rebuild sorted_indices based on current sort + filter.
@@ -227,11 +231,8 @@ impl DataStore {
         self.sorted_indices = (0..self.rows.len())
             .filter(|&i| {
                 let row = &self.rows[i];
-                if !needle.is_empty() {
-                    let haystack = format!("{} {}", row.file_stem, row.sublevel);
-                    if !haystack.to_lowercase().contains(&needle) {
-                        return false;
-                    }
+                if !needle.is_empty() && !row.search_text.contains(&needle) {
+                    return false;
                 }
                 if let Some(gs) = filter.grid_size {
                     if row.level.grid_size != gs {
