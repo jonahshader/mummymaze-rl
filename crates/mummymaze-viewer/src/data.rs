@@ -151,6 +151,14 @@ impl Default for TrainingConfig {
     }
 }
 
+pub struct EpochRecord {
+    pub epoch: u32,
+    pub train_loss: f64,
+    pub train_acc: f64,
+    pub val_loss: f64,
+    pub val_acc: f64,
+}
+
 pub struct DataStore {
     pub rows: Vec<LevelRow>,
     pub sorted_indices: Vec<usize>,
@@ -167,6 +175,9 @@ pub struct DataStore {
     pub training_status: TrainingStatus,
     pub training_config: TrainingConfig,
     pub show_training_config: bool,
+    pub epoch_history: Vec<EpochRecord>,
+    pub batch_loss_history: Vec<[f64; 2]>,
+    pub curve_plot_height: f32,
 }
 
 impl DataStore {
@@ -229,6 +240,9 @@ impl DataStore {
             training_status: TrainingStatus::default(),
             training_config: TrainingConfig::default(),
             show_training_config: false,
+            epoch_history: Vec::new(),
+            batch_loss_history: Vec::new(),
+            curve_plot_height: 150.0,
         };
         store.refresh_sort_filter();
         store
@@ -414,6 +428,8 @@ impl DataStore {
     /// Start a training subprocess.
     pub fn start_training(&mut self, maze_dir: &Path) {
         let config = &self.training_config;
+        self.epoch_history.clear();
+        self.batch_loss_history.clear();
         match TrainingProcess::spawn(maze_dir, config) {
             Ok(proc) => {
                 self.training_process = Some(proc);
@@ -514,6 +530,8 @@ impl DataStore {
                         *g = gs;
                         st.clear();
                     }
+                    self.batch_loss_history
+                        .push([self.batch_loss_history.len() as f64, loss]);
                 }
                 TrainingEvent::Status(text) => {
                     if let TrainingStatus::Running {
@@ -524,7 +542,22 @@ impl DataStore {
                         *st = text;
                     }
                 }
-                TrainingEvent::EpochEnd { .. } => {}
+                TrainingEvent::EpochEnd {
+                    epoch,
+                    train_loss,
+                    train_acc,
+                    val_loss,
+                    val_acc,
+                    ..
+                } => {
+                    self.epoch_history.push(EpochRecord {
+                        epoch,
+                        train_loss,
+                        train_acc,
+                        val_loss,
+                        val_acc,
+                    });
+                }
                 TrainingEvent::LevelMetrics {
                     step,
                     run_id,

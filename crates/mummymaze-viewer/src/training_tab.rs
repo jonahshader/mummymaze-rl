@@ -1,4 +1,4 @@
-use crate::data::{DataStore, TrainingStatus};
+use crate::data::{DataStore, EpochRecord, TrainingStatus};
 use eframe::egui;
 use egui::Ui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
@@ -17,6 +17,37 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
     // Training controls section
     draw_training_controls(ui, store, maze_dir);
     ui.separator();
+
+    // Epoch history curves with draggable divider
+    let has_curves = !store.epoch_history.is_empty() || !store.batch_loss_history.is_empty();
+    if has_curves {
+        draw_epoch_curves(ui, &store.epoch_history, &store.batch_loss_history, store.curve_plot_height);
+
+        // Draggable separator
+        let sep_id = ui.id().with("curve_sep");
+        let sep_rect = ui.allocate_space(egui::vec2(ui.available_width(), 6.0)).1;
+        let sep_response = ui.interact(sep_rect, sep_id, egui::Sense::drag());
+        let active = sep_response.hovered() || sep_response.dragged();
+        ui.painter().hline(
+            sep_rect.x_range(),
+            sep_rect.center().y,
+            egui::Stroke::new(
+                if active { 2.0 } else { 1.0 },
+                if active {
+                    ui.visuals().widgets.active.fg_stroke.color
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke.color
+                },
+            ),
+        );
+        if active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if sep_response.dragged() {
+            store.curve_plot_height = (store.curve_plot_height + sep_response.drag_delta().y)
+                .clamp(60.0, 500.0);
+        }
+    }
 
     let has_training = store
         .training_metrics
@@ -336,4 +367,69 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
             });
         }
     }
+}
+
+/// Draw loss curves, accuracy curves, and batch loss over epochs.
+fn draw_epoch_curves(ui: &mut Ui, history: &[EpochRecord], batch_loss: &[[f64; 2]], height: f32) {
+    let train_color = egui::Color32::from_rgb(70, 130, 230); // blue
+    let val_color = egui::Color32::from_rgb(230, 150, 50); // orange
+
+    ui.columns(3, |cols| {
+        // Left: Epoch Loss
+        let loss_plot = Plot::new("epoch_loss")
+            .x_axis_label("Epoch")
+            .y_axis_label("Loss")
+            .height(height)
+            .allow_drag(true)
+            .allow_scroll(true)
+            .legend(egui_plot::Legend::default());
+
+        loss_plot.show(&mut cols[0], |plot_ui| {
+            let train: PlotPoints = history
+                .iter()
+                .map(|r| [r.epoch as f64, r.train_loss])
+                .collect();
+            let val: PlotPoints = history
+                .iter()
+                .map(|r| [r.epoch as f64, r.val_loss])
+                .collect();
+            plot_ui.line(Line::new(train).color(train_color).name("Train"));
+            plot_ui.line(Line::new(val).color(val_color).name("Val"));
+        });
+
+        // Middle: Epoch Accuracy
+        let acc_plot = Plot::new("epoch_acc")
+            .x_axis_label("Epoch")
+            .y_axis_label("Accuracy")
+            .height(height)
+            .allow_drag(true)
+            .allow_scroll(true)
+            .legend(egui_plot::Legend::default());
+
+        acc_plot.show(&mut cols[1], |plot_ui| {
+            let train: PlotPoints = history
+                .iter()
+                .map(|r| [r.epoch as f64, r.train_acc])
+                .collect();
+            let val: PlotPoints = history
+                .iter()
+                .map(|r| [r.epoch as f64, r.val_acc])
+                .collect();
+            plot_ui.line(Line::new(train).color(train_color).name("Train"));
+            plot_ui.line(Line::new(val).color(val_color).name("Val"));
+        });
+
+        // Right: Batch Loss
+        let batch_plot = Plot::new("batch_loss")
+            .x_axis_label("Step")
+            .y_axis_label("Loss")
+            .height(height)
+            .allow_drag(true)
+            .allow_scroll(true);
+
+        batch_plot.show(&mut cols[2], |plot_ui| {
+            let pts: PlotPoints = batch_loss.iter().copied().collect();
+            plot_ui.line(Line::new(pts).color(train_color).name("Batch Loss"));
+        });
+    });
 }
