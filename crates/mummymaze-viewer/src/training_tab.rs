@@ -1,4 +1,4 @@
-use crate::data::{DataStore, EpochRecord, TrainingStatus};
+use crate::data::{DataStore, EpochRecord, TrainingPhase, TrainingStatus};
 use eframe::egui;
 use egui::Ui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
@@ -288,7 +288,7 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
             loss,
             acc,
             gs,
-            status_text,
+            phase,
             ..
         } => {
             let epoch = *epoch;
@@ -298,7 +298,7 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
             let loss = *loss;
             let acc = *acc;
             let gs = *gs;
-            let status_text = status_text.clone();
+            let phase = phase.clone();
 
             ui.horizontal(|ui: &mut Ui| {
                 // Epoch progress bar
@@ -313,32 +313,33 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
                         .desired_width(150.0),
                 );
 
-                if status_text.is_empty() {
-                    // Step progress bar within epoch
-                    ui.separator();
-                    let step_progress = if steps_in_epoch > 0 {
-                        epoch_step as f32 / steps_in_epoch as f32
-                    } else {
-                        0.0
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(step_progress)
-                            .text(format!("Step {epoch_step}/{steps_in_epoch}"))
-                            .desired_width(150.0),
-                    );
-                    ui.separator();
-                    ui.label(format!("Loss: {loss:.3}"));
-                    ui.separator();
-                    ui.label(format!("Acc: {acc:.3}"));
-                    if gs > 0 {
+                match &phase {
+                    TrainingPhase::Training => {
                         ui.separator();
-                        ui.label(format!("GS: {gs}"));
+                        let step_progress = if steps_in_epoch > 0 {
+                            epoch_step as f32 / steps_in_epoch as f32
+                        } else {
+                            0.0
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(step_progress)
+                                .text(format!("Step {epoch_step}/{steps_in_epoch}"))
+                                .desired_width(150.0),
+                        );
+                        ui.separator();
+                        ui.label(format!("Loss: {loss:.3}"));
+                        ui.separator();
+                        ui.label(format!("Acc: {acc:.3}"));
+                        if gs > 0 {
+                            ui.separator();
+                            ui.label(format!("GS: {gs}"));
+                        }
                     }
-                } else {
-                    // Between-epoch phase (validating, computing metrics, etc.)
-                    ui.separator();
-                    ui.spinner();
-                    ui.label(&status_text);
+                    TrainingPhase::Status(text) => {
+                        ui.separator();
+                        ui.spinner();
+                        ui.label(text);
+                    }
                 }
 
                 // Right-align Stop button so it doesn't shift when content changes

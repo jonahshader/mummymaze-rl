@@ -110,6 +110,13 @@ impl Default for FilterState {
     }
 }
 
+#[derive(Default, Clone)]
+pub enum TrainingPhase {
+    #[default]
+    Training,
+    Status(String),
+}
+
 #[derive(Default)]
 pub enum TrainingStatus {
     #[default]
@@ -122,7 +129,7 @@ pub enum TrainingStatus {
         loss: f64,
         acc: f64,
         gs: i32,
-        status_text: String,
+        phase: TrainingPhase,
     },
     Done,
     Error(String),
@@ -441,7 +448,7 @@ impl DataStore {
                     loss: 0.0,
                     acc: 0.0,
                     gs: 0,
-                    status_text: "Loading dataset...".into(),
+                    phase: TrainingPhase::Status("Loading dataset...".into()),
                 };
             }
             Err(e) => {
@@ -520,7 +527,7 @@ impl DataStore {
                         loss: ref mut l,
                         acc: ref mut a,
                         gs: ref mut g,
-                        status_text: ref mut st,
+                        phase: ref mut ph,
                         ..
                     } = self.training_status
                     {
@@ -528,18 +535,17 @@ impl DataStore {
                         *l = loss;
                         *a = acc;
                         *g = gs;
-                        st.clear();
+                        *ph = TrainingPhase::Training;
                     }
                     self.batch_loss_history
                         .push([self.batch_loss_history.len() as f64, loss]);
                 }
                 TrainingEvent::Status(text) => {
                     if let TrainingStatus::Running {
-                        status_text: ref mut st,
-                        ..
+                        phase: ref mut ph, ..
                     } = self.training_status
                     {
-                        *st = text;
+                        *ph = TrainingPhase::Status(text);
                     }
                 }
                 TrainingEvent::EpochEnd {
