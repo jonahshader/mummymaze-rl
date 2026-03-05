@@ -178,6 +178,11 @@ pub fn build_graph(lev: &Level) -> StateGraph {
                 StepResult::Win => StateKey::Win,
                 StepResult::Dead => StateKey::Dead,
                 StepResult::Ok => {
+                    // Skip self-loops: they don't affect win probability,
+                    // only waste turns and cause Markov convergence issues.
+                    if next == cur {
+                        continue;
+                    }
                     if visited.insert(next) {
                         queue.push_back(next);
                     }

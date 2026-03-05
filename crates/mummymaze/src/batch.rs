@@ -281,9 +281,7 @@ pub fn policy_win_prob_batch(
 
             let graph = build_graph(lev);
             let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
-            // Relaxed tolerance: agent policies can concentrate mass on self-loops,
-            // making convergence much slower than uniform. 1e-8 is plenty for metrics.
-            match chain.solve_win_probs_tol(1e-8, 500_000) {
+            match chain.solve_win_probs_tol(1e-10, 200_000) {
                 Ok(win_probs) => Ok(win_probs[chain.start_idx]),
                 Err(_) => {
                     eprintln!(

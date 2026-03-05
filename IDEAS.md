@@ -98,3 +98,8 @@ both the architectures and the levels.
   before next level_metrics report. Would need to snapshot/copy the logits
   buffer (~50MB per gs) since it gets overwritten during training. Not worth
   it unless the synchronous ~5-6s overhead becomes a bottleneck.
+- **Self-loop handling in game engines**: `build_graph()` now skips self-loops
+  (Wait that doesn't change state), but the game engines still allow them. If we
+  add agent playback/replay in the viewer, agents could get stuck in infinite
+  Wait loops. May need a max-consecutive-wait limit or filter self-loop actions
+  from the policy during playback.
