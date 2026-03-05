@@ -111,6 +111,7 @@ impl App {
             });
 
             if let Some(ref mut gs) = self.gameplay {
+                // Status text above the maze
                 ui.horizontal(|ui: &mut egui::Ui| {
                     let status = gs.status_text();
                     let color = match gs.result {
@@ -119,22 +120,11 @@ impl App {
                         _ => ui.visuals().text_color(),
                     };
                     ui.colored_label(color, egui::RichText::new(&status).size(16.0));
-                    ui.separator();
-                    if ui.button("Undo (Z)").clicked() {
-                        gs.undo();
-                    }
-                    if ui.button("Redo (Y)").clicked() {
-                        gs.redo();
-                    }
-                    if ui.button("Reset (R)").clicked() {
-                        gs.reset();
-                    }
                 });
-            }
 
-            ui.separator();
+                ui.separator();
 
-            if let Some(ref gs) = self.gameplay {
+                // Maze display
                 let available = ui.available_size();
                 let size = render::maze_preferred_size(available);
                 let (response, painter) =
@@ -145,6 +135,29 @@ impl App {
                     &gs.level,
                     &gs.current_state,
                 );
+
+                // Controls below the maze, centered via invisible measure pass
+                ui.add_space(4.0);
+                let mut measure_ui = ui.new_child(egui::UiBuilder::new().invisible());
+                measure_ui.horizontal(|ui: &mut egui::Ui| {
+                    let _ = ui.button("Undo (Z)");
+                    let _ = ui.button("Redo (Y)");
+                    let _ = ui.button("Reset (R)");
+                });
+                let buttons_width = measure_ui.min_rect().width();
+                let indent = (ui.available_width() - buttons_width) / 2.0;
+                ui.horizontal(|ui: &mut egui::Ui| {
+                    ui.add_space(indent.max(0.0));
+                    if ui.button("Undo (Z)").clicked() {
+                        gs.undo();
+                    }
+                    if ui.button("Redo (Y)").clicked() {
+                        gs.redo();
+                    }
+                    if ui.button("Reset (R)").clicked() {
+                        gs.reset();
+                    }
+                });
             }
         } else {
             ui.centered_and_justified(|ui: &mut egui::Ui| {

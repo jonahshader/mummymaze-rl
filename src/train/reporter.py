@@ -49,8 +49,12 @@ class MetricsReporter(Protocol):
   """Protocol for reporting training progress and metrics."""
 
   def report_init(self, config: dict) -> None: ...
-  def report_epoch_start(self, epoch: int, total_epochs: int) -> None: ...
-  def report_batch(self, step: int, loss: float, acc: float, gs: int) -> None: ...
+  def report_epoch_start(
+    self, epoch: int, total_epochs: int, steps_in_epoch: int
+  ) -> None: ...
+  def report_batch(
+    self, step: int, epoch_step: int, loss: float, acc: float, gs: int
+  ) -> None: ...
   def report_epoch_end(
     self,
     epoch: int,
@@ -81,10 +85,14 @@ class FileReporter:
   def report_init(self, config: dict) -> None:
     pass
 
-  def report_epoch_start(self, epoch: int, total_epochs: int) -> None:
+  def report_epoch_start(
+    self, epoch: int, total_epochs: int, steps_in_epoch: int
+  ) -> None:
     pass
 
-  def report_batch(self, step: int, loss: float, acc: float, gs: int) -> None:
+  def report_batch(
+    self, step: int, epoch_step: int, loss: float, acc: float, gs: int
+  ) -> None:
     pass
 
   def report_epoch_end(
@@ -135,14 +143,32 @@ class StdioReporter:
   def report_init(self, config: dict) -> None:
     self._emit({"type": "init", **config})
 
-  def report_epoch_start(self, epoch: int, total_epochs: int) -> None:
+  def report_epoch_start(
+    self, epoch: int, total_epochs: int, steps_in_epoch: int
+  ) -> None:
     # Flush any pending batch before epoch boundary
     self._flush_batch()
-    self._emit({"type": "epoch_start", "epoch": epoch, "total_epochs": total_epochs})
+    self._emit(
+      {
+        "type": "epoch_start",
+        "epoch": epoch,
+        "total_epochs": total_epochs,
+        "steps_in_epoch": steps_in_epoch,
+      }
+    )
 
-  def report_batch(self, step: int, loss: float, acc: float, gs: int) -> None:
+  def report_batch(
+    self, step: int, epoch_step: int, loss: float, acc: float, gs: int
+  ) -> None:
     now = time.monotonic()
-    msg = {"type": "batch", "step": step, "loss": loss, "acc": acc, "gs": gs}
+    msg = {
+      "type": "batch",
+      "step": step,
+      "epoch_step": epoch_step,
+      "loss": loss,
+      "acc": acc,
+      "gs": gs,
+    }
     if now - self._last_batch_time >= _BATCH_THROTTLE_INTERVAL:
       self._emit(msg)
       self._last_batch_time = now

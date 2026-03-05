@@ -295,7 +295,7 @@ def train(
     epoch_t0 = time.time()
     epoch_losses: list[float] = []
     epoch_accs: list[float] = []
-    reporter.report_epoch_start(epoch + 1, epochs)
+    reporter.report_epoch_start(epoch + 1, epochs, steps_per_epoch)
 
     # Build train batches across all grid sizes for a single progress bar
     # Each entry: (grid_size, jax_indices, numpy_indices_for_scatter)
@@ -319,6 +319,7 @@ def train(
       pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{epochs}", unit="batch")
     else:
       pbar = train_batches
+    epoch_step = 0
     for gs, batch_idx, batch_idx_np in pbar:
       # Check for stop command
       cmd = reporter.check_command()
@@ -342,6 +343,7 @@ def train(
       # Scatter logits into buffer for level metrics
       logits_buffers[gs][batch_idx_np] = np.array(logits)
       global_step += 1
+      epoch_step += 1
 
       loss_val = float(loss)
       acc_val = float(acc)
@@ -351,7 +353,7 @@ def train(
       if use_tqdm:
         pbar.set_postfix(loss=f"{loss_val:.3f}", acc=f"{acc_val:.3f}", gs=gs)  # type: ignore[union-attr]
 
-      reporter.report_batch(global_step, loss_val, acc_val, gs)
+      reporter.report_batch(global_step, epoch_step, loss_val, acc_val, gs)
 
       if wandb_project is not None:
         import wandb

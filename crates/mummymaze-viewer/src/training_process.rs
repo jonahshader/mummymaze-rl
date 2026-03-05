@@ -23,9 +23,11 @@ enum RawEvent {
     EpochStart {
         epoch: u32,
         total_epochs: u32,
+        steps_in_epoch: u32,
     },
     Batch {
         step: u64,
+        epoch_step: u32,
         loss: f64,
         acc: f64,
         gs: i32,
@@ -74,9 +76,11 @@ pub enum TrainingEvent {
     EpochStart {
         epoch: u32,
         total_epochs: u32,
+        steps_in_epoch: u32,
     },
     Batch {
         step: u64,
+        epoch_step: u32,
         loss: f64,
         acc: f64,
         gs: i32,
@@ -169,17 +173,21 @@ impl TrainingProcess {
                         RawEvent::EpochStart {
                             epoch,
                             total_epochs,
+                            steps_in_epoch,
                         } => TrainingEvent::EpochStart {
                             epoch,
                             total_epochs,
+                            steps_in_epoch,
                         },
                         RawEvent::Batch {
                             step,
+                            epoch_step,
                             loss,
                             acc,
                             gs,
                         } => TrainingEvent::Batch {
                             step,
+                            epoch_step,
                             loss,
                             acc,
                             gs,

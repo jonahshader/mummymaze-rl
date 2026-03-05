@@ -237,22 +237,25 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
         TrainingStatus::Running {
             epoch,
             total_epochs,
-            step,
+            epoch_step,
+            steps_in_epoch,
             loss,
             acc,
             gs,
             status_text,
+            ..
         } => {
             let epoch = *epoch;
             let total_epochs = *total_epochs;
-            let step = *step;
+            let epoch_step = *epoch_step;
+            let steps_in_epoch = *steps_in_epoch;
             let loss = *loss;
             let acc = *acc;
             let gs = *gs;
             let status_text = status_text.clone();
 
             ui.horizontal(|ui: &mut Ui| {
-                // Progress bar
+                // Epoch progress bar
                 let progress = if total_epochs > 0 {
                     epoch as f32 / total_epochs as f32
                 } else {
@@ -265,9 +268,18 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
                 );
 
                 if status_text.is_empty() {
-                    // Normal training — show live metrics
+                    // Step progress bar within epoch
                     ui.separator();
-                    ui.label(format!("Step: {step}"));
+                    let step_progress = if steps_in_epoch > 0 {
+                        epoch_step as f32 / steps_in_epoch as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(step_progress)
+                            .text(format!("Step {epoch_step}/{steps_in_epoch}"))
+                            .desired_width(150.0),
+                    );
                     ui.separator();
                     ui.label(format!("Loss: {loss:.3}"));
                     ui.separator();
@@ -283,10 +295,12 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
                     ui.label(&status_text);
                 }
 
-                ui.separator();
-                if ui.button("Stop").clicked() {
-                    store.stop_training();
-                }
+                // Right-align Stop button so it doesn't shift when content changes
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Stop").clicked() {
+                        store.stop_training();
+                    }
+                });
             });
         }
         TrainingStatus::Done => {

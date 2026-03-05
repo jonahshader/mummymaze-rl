@@ -117,6 +117,8 @@ pub enum TrainingStatus {
     Running {
         epoch: u32,
         total_epochs: u32,
+        epoch_step: u32,
+        steps_in_epoch: u32,
         step: u64,
         loss: f64,
         acc: f64,
@@ -417,6 +419,8 @@ impl DataStore {
                 self.training_status = TrainingStatus::Running {
                     epoch: 0,
                     total_epochs: config.epochs,
+                    epoch_step: 0,
+                    steps_in_epoch: 0,
                     step: 0,
                     loss: 0.0,
                     acc: 0.0,
@@ -472,25 +476,32 @@ impl DataStore {
                 TrainingEvent::EpochStart {
                     epoch,
                     total_epochs,
+                    steps_in_epoch: sie,
                 } => {
                     if let TrainingStatus::Running {
                         epoch: ref mut e,
                         total_epochs: ref mut te,
+                        steps_in_epoch: ref mut sie_ref,
+                        epoch_step: ref mut es,
                         ..
                     } = self.training_status
                     {
                         *e = epoch;
                         *te = total_epochs;
+                        *sie_ref = sie;
+                        *es = 0;
                     }
                 }
                 TrainingEvent::Batch {
                     step,
+                    epoch_step,
                     loss,
                     acc,
                     gs,
                 } => {
                     if let TrainingStatus::Running {
                         step: ref mut s,
+                        epoch_step: ref mut es,
                         loss: ref mut l,
                         acc: ref mut a,
                         gs: ref mut g,
@@ -499,6 +510,7 @@ impl DataStore {
                     } = self.training_status
                     {
                         *s = step;
+                        *es = epoch_step;
                         *l = loss;
                         *a = acc;
                         *g = gs;
