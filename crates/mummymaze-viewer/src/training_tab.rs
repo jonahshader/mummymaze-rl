@@ -181,58 +181,73 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
     match &store.training_status {
         TrainingStatus::Idle => {
             ui.horizontal(|ui: &mut Ui| {
-                ui.label("Epochs:");
-                let mut epochs = store.training_config.epochs;
-                if ui
-                    .add(egui::DragValue::new(&mut epochs).range(1..=100))
-                    .changed()
-                {
-                    store.training_config.epochs = epochs;
+                if ui.button("Configure").clicked() {
+                    store.show_training_config = !store.show_training_config;
                 }
-
-                ui.separator();
-                ui.label("Batch:");
-                let mut bs = store.training_config.batch_size;
-                if ui
-                    .add(egui::DragValue::new(&mut bs).range(64..=8192))
-                    .changed()
-                {
-                    store.training_config.batch_size = bs;
-                }
-
-                ui.separator();
-                ui.label("LR:");
-                let mut lr = store.training_config.lr;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut lr)
-                            .range(1e-6..=1e-1)
-                            .speed(1e-5)
-                            .max_decimals(6),
-                    )
-                    .changed()
-                {
-                    store.training_config.lr = lr;
-                }
-
-                ui.separator();
-                ui.label("Seed:");
-                let mut seed = store.training_config.seed;
-                if ui
-                    .add(egui::DragValue::new(&mut seed).range(0..=9999))
-                    .changed()
-                {
-                    store.training_config.seed = seed;
-                }
-
-                ui.separator();
-                ui.checkbox(&mut store.training_config.wandb, "W&B");
-
-                ui.separator();
-                if ui.button("Start Training").clicked() {
+                if ui.button("Start").clicked() {
                     store.start_training(maze_dir);
                 }
             });
+
+            egui::Window::new("Training Config")
+                .open(&mut store.show_training_config)
+                .resizable(false)
+                .default_width(200.0)
+                .show(ui.ctx(), |ui| {
+                    egui::Grid::new("training_config_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Epochs:");
+                            let mut epochs = store.training_config.epochs;
+                            if ui
+                                .add(egui::DragValue::new(&mut epochs).range(1..=100))
+                                .changed()
+                            {
+                                store.training_config.epochs = epochs;
+                            }
+                            ui.end_row();
+
+                            ui.label("Batch size:");
+                            let mut bs = store.training_config.batch_size;
+                            if ui
+                                .add(egui::DragValue::new(&mut bs).range(64..=8192))
+                                .changed()
+                            {
+                                store.training_config.batch_size = bs;
+                            }
+                            ui.end_row();
+
+                            ui.label("Learning rate:");
+                            let mut lr = store.training_config.lr;
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut lr)
+                                        .range(1e-6..=1e-1)
+                                        .speed(1e-5)
+                                        .max_decimals(6),
+                                )
+                                .changed()
+                            {
+                                store.training_config.lr = lr;
+                            }
+                            ui.end_row();
+
+                            ui.label("Seed:");
+                            let mut seed = store.training_config.seed;
+                            if ui
+                                .add(egui::DragValue::new(&mut seed).range(0..=9999))
+                                .changed()
+                            {
+                                store.training_config.seed = seed;
+                            }
+                            ui.end_row();
+
+                            ui.label("W&B:");
+                            ui.checkbox(&mut store.training_config.wandb, "");
+                            ui.end_row();
+                        });
+                });
         }
         TrainingStatus::Running {
             epoch,

@@ -93,37 +93,11 @@ impl App {
     fn draw_maze_panel(&mut self, ui: &mut egui::Ui) {
         if let Some(sel) = self.store.selected {
             let row = &self.store.rows[sel];
-            ui.horizontal(|ui: &mut egui::Ui| {
-                ui.label(format!(
-                    "{} sub {} | grid {} | moves: {}",
-                    row.file_stem,
-                    row.sublevel,
-                    row.level.grid_size,
-                    row.bfs_moves
-                        .map(|m: u32| m.to_string())
-                        .unwrap_or("-".into()),
-                ));
-                if let Some(a) = &row.analysis {
-                    ui.label(format!("| {} states", a.n_states));
-                    ui.label(format!("| win {:.1}%", a.win_prob * 100.0));
-                    ui.label(format!("| E[steps] {:.1}", a.expected_steps));
-                }
-            });
+            ui.heading(format!("{} sub {}", row.file_stem, row.sublevel));
+
+            ui.separator();
 
             if let Some(ref mut gs) = self.gameplay {
-                // Status text above the maze
-                ui.horizontal(|ui: &mut egui::Ui| {
-                    let status = gs.status_text();
-                    let color = match gs.result {
-                        Some(mummymaze::game::StepResult::Win) => egui::Color32::GREEN,
-                        Some(mummymaze::game::StepResult::Dead) => egui::Color32::RED,
-                        _ => ui.visuals().text_color(),
-                    };
-                    ui.colored_label(color, egui::RichText::new(&status).size(16.0));
-                });
-
-                ui.separator();
-
                 // Maze display
                 let available = ui.available_size();
                 let size = render::maze_preferred_size(available);
@@ -136,18 +110,31 @@ impl App {
                     &gs.current_state,
                 );
 
-                // Controls below the maze, centered via invisible measure pass
+                // Status + controls below the maze
                 ui.add_space(4.0);
+                let status = gs.status_text();
+                let status_color = match gs.result {
+                    Some(mummymaze::game::StepResult::Win) => egui::Color32::GREEN,
+                    Some(mummymaze::game::StepResult::Dead) => egui::Color32::RED,
+                    _ => ui.visuals().text_color(),
+                };
+
+                // Measure for centering
                 let mut measure_ui = ui.new_child(egui::UiBuilder::new().invisible());
                 measure_ui.horizontal(|ui: &mut egui::Ui| {
+                    ui.colored_label(status_color, &status);
+                    ui.separator();
                     let _ = ui.button("Undo (Z)");
                     let _ = ui.button("Redo (Y)");
                     let _ = ui.button("Reset (R)");
                 });
-                let buttons_width = measure_ui.min_rect().width();
-                let indent = (ui.available_width() - buttons_width) / 2.0;
+                let row_width = measure_ui.min_rect().width();
+                let indent = (ui.available_width() - row_width) / 2.0;
+
                 ui.horizontal(|ui: &mut egui::Ui| {
                     ui.add_space(indent.max(0.0));
+                    ui.colored_label(status_color, &status);
+                    ui.separator();
                     if ui.button("Undo (Z)").clicked() {
                         gs.undo();
                     }

@@ -119,7 +119,6 @@ pub enum TrainingStatus {
         total_epochs: u32,
         epoch_step: u32,
         steps_in_epoch: u32,
-        step: u64,
         loss: f64,
         acc: f64,
         gs: i32,
@@ -167,6 +166,7 @@ pub struct DataStore {
     pub training_process: Option<TrainingProcess>,
     pub training_status: TrainingStatus,
     pub training_config: TrainingConfig,
+    pub show_training_config: bool,
 }
 
 impl DataStore {
@@ -228,6 +228,7 @@ impl DataStore {
             training_process: None,
             training_status: TrainingStatus::default(),
             training_config: TrainingConfig::default(),
+            show_training_config: false,
         };
         store.refresh_sort_filter();
         store
@@ -421,7 +422,6 @@ impl DataStore {
                     total_epochs: config.epochs,
                     epoch_step: 0,
                     steps_in_epoch: 0,
-                    step: 0,
                     loss: 0.0,
                     acc: 0.0,
                     gs: 0,
@@ -493,14 +493,13 @@ impl DataStore {
                     }
                 }
                 TrainingEvent::Batch {
-                    step,
                     epoch_step,
                     loss,
                     acc,
                     gs,
+                    ..
                 } => {
                     if let TrainingStatus::Running {
-                        step: ref mut s,
                         epoch_step: ref mut es,
                         loss: ref mut l,
                         acc: ref mut a,
@@ -509,7 +508,6 @@ impl DataStore {
                         ..
                     } = self.training_status
                     {
-                        *s = step;
                         *es = epoch_step;
                         *l = loss;
                         *a = acc;
