@@ -1,3 +1,4 @@
+mod agent_probs;
 mod data;
 mod gameplay;
 mod graph_view;
@@ -7,12 +8,14 @@ mod training_metrics;
 mod training_process;
 mod training_tab;
 
+use agent_probs::AgentProbs;
 use data::DataStore;
 use eframe::egui;
 use gameplay::GameplayState;
 use graph_view::GraphView;
-use mummymaze::game::Action;
+use mummymaze::game::{Action, State};
 use mummymaze::graph::StateGraph;
+use rustc_hash::FxHashMap;
 
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab {
@@ -27,6 +30,9 @@ struct App {
     graph_view: Option<GraphView>,
     /// Stored graph for click-to-navigate BFS lookups.
     graph: Option<StateGraph>,
+    /// Precomputed BFS optimal action bitmask per state (from graph).
+    bfs_optimal: FxHashMap<State, u8>,
+    agent_probs: AgentProbs,
     right_tab: RightTab,
     maze_dir: std::path::PathBuf,
 }
@@ -41,11 +47,15 @@ impl App {
             .as_ref()
             .map(|rs| GraphView::new(rs.clone()));
 
+        let agent_probs = AgentProbs::new(std::path::PathBuf::from("checkpoints/agent_probs.bin"));
+
         App {
             store,
             gameplay: None,
             graph_view,
             graph: None,
+            bfs_optimal: FxHashMap::default(),
+            agent_probs,
             right_tab: RightTab::Graph,
             maze_dir: maze_dir.to_path_buf(),
         }
@@ -62,7 +72,7 @@ impl App {
                 let graph = mummymaze::graph::build_graph(&row.level);
                 let chain = mummymaze::markov::MarkovChain::from_graph(&graph);
                 gv.load_level(&row.level, idx, &graph, &chain);
-                self.graph = Some(graph);
+                self.set_graph(graph);
             }
         }
 
@@ -88,6 +98,12 @@ impl App {
         let graph = mummymaze::graph::build_graph(&row.level);
         let chain = mummymaze::markov::MarkovChain::from_graph(&graph);
         gv.load_level(&row.level, sel, &graph, &chain);
+        self.set_graph(graph);
+    }
+
+    /// Store graph and precompute BFS optimal action masks.
+    fn set_graph(&mut self, graph: StateGraph) {
+        self.bfs_optimal = graph.best_actions_per_state().into_iter().collect();
         self.graph = Some(graph);
     }
 
@@ -109,6 +125,21 @@ impl App {
                     response.rect,
                     &gs.level,
                     &gs.current_state,
+                );
+
+                // Action probability + BFS optimal overlay
+                let level_key = format!("{}:{}", row.file_stem, row.sublevel);
+                let agent_probs =
+                    self.agent_probs.get_state_probs(&level_key, &gs.current_state);
+                let bfs_mask = self.bfs_optimal.get(&gs.current_state).copied();
+                render::draw_action_bars(
+                    &painter,
+                    response.rect,
+                    gs.level.grid_size,
+                    gs.current_state.player_row,
+                    gs.current_state.player_col,
+                    agent_probs.as_ref(),
+                    bfs_mask,
                 );
 
                 // Status + controls below the maze
@@ -189,6 +220,10 @@ impl eframe::App for App {
         // Poll training metrics file periodically (skip when subprocess provides data)
         if self.store.training_metrics.is_some() && !self.store.is_training() {
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        }
+        // Poll agent_probs.bin for action probability overlay
+        if self.agent_probs.poll() {
+            ctx.request_repaint();
         }
 
         // Consume keyboard input for gameplay BEFORE panels process it

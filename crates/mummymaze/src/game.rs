@@ -105,6 +105,24 @@ impl State {
         }
     }
 
+    /// Convert to a 12-element i32 array (inverse of `from_i32_array`).
+    pub fn to_i32_array(&self) -> [i32; 12] {
+        [
+            self.player_row,
+            self.player_col,
+            self.mummy1_row,
+            self.mummy1_col,
+            self.mummy1_alive as i32,
+            self.mummy2_row,
+            self.mummy2_col,
+            self.mummy2_alive as i32,
+            self.scorpion_row,
+            self.scorpion_col,
+            self.scorpion_alive as i32,
+            self.gate_open as i32,
+        ]
+    }
+
     /// Normalize dead entities to sentinel positions so that states with
     /// dead entities at different positions hash/compare as equal.
     /// The binary doesn't reset positions on death, but for state graph

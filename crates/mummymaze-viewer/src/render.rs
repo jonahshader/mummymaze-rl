@@ -18,16 +18,22 @@ const SCORPION_COLOR: Color32 = Color32::from_rgb(230, 160, 40);
 const WALL_THICKNESS: f32 = 3.0;
 const BORDER_THICKNESS: f32 = 4.0;
 
-/// Draw a maze level with the given state into a painter within the specified rect.
-pub fn draw_maze_state(painter: &Painter, rect: Rect, lev: &Level, state: &State) {
-    let gs = lev.grid_size as usize;
-    let gsf = gs as f32;
-
+/// Compute cell_size and top-left origin for a grid drawn within the given rect.
+fn maze_geometry(rect: Rect, grid_size: i32) -> (f32, Pos2) {
+    let gsf = grid_size as f32;
     let cell_size = (rect.width().min(rect.height())) / gsf;
     let origin = Pos2::new(
         rect.left() + (rect.width() - cell_size * gsf) / 2.0,
         rect.top() + (rect.height() - cell_size * gsf) / 2.0,
     );
+    (cell_size, origin)
+}
+
+/// Draw a maze level with the given state into a painter within the specified rect.
+pub fn draw_maze_state(painter: &Painter, rect: Rect, lev: &Level, state: &State) {
+    let gs = lev.grid_size as usize;
+    let gsf = gs as f32;
+    let (cell_size, origin) = maze_geometry(rect, lev.grid_size);
 
     let maze_rect = Rect::from_min_size(origin, Vec2::new(cell_size * gsf, cell_size * gsf));
     painter.rect_filled(maze_rect, 0.0, BG_COLOR);
@@ -219,6 +225,124 @@ fn draw_entities(painter: &Painter, origin: Pos2, cell_size: f32, lev: &Level, s
             font.clone(),
             Color32::BLACK,
         );
+    }
+}
+
+/// Draw action probability bar charts on the player's cell and its neighbors.
+///
+/// Each action maps to a destination cell (N/S/E/W neighbor, or player cell for Wait).
+/// On each cell we draw up to two bars side-by-side: left = BFS optimal (green),
+/// right = agent probability (blue). Bar height ∝ value, anchored to cell bottom.
+///
+/// `agent_probs`: 5 floats (N=0, S=1, E=2, W=3, Wait=4), or None.
+/// `bfs_mask`: bitmask of optimal actions (bit i = action i), or None.
+pub fn draw_action_bars(
+    painter: &Painter,
+    rect: Rect,
+    grid_size: i32,
+    player_row: i32,
+    player_col: i32,
+    agent_probs: Option<&[f32; 5]>,
+    bfs_mask: Option<u8>,
+) {
+    if agent_probs.is_none() && bfs_mask.is_none() {
+        return;
+    }
+
+    let (cell_size, origin) = maze_geometry(rect, grid_size);
+
+    // BFS: uniform probability over optimal actions
+    let bfs_probs: [f32; 5] = if let Some(mask) = bfs_mask {
+        let count = mask.count_ones() as f32;
+        if count > 0.0 {
+            std::array::from_fn(|i| if mask & (1 << i) != 0 { 1.0 / count } else { 0.0 })
+        } else {
+            [0.0; 5]
+        }
+    } else {
+        [0.0; 5]
+    };
+
+    // Action → destination cell offset (row, col)
+    let offsets: [(i32, i32); 5] = [
+        (-1, 0), // N
+        (1, 0),  // S
+        (0, 1),  // E
+        (0, -1), // W
+        (0, 0),  // Wait
+    ];
+
+    let bar_color_bfs = Color32::from_rgba_unmultiplied(80, 220, 80, 130);
+    let bar_color_agent = Color32::from_rgba_unmultiplied(80, 140, 255, 130);
+    let max_height = cell_size * 0.85;
+    let inset = cell_size * 0.15;
+    let bar_width = (cell_size - 2.0 * inset) / 2.0 - 1.0; // two bars with 2px gap
+
+    let has_bfs = bfs_mask.is_some();
+    let has_agent = agent_probs.is_some();
+    let agent = agent_probs.unwrap_or(&[0.0; 5]);
+
+    for i in 0..5 {
+        let bfs_p = bfs_probs[i];
+        let agent_p = agent[i];
+        if bfs_p < 0.01 && agent_p < 0.01 {
+            continue;
+        }
+
+        let dr = offsets[i].0;
+        let dc = offsets[i].1;
+        let r = player_row + dr;
+        let c = player_col + dc;
+
+        // Skip out-of-bounds cells
+        if r < 0 || r >= grid_size || c < 0 || c >= grid_size {
+            continue;
+        }
+
+        let cell_x = origin.x + c as f32 * cell_size;
+        let cell_y = origin.y + r as f32 * cell_size;
+        let cell_bottom = cell_y + cell_size - inset;
+
+        if has_bfs && has_agent {
+            // Two bars side-by-side
+            let left_x = cell_x + inset;
+            let right_x = left_x + bar_width + 2.0;
+
+            if bfs_p >= 0.01 {
+                let h = max_height * bfs_p;
+                let bar = Rect::from_min_max(
+                    Pos2::new(left_x, cell_bottom - h),
+                    Pos2::new(left_x + bar_width, cell_bottom),
+                );
+                painter.rect_filled(bar, 2.0, bar_color_bfs);
+            }
+            if agent_p >= 0.01 {
+                let h = max_height * agent_p;
+                let bar = Rect::from_min_max(
+                    Pos2::new(right_x, cell_bottom - h),
+                    Pos2::new(right_x + bar_width, cell_bottom),
+                );
+                painter.rect_filled(bar, 2.0, bar_color_agent);
+            }
+        } else {
+            // Single centered bar
+            let color = if has_bfs {
+                bar_color_bfs
+            } else {
+                bar_color_agent
+            };
+            let p = if has_bfs { bfs_p } else { agent_p };
+            if p >= 0.01 {
+                let w = bar_width * 1.5;
+                let x = cell_x + (cell_size - w) / 2.0;
+                let h = max_height * p;
+                let bar = Rect::from_min_max(
+                    Pos2::new(x, cell_bottom - h),
+                    Pos2::new(x + w, cell_bottom),
+                );
+                painter.rect_filled(bar, 2.0, color);
+            }
+        }
     }
 }
 
