@@ -1,9 +1,9 @@
 # Mummy Maze Deluxe — Game Rules
 
 Verified against the original binary (`WinMM.exe`, FUN_00405580) via Ghidra
-reverse engineering and a C reference port (`csolver/`). Both `src/game.py`
-(Python) and `src/env/step.py` (JAX) implement these rules with 100% solver
-agreement across all 9,814 solvable levels.
+reverse engineering and a Rust engine port (`crates/mummymaze/`). Both
+`src/game.py` (Python) and `src/env/step.py` (JAX) implement these rules
+with 100% solver agreement across all 9,814 solvable levels.
 
 ## Grid
 

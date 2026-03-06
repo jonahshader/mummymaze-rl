@@ -28,7 +28,7 @@ from src.game import (
 )
 
 DAT_DIR = Path(__file__).resolve().parent.parent / "mazes"
-SOLUTIONS_FILE = Path(__file__).parent.parent / "solutions.txt"
+SOLUTIONS_FILE = Path(__file__).parent.parent / "docs" / "solutions.txt"
 
 MOVE_MAP = {
   "L": ACTION_WEST,

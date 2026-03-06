@@ -110,3 +110,8 @@ both the architectures and the levels.
   add agent playback/replay in the viewer, agents could get stuck in infinite
   Wait loops. May need a max-consecutive-wait limit or filter self-loop actions
   from the policy during playback.
+- **Adversarial level generation (GA)**: use agent win% as fitness for a
+  genetic algorithm that generates levels the current agent struggles with.
+  JAX for batched wall/entity mutations and selection, Rust evaluates fitness
+  via `policy_win_prob_batch`. Creates a curriculum of increasingly difficult
+  training data.
