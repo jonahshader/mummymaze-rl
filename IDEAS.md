@@ -98,6 +98,13 @@ both the architectures and the levels.
   before next level_metrics report. Would need to snapshot/copy the logits
   buffer (~50MB per gs) since it gets overwritten during training. Not worth
   it unless the synchronous ~5-6s overhead becomes a bottleneck.
+- **GPU-accelerated Markov solver**: the per-epoch win% computation is the
+  training bottleneck. The problem is ~6K independent small sparse systems
+  (`(I-Q)x = b`, 100-5000 states each). Batched GPU value iteration in JAX
+  (`x_{k+1} = Qx_k + b` via sparse matmul) is the most practical path — group
+  by grid size, pad to max states, run `jax.lax.while_loop` with batched SpMV.
+  Rust solver becomes fallback/reference. Could also explore cuSPARSE batched
+  solvers or dense LU for the smaller grid-6 levels.
 - **Self-loop handling in game engines**: `build_graph()` now skips self-loops
   (Wait that doesn't change state), but the game engines still allow them. If we
   add agent playback/replay in the viewer, agents could get stuck in infinite
