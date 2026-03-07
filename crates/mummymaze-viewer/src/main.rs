@@ -1,3 +1,4 @@
+mod adversarial_tab;
 mod agent_probs;
 mod data;
 mod gameplay;
@@ -21,6 +22,7 @@ use rustc_hash::FxHashMap;
 enum RightTab {
     Graph,
     Training,
+    Adversarial,
     Logs,
 }
 
@@ -33,6 +35,7 @@ struct App {
     /// Precomputed BFS optimal action bitmask per state (from graph).
     bfs_optimal: FxHashMap<State, u8>,
     agent_probs: AgentProbs,
+    adversarial: adversarial_tab::AdversarialState,
     right_tab: RightTab,
     maze_dir: std::path::PathBuf,
 }
@@ -56,6 +59,7 @@ impl App {
             graph: None,
             bfs_optimal: FxHashMap::default(),
             agent_probs,
+            adversarial: adversarial_tab::AdversarialState::new(),
             right_tab: RightTab::Graph,
             maze_dir: maze_dir.to_path_buf(),
         }
@@ -108,79 +112,84 @@ impl App {
     }
 
     fn draw_maze_panel(&mut self, ui: &mut egui::Ui) {
-        if let Some(sel) = self.store.selected {
-            let row = &self.store.rows[sel];
-            ui.heading(format!("{} sub {}", row.file_stem, row.sublevel));
+        let selected = self.store.selected;
+        let has_gameplay = self.gameplay.is_some();
 
-            ui.separator();
-
-            if let Some(ref mut gs) = self.gameplay {
-                // Maze display
-                let available = ui.available_size();
-                let size = render::maze_preferred_size(available);
-                let (response, painter) =
-                    ui.allocate_painter(size, egui::Sense::hover());
-                render::draw_maze_state(
-                    &painter,
-                    response.rect,
-                    &gs.level,
-                    &gs.current_state,
-                );
-
-                // Action probability + BFS optimal overlay
-                let level_key = format!("{}:{}", row.file_stem, row.sublevel);
-                let agent_probs =
-                    self.agent_probs.get_state_probs(&level_key, &gs.current_state);
-                let bfs_mask = self.bfs_optimal.get(&gs.current_state).copied();
-                render::draw_action_bars(
-                    &painter,
-                    response.rect,
-                    gs.level.grid_size,
-                    gs.current_state.player_row,
-                    gs.current_state.player_col,
-                    agent_probs.as_ref(),
-                    bfs_mask,
-                );
-
-                // Status + controls below the maze
-                ui.add_space(4.0);
-                let status = gs.status_text();
-                let status_color = match gs.result {
-                    Some(mummymaze::game::StepResult::Win) => egui::Color32::GREEN,
-                    Some(mummymaze::game::StepResult::Dead) => egui::Color32::RED,
-                    _ => ui.visuals().text_color(),
-                };
-
-                // Measure for centering
-                let mut measure_ui = ui.new_child(egui::UiBuilder::new().invisible());
-                measure_ui.horizontal(|ui: &mut egui::Ui| {
-                    ui.colored_label(status_color, &status);
-                    ui.separator();
-                    let _ = ui.button("Undo (Z)");
-                    let _ = ui.button("Redo (Y)");
-                    let _ = ui.button("Reset (R)");
-                });
-                let row_width = measure_ui.min_rect().width();
-                let indent = (ui.available_width() - row_width) / 2.0;
-
-                ui.horizontal(|ui: &mut egui::Ui| {
-                    ui.add_space(indent.max(0.0));
-                    ui.colored_label(status_color, &status);
-                    ui.separator();
-                    if ui.button("Undo (Z)").clicked() {
-                        gs.undo();
-                    }
-                    if ui.button("Redo (Y)").clicked() {
-                        gs.redo();
-                    }
-                    if ui.button("Reset (R)").clicked() {
-                        gs.reset();
-                    }
-                });
-            }
-        } else {
+        if selected.is_none() && !has_gameplay {
             ui.centered_and_justified(|ui: &mut egui::Ui| {
                 ui.heading("Select a level");
+            });
+            return;
+        }
+
+        // Heading
+        if let Some(sel) = selected {
+            let row = &self.store.rows[sel];
+            ui.heading(format!("{} sub {}", row.file_stem, row.sublevel));
+        } else {
+            ui.heading("Generated Level");
+        }
+
+        ui.separator();
+
+        if let Some(ref mut gs) = self.gameplay {
+            // Maze display
+            let available = ui.available_size();
+            let size = render::maze_preferred_size(available);
+            let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
+            render::draw_maze_state(&painter, response.rect, &gs.level, &gs.current_state);
+
+            // Action probability + BFS optimal overlay
+            let agent_probs = selected.map(|sel| {
+                let row = &self.store.rows[sel];
+                let level_key = format!("{}:{}", row.file_stem, row.sublevel);
+                self.agent_probs.get_state_probs(&level_key, &gs.current_state)
+            }).flatten();
+            let bfs_mask = self.bfs_optimal.get(&gs.current_state).copied();
+            render::draw_action_bars(
+                &painter,
+                response.rect,
+                gs.level.grid_size,
+                gs.current_state.player_row,
+                gs.current_state.player_col,
+                agent_probs.as_ref(),
+                bfs_mask,
+            );
+
+            // Status + controls below the maze
+            ui.add_space(4.0);
+            let status = gs.status_text();
+            let status_color = match gs.result {
+                Some(mummymaze::game::StepResult::Win) => egui::Color32::GREEN,
+                Some(mummymaze::game::StepResult::Dead) => egui::Color32::RED,
+                _ => ui.visuals().text_color(),
+            };
+
+            // Measure for centering
+            let mut measure_ui = ui.new_child(egui::UiBuilder::new().invisible());
+            measure_ui.horizontal(|ui: &mut egui::Ui| {
+                ui.colored_label(status_color, &status);
+                ui.separator();
+                let _ = ui.button("Undo (Z)");
+                let _ = ui.button("Redo (Y)");
+                let _ = ui.button("Reset (R)");
+            });
+            let row_width = measure_ui.min_rect().width();
+            let indent = (ui.available_width() - row_width) / 2.0;
+
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.add_space(indent.max(0.0));
+                ui.colored_label(status_color, &status);
+                ui.separator();
+                if ui.button("Undo (Z)").clicked() {
+                    gs.undo();
+                }
+                if ui.button("Redo (Y)").clicked() {
+                    gs.redo();
+                }
+                if ui.button("Reset (R)").clicked() {
+                    gs.reset();
+                }
             });
         }
     }
@@ -188,8 +197,9 @@ impl App {
     fn draw_graph_panel(&mut self, ui: &mut egui::Ui) {
         self.ensure_graph_loaded();
         let selected = self.store.selected;
+        let has_gameplay = self.gameplay.is_some();
         if let Some(ref mut gv) = self.graph_view {
-            if selected.is_some() {
+            if selected.is_some() || has_gameplay {
                 gv.draw(ui, selected);
             } else {
                 ui.centered_and_justified(|ui: &mut egui::Ui| {
@@ -224,6 +234,13 @@ impl eframe::App for App {
         // Poll agent_probs.bin for action probability overlay
         if self.agent_probs.poll() {
             ctx.request_repaint();
+        }
+        // Poll adversarial GA progress
+        if self.adversarial.poll() {
+            ctx.request_repaint();
+        }
+        if self.adversarial.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         // Consume keyboard input for gameplay BEFORE panels process it
@@ -335,6 +352,7 @@ impl eframe::App for App {
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.selectable_value(&mut self.right_tab, RightTab::Graph, "Graph");
                 ui.selectable_value(&mut self.right_tab, RightTab::Training, "Training");
+                ui.selectable_value(&mut self.right_tab, RightTab::Adversarial, "Adversarial");
                 let log_label = if self.store.log_messages.is_empty() {
                     "Logs".to_string()
                 } else {
@@ -351,6 +369,21 @@ impl eframe::App for App {
                         training_tab::draw_training_panel(ui, &mut self.store, &self.maze_dir)
                     {
                         self.select_level(clicked);
+                    }
+                }
+                RightTab::Adversarial => {
+                    if let Some(level) =
+                        adversarial_tab::draw_adversarial_panel(ui, &mut self.adversarial, &self.store.rows)
+                    {
+                        // Load GA-generated level into maze panel
+                        self.gameplay = Some(GameplayState::new(level.clone()));
+                        let graph = mummymaze::graph::build_graph(&level);
+                        let chain = mummymaze::markov::MarkovChain::from_graph(&graph);
+                        if let Some(ref mut gv) = self.graph_view {
+                            gv.load_level(&level, usize::MAX, &graph, &chain);
+                        }
+                        self.set_graph(graph);
+                        self.store.selected = None;
                     }
                 }
                 RightTab::Logs => {

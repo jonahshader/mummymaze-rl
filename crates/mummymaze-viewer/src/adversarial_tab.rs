@@ -1,0 +1,249 @@
+use crate::data::LevelRow;
+use crate::render;
+use eframe::egui;
+use mummymaze::ga::{GaConfig, GaMessage, Individual};
+use mummymaze::game::State;
+use mummymaze::parse::Level;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GaStatus {
+    Idle,
+    Running {
+        generation: usize,
+        total_generations: usize,
+    },
+    Done,
+    Error(String),
+}
+
+pub struct AdversarialState {
+    pub config: GaConfig,
+    pub status: GaStatus,
+    pub best: Option<Individual>,
+    pub history: Vec<(usize, f64, f64)>, // (generation, best_fitness, avg_fitness)
+    rx: Option<Receiver<GaMessage>>,
+    stop_flag: Option<Arc<AtomicBool>>,
+}
+
+impl AdversarialState {
+    pub fn new() -> Self {
+        AdversarialState {
+            config: GaConfig {
+                seed: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                ..GaConfig::default()
+            },
+            status: GaStatus::Idle,
+            best: None,
+            history: Vec::new(),
+            rx: None,
+            stop_flag: None,
+        }
+    }
+
+    pub fn start(&mut self, seed_levels: Vec<Level>) {
+        let (tx, rx) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let config = self.config.clone();
+        let flag = stop_flag.clone();
+
+        self.history.clear();
+        self.best = None;
+        self.status = GaStatus::Running {
+            generation: 0,
+            total_generations: config.generations,
+        };
+        self.rx = Some(rx);
+        self.stop_flag = Some(stop_flag);
+
+        std::thread::spawn(move || {
+            mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+        });
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(ref flag) = self.stop_flag {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Drain channel messages. Returns true if anything changed.
+    pub fn poll(&mut self) -> bool {
+        if self.rx.is_none() {
+            return false;
+        }
+        let mut changed = false;
+        let mut finished = false;
+        // Drain messages while receiver exists
+        while let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            changed = true;
+            match msg {
+                GaMessage::SeedsDone { .. } => {}
+                GaMessage::Generation(result) => {
+                    self.history
+                        .push((result.generation, result.best.fitness, result.avg_fitness));
+                    self.best = Some(result.best);
+                    self.status = GaStatus::Running {
+                        generation: result.generation,
+                        total_generations: self.config.generations,
+                    };
+                }
+                GaMessage::Done => {
+                    self.status = GaStatus::Done;
+                    finished = true;
+                }
+                GaMessage::Error(e) => {
+                    self.status = GaStatus::Error(e);
+                    finished = true;
+                }
+            }
+        }
+        if finished {
+            self.rx = None;
+            self.stop_flag = None;
+        }
+        changed
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, GaStatus::Running { .. })
+    }
+}
+
+/// Draw the adversarial GA panel. Returns Some(level) when "Load into Maze" is clicked.
+pub fn draw_adversarial_panel(
+    ui: &mut egui::Ui,
+    state: &mut AdversarialState,
+    rows: &[LevelRow],
+) -> Option<Level> {
+    let mut load_level = None;
+
+    // Controls
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Grid size:");
+        egui::ComboBox::from_id_salt("ga_grid_size")
+            .selected_text(format!("{}", state.config.grid_size))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.config.grid_size, 6, "6");
+                ui.selectable_value(&mut state.config.grid_size, 8, "8");
+                ui.selectable_value(&mut state.config.grid_size, 10, "10");
+            });
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Pop size:");
+        ui.add(egui::DragValue::new(&mut state.config.pop_size).range(4..=512));
+        ui.label("Generations:");
+        ui.add(egui::DragValue::new(&mut state.config.generations).range(1..=1000));
+        ui.label("Seed:");
+        ui.add(egui::DragValue::new(&mut state.config.seed));
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        if state.is_running() {
+            if ui.button("Stop").clicked() {
+                state.stop();
+            }
+        } else {
+            if ui.button("Start").clicked() {
+                let seeds: Vec<Level> = rows
+                    .iter()
+                    .filter(|r| r.level.grid_size == state.config.grid_size)
+                    .map(|r| r.level.clone())
+                    .collect();
+                state.start(seeds);
+            }
+        }
+
+        // Status line
+        match &state.status {
+            GaStatus::Idle => {
+                ui.label("Idle");
+            }
+            GaStatus::Running {
+                generation,
+                total_generations,
+            } => {
+                ui.label(format!("Gen {generation}/{total_generations}"));
+            }
+            GaStatus::Done => {
+                ui.colored_label(egui::Color32::GREEN, "Done");
+            }
+            GaStatus::Error(e) => {
+                ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
+            }
+        }
+    });
+
+    ui.separator();
+
+    // Mini maze preview + stats
+    if let Some(ref best) = state.best {
+        let best_state = State::from_level(&best.level);
+
+        // Maze preview
+        let available = ui.available_width();
+        let side = available.min(300.0);
+        let size = egui::Vec2::new(side, side);
+        let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
+        render::draw_maze_state(&painter, response.rect, &best.level, &best_state);
+
+        // Stats below maze
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label(format!(
+                "BFS: {}  States: {}  Win%: {:.4}  Fitness: {:.4}",
+                best.bfs_moves, best.n_states, best.win_prob, best.fitness
+            ));
+        });
+
+        if ui.button("Load into Maze").clicked() {
+            load_level = Some(best.level.clone());
+        }
+
+        ui.separator();
+    }
+
+    // Fitness chart
+    if !state.history.is_empty() {
+        ui.label("Fitness over generations");
+        let best_line: egui_plot::PlotPoints = state
+            .history
+            .iter()
+            .map(|(g, best, _avg)| [*g as f64, *best])
+            .collect();
+        let avg_line: egui_plot::PlotPoints = state
+            .history
+            .iter()
+            .map(|(g, _best, avg)| [*g as f64, *avg])
+            .collect();
+
+        let plot = egui_plot::Plot::new("fitness_chart")
+            .height(200.0)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .x_axis_label("Generation")
+            .y_axis_label("Fitness")
+            .legend(egui_plot::Legend::default());
+
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(
+                egui_plot::Line::new(best_line)
+                    .name("Best")
+                    .color(egui::Color32::from_rgb(80, 140, 255)),
+            );
+            plot_ui.line(
+                egui_plot::Line::new(avg_line)
+                    .name("Avg")
+                    .color(egui::Color32::from_rgb(230, 160, 40)),
+            );
+        });
+    }
+
+    load_level
+}
