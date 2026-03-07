@@ -1,7 +1,7 @@
 use crate::data::LevelRow;
 use crate::render;
 use eframe::egui;
-use mummymaze::ga::{GaConfig, GaMessage, Individual};
+use mummymaze::ga::{CrossoverMode, GaConfig, GaMessage, Individual};
 use mummymaze::game::State;
 use mummymaze::parse::Level;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -209,6 +209,20 @@ pub fn draw_adversarial_panel(
                             .speed(0.01)
                             .max_decimals(2),
                     );
+                    ui.end_row();
+
+                    ui.label("Crossover mode:");
+                    egui::ComboBox::from_id_salt("ga_crossover_mode")
+                        .selected_text(state.config.crossover_mode.label())
+                        .show_ui(ui, |ui| {
+                            for mode in CrossoverMode::ALL {
+                                ui.selectable_value(
+                                    &mut state.config.crossover_mode,
+                                    mode,
+                                    mode.label(),
+                                );
+                            }
+                        });
                     ui.end_row();
 
                     ui.label("Seed:");
