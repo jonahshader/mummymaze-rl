@@ -21,6 +21,7 @@ pub enum GaStatus {
 
 pub struct AdversarialState {
     pub config: GaConfig,
+    pub show_config: bool,
     pub status: GaStatus,
     pub best: Option<Individual>,
     pub history: Vec<(usize, f64, f64)>, // (generation, best_fitness, avg_fitness)
@@ -38,6 +39,7 @@ impl AdversarialState {
                     .as_secs(),
                 ..GaConfig::default()
             },
+            show_config: false,
             status: GaStatus::Idle,
             best: None,
             history: Vec::new(),
@@ -125,31 +127,14 @@ pub fn draw_adversarial_panel(
 
     // Controls
     ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Grid size:");
-        egui::ComboBox::from_id_salt("ga_grid_size")
-            .selected_text(format!("{}", state.config.grid_size))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.config.grid_size, 6, "6");
-                ui.selectable_value(&mut state.config.grid_size, 8, "8");
-                ui.selectable_value(&mut state.config.grid_size, 10, "10");
-            });
-    });
-
-    ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Pop size:");
-        ui.add(egui::DragValue::new(&mut state.config.pop_size).range(4..=512));
-        ui.label("Generations:");
-        ui.add(egui::DragValue::new(&mut state.config.generations).range(1..=1000));
-        ui.label("Seed:");
-        ui.add(egui::DragValue::new(&mut state.config.seed));
-    });
-
-    ui.horizontal(|ui: &mut egui::Ui| {
         if state.is_running() {
             if ui.button("Stop").clicked() {
                 state.stop();
             }
         } else {
+            if ui.button("Configure").clicked() {
+                state.show_config = !state.show_config;
+            }
             if ui.button("Start").clicked() {
                 let seeds: Vec<Level> = rows
                     .iter()
@@ -179,6 +164,119 @@ pub fn draw_adversarial_panel(
             }
         }
     });
+
+    // Config window
+    egui::Window::new("GA Config")
+        .open(&mut state.show_config)
+        .resizable(false)
+        .default_width(250.0)
+        .show(ui.ctx(), |ui| {
+            egui::Grid::new("ga_config_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Grid size:");
+                    egui::ComboBox::from_id_salt("ga_grid_size")
+                        .selected_text(format!("{}", state.config.grid_size))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut state.config.grid_size, 6, "6");
+                            ui.selectable_value(&mut state.config.grid_size, 8, "8");
+                            ui.selectable_value(&mut state.config.grid_size, 10, "10");
+                        });
+                    ui.end_row();
+
+                    ui.label("Population:");
+                    ui.add(egui::DragValue::new(&mut state.config.pop_size).range(4..=512));
+                    ui.end_row();
+
+                    ui.label("Generations:");
+                    ui.add(egui::DragValue::new(&mut state.config.generations).range(1..=1000));
+                    ui.end_row();
+
+                    ui.label("Elite fraction:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.elite_frac)
+                            .range(0.0..=0.5)
+                            .speed(0.01)
+                            .max_decimals(2),
+                    );
+                    ui.end_row();
+
+                    ui.label("Crossover rate:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.crossover_rate)
+                            .range(0.0..=1.0)
+                            .speed(0.01)
+                            .max_decimals(2),
+                    );
+                    ui.end_row();
+
+                    ui.label("Seed:");
+                    ui.add(egui::DragValue::new(&mut state.config.seed));
+                    ui.end_row();
+                });
+
+            ui.separator();
+            ui.label("Mutation weights:");
+            egui::Grid::new("ga_mutation_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Toggle wall:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.w_wall)
+                            .range(0.0..=20.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.end_row();
+
+                    ui.label("Move entity:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.w_move_entity)
+                            .range(0.0..=20.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.end_row();
+
+                    ui.label("Move player:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.w_move_player)
+                            .range(0.0..=20.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.end_row();
+
+                    ui.label("Add entity:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.w_add_entity)
+                            .range(0.0..=20.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.end_row();
+
+                    ui.label("Remove entity:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.w_remove_entity)
+                            .range(0.0..=20.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.end_row();
+
+                    ui.label("Extra wall prob:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.extra_wall_prob)
+                            .range(0.0..=1.0)
+                            .speed(0.01)
+                            .max_decimals(2),
+                    );
+                    ui.end_row();
+                });
+        });
 
     ui.separator();
 

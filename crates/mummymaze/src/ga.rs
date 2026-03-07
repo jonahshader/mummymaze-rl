@@ -31,6 +31,14 @@ pub struct GaConfig {
     pub elite_frac: f64,
     pub crossover_rate: f64,
     pub seed: u64,
+    /// Relative mutation weights (normalized at runtime).
+    pub w_wall: f64,
+    pub w_move_entity: f64,
+    pub w_move_player: f64,
+    pub w_add_entity: f64,
+    pub w_remove_entity: f64,
+    /// Probability of an extra wall mutation after the primary mutation.
+    pub extra_wall_prob: f64,
 }
 
 impl Default for GaConfig {
@@ -42,6 +50,12 @@ impl Default for GaConfig {
             elite_frac: 0.1,
             crossover_rate: 0.2,
             seed: 42,
+            w_wall: 5.0,
+            w_move_entity: 3.0,
+            w_move_player: 2.0,
+            w_add_entity: 1.0,
+            w_remove_entity: 1.0,
+            extra_wall_prob: 0.3,
         }
     }
 }
@@ -96,6 +110,22 @@ enum EntityKind {
     Scorpion,
     Trap1,
     Trap2,
+}
+
+/// Try up to 20 random cells to find one not in `occupied`.
+fn find_unoccupied_cell(
+    n: i32,
+    occupied: &std::collections::HashSet<(i32, i32)>,
+    rng: &mut impl Rng,
+) -> Option<(i32, i32)> {
+    for _ in 0..20 {
+        let r = rng.random_range(0..n);
+        let c = rng.random_range(0..n);
+        if !occupied.contains(&(r, c)) {
+            return Some((r, c));
+        }
+    }
+    None
 }
 
 /// Toggle a random interior wall bit on both adjacent cells.
@@ -157,33 +187,28 @@ pub fn mutate_entity(level: &Level, rng: &mut impl Rng) -> Level {
     };
     occupied.remove(&old_pos);
 
-    for _ in 0..20 {
-        let nr = rng.random_range(0..n);
-        let nc = rng.random_range(0..n);
-        if !occupied.contains(&(nr, nc)) {
-            match kind {
-                EntityKind::Mummy1 => {
-                    out.mummy1_row = nr;
-                    out.mummy1_col = nc;
-                }
-                EntityKind::Mummy2 => {
-                    out.mummy2_row = nr;
-                    out.mummy2_col = nc;
-                }
-                EntityKind::Scorpion => {
-                    out.scorpion_row = nr;
-                    out.scorpion_col = nc;
-                }
-                EntityKind::Trap1 => {
-                    out.trap1_row = nr;
-                    out.trap1_col = nc;
-                }
-                EntityKind::Trap2 => {
-                    out.trap2_row = nr;
-                    out.trap2_col = nc;
-                }
+    if let Some((nr, nc)) = find_unoccupied_cell(n, &occupied, rng) {
+        match kind {
+            EntityKind::Mummy1 => {
+                out.mummy1_row = nr;
+                out.mummy1_col = nc;
             }
-            break;
+            EntityKind::Mummy2 => {
+                out.mummy2_row = nr;
+                out.mummy2_col = nc;
+            }
+            EntityKind::Scorpion => {
+                out.scorpion_row = nr;
+                out.scorpion_col = nc;
+            }
+            EntityKind::Trap1 => {
+                out.trap1_row = nr;
+                out.trap1_col = nc;
+            }
+            EntityKind::Trap2 => {
+                out.trap2_row = nr;
+                out.trap2_col = nc;
+            }
         }
     }
 
@@ -196,32 +221,154 @@ pub fn mutate_player(level: &Level, rng: &mut impl Rng) -> Level {
     let n = level.grid_size;
     let occupied = occupied_cells(&out, false);
 
-    for _ in 0..20 {
-        let nr = rng.random_range(0..n);
-        let nc = rng.random_range(0..n);
-        if !occupied.contains(&(nr, nc)) {
-            out.player_row = nr;
-            out.player_col = nc;
-            break;
-        }
+    if let Some((nr, nc)) = find_unoccupied_cell(n, &occupied, rng) {
+        out.player_row = nr;
+        out.player_col = nc;
     }
 
     out
 }
 
-/// Apply a random mutation operator.
-pub fn mutate(level: &Level, rng: &mut impl Rng) -> Level {
-    let r: f64 = rng.random();
-    let mut result = if r < 0.5 {
+/// Add an entity (mummy2, scorpion, or trap) that doesn't exist yet.
+/// Returns None if all entity slots are already occupied.
+pub fn mutate_add_entity(level: &Level, rng: &mut impl Rng) -> Option<Level> {
+    // Collect addable entity kinds (check before cloning)
+    let mut addable: Vec<EntityKind> = Vec::new();
+    if !level.has_mummy2 {
+        addable.push(EntityKind::Mummy2);
+    }
+    if !level.has_scorpion {
+        addable.push(EntityKind::Scorpion);
+    }
+    if level.trap_count == 0 {
+        addable.push(EntityKind::Trap1);
+    } else if level.trap_count == 1 {
+        addable.push(EntityKind::Trap2);
+    }
+
+    if addable.is_empty() {
+        return None;
+    }
+
+    let kind = addable[rng.random_range(0..addable.len())];
+    let occupied = occupied_cells(level, true);
+    let (nr, nc) = find_unoccupied_cell(level.grid_size, &occupied, rng)?;
+
+    let mut out = level.clone();
+    match kind {
+        EntityKind::Mummy2 => {
+            out.has_mummy2 = true;
+            out.mummy2_row = nr;
+            out.mummy2_col = nc;
+        }
+        EntityKind::Scorpion => {
+            out.has_scorpion = true;
+            out.scorpion_row = nr;
+            out.scorpion_col = nc;
+        }
+        EntityKind::Trap1 => {
+            out.trap_count = 1;
+            out.trap1_row = nr;
+            out.trap1_col = nc;
+        }
+        EntityKind::Trap2 => {
+            out.trap_count = 2;
+            out.trap2_row = nr;
+            out.trap2_col = nc;
+        }
+        EntityKind::Mummy1 => unreachable!(),
+    }
+    Some(out)
+}
+
+/// Remove a random optional entity (mummy2, scorpion, or a trap).
+/// Returns None if there are no removable entities (only mummy1 + player).
+pub fn mutate_remove_entity(level: &Level, rng: &mut impl Rng) -> Option<Level> {
+    let mut removable: Vec<EntityKind> = Vec::new();
+    if level.has_mummy2 {
+        removable.push(EntityKind::Mummy2);
+    }
+    if level.has_scorpion {
+        removable.push(EntityKind::Scorpion);
+    }
+    if level.trap_count >= 2 {
+        removable.push(EntityKind::Trap2);
+    }
+    if level.trap_count >= 1 {
+        removable.push(EntityKind::Trap1);
+    }
+
+    if removable.is_empty() {
+        return None;
+    }
+
+    let mut out = level.clone();
+    let kind = removable[rng.random_range(0..removable.len())];
+    match kind {
+        EntityKind::Mummy2 => {
+            out.has_mummy2 = false;
+            out.mummy2_row = 99;
+            out.mummy2_col = 99;
+        }
+        EntityKind::Scorpion => {
+            out.has_scorpion = false;
+            out.scorpion_row = 99;
+            out.scorpion_col = 99;
+        }
+        EntityKind::Trap1 => {
+            // If trap2 exists, move it to trap1 slot
+            if out.trap_count == 2 {
+                out.trap1_row = out.trap2_row;
+                out.trap1_col = out.trap2_col;
+                out.trap2_row = 99;
+                out.trap2_col = 99;
+                out.trap_count = 1;
+            } else {
+                out.trap_count = 0;
+                out.trap1_row = 99;
+                out.trap1_col = 99;
+            }
+        }
+        EntityKind::Trap2 => {
+            out.trap_count = 1;
+            out.trap2_row = 99;
+            out.trap2_col = 99;
+        }
+        EntityKind::Mummy1 => unreachable!(),
+    }
+
+    Some(out)
+}
+
+/// Apply a random mutation operator using weighted probabilities from config.
+pub fn mutate_with_config(level: &Level, rng: &mut impl Rng, config: &GaConfig) -> Level {
+    let total = config.w_wall + config.w_move_entity + config.w_move_player
+        + config.w_add_entity + config.w_remove_entity;
+    let r: f64 = rng.random::<f64>() * total;
+
+    let mut cumulative = config.w_wall;
+    let mut result = if r < cumulative {
         mutate_wall(level, rng)
-    } else if r < 0.8 {
-        mutate_entity(level, rng)
     } else {
-        mutate_player(level, rng)
+        cumulative += config.w_move_entity;
+        if r < cumulative {
+            mutate_entity(level, rng)
+        } else {
+            cumulative += config.w_move_player;
+            if r < cumulative {
+                mutate_player(level, rng)
+            } else {
+                cumulative += config.w_add_entity;
+                if r < cumulative {
+                    mutate_add_entity(level, rng).unwrap_or_else(|| level.clone())
+                } else {
+                    mutate_remove_entity(level, rng).unwrap_or_else(|| level.clone())
+                }
+            }
+        }
     };
 
-    // Sometimes apply an extra wall mutation
-    if rng.random_bool(0.3) {
+    if rng.random_bool(config.extra_wall_prob) {
         result = mutate_wall(&result, rng);
     }
 
@@ -237,14 +384,22 @@ pub fn crossover(a: &Level, b: &Level, rng: &mut impl Rng) -> Level {
     };
 
     let mut out = wall_parent.clone();
+    out.flip = if rng.random_bool(0.5) {
+        entity_parent.flip
+    } else {
+        wall_parent.flip
+    };
     out.player_row = entity_parent.player_row;
     out.player_col = entity_parent.player_col;
     out.mummy1_row = entity_parent.mummy1_row;
     out.mummy1_col = entity_parent.mummy1_col;
+    out.has_mummy2 = entity_parent.has_mummy2;
     out.mummy2_row = entity_parent.mummy2_row;
     out.mummy2_col = entity_parent.mummy2_col;
+    out.has_scorpion = entity_parent.has_scorpion;
     out.scorpion_row = entity_parent.scorpion_row;
     out.scorpion_col = entity_parent.scorpion_col;
+    out.trap_count = entity_parent.trap_count;
     out.trap1_row = entity_parent.trap1_row;
     out.trap1_col = entity_parent.trap1_col;
     out.trap2_row = entity_parent.trap2_row;
@@ -365,7 +520,7 @@ pub fn run_ga(
                 crossover(&p1.level, &p2.level, &mut rng)
             } else {
                 let parent = tournament_select(&population, &mut rng, 3);
-                mutate(&parent.level, &mut rng)
+                mutate_with_config(&parent.level, &mut rng, config)
             };
             offspring_levels.push(child_level);
         }
