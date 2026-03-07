@@ -162,7 +162,8 @@ class TestOptimalActionConsistency:
     assert gs == grid_size
 
     # Get Rust graph + dist_to_win
-    graph = mummymaze_rust.build_graph(str(DAT_DIR / f"{file_stem}.dat"), sublevel)
+    lev = mummymaze_rust.Level.from_file(str(DAT_DIR / f"{file_stem}.dat"), sublevel)
+    graph = mummymaze_rust.build_graph(lev)
     dist_map, states = _build_dist_to_win(graph)
     assert len(dist_map) > 0, "No winnable states"
 
@@ -246,7 +247,8 @@ class TestOverfitSingleLevel:
     assert gs == grid_size
 
     # Get optimal actions from Rust
-    graph = mummymaze_rust.build_graph(str(DAT_DIR / f"{file_stem}.dat"), sublevel)
+    lev = mummymaze_rust.Level.from_file(str(DAT_DIR / f"{file_stem}.dat"), sublevel)
+    graph = mummymaze_rust.build_graph(lev)
     dist_map, states = _build_dist_to_win(graph)
 
     # Build action bitmasks

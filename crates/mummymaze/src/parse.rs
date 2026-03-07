@@ -4,6 +4,20 @@
 //!   bit 0 (1) = WALL_W, bit 1 (2) = WALL_E,
 //!   bit 2 (4) = WALL_S, bit 3 (8) = WALL_N
 //! Exit flags in upper nibble: EXIT_W=0x10, EXIT_E=0x20, EXIT_S=0x40, EXIT_N=0x80
+//!
+//! ## Why cell bitmasks instead of h_walls/v_walls edge arrays
+//!
+//! The Python side (parser, game.py, JAX env) uses non-redundant edge arrays
+//! (h_walls, v_walls) where each wall is stored once. This crate uses redundant
+//! per-cell bitmasks (a wall between two cells sets flags on both). We considered
+//! switching to edge arrays for consistency, but kept bitmasks because:
+//!
+//! - The game engine is a verified port of the original binary (9,814 solution
+//!   agreement). Rewriting all wall checks risks regressions for no functional gain.
+//! - At max grid size 10×10, the entire walls array (400 bytes) fits in L1 cache,
+//!   so the layout choice has no measurable performance impact.
+//! - The bitmask format is internal — `Level::from_edges()` provides a clean
+//!   constructor from edge arrays, hiding the redundancy from callers.
 
 use crate::error::{MummyMazeError, Result};
 use std::path::Path;
@@ -398,6 +412,141 @@ pub fn parse_sublevel(data: &[u8], offset: usize, hdr: &Header) -> Result<Level>
     }
 
     Ok(out)
+}
+
+impl Level {
+    /// Construct a `Level` from edge-array walls and entity positions.
+    ///
+    /// This accepts the same representation the Python parser produces
+    /// (h_walls/v_walls edge arrays), converting to internal cell bitmasks.
+    ///
+    /// # Arguments
+    /// * `h_walls` — `(n+1) * n` bools, row-major. `h_walls[r * n + c]` = wall
+    ///   on top edge of cell `(r, c)`.
+    /// * `v_walls` — `n * (n+1)` bools, row-major. `v_walls[r * (n+1) + c]` =
+    ///   wall on left edge of cell `(r, c)`.
+    /// * `exit_side` — `"N"`, `"S"`, `"E"`, or `"W"`.
+    /// * Entity positions are `(row, col)`. Use `None` for absent entities.
+    /// * `traps` — up to 2 trap positions.
+    pub fn from_edges(
+        grid_size: i32,
+        flip: bool,
+        h_walls: &[bool],
+        v_walls: &[bool],
+        exit_side: &str,
+        exit_pos: i32,
+        player: (i32, i32),
+        mummy1: (i32, i32),
+        mummy2: Option<(i32, i32)>,
+        scorpion: Option<(i32, i32)>,
+        traps: &[(i32, i32)],
+        gate: Option<(i32, i32)>,
+        key: Option<(i32, i32)>,
+    ) -> Level {
+        let n = grid_size;
+        let mut walls = [0u32; MAX_GRID * MAX_GRID];
+
+        // h_walls[r][c] → WALL_N on (r, c) and WALL_S on (r-1, c)
+        for r in 0..=n {
+            for c in 0..n {
+                if h_walls[(r * n + c) as usize] {
+                    if r < n {
+                        walls[(c + r * 10) as usize] |= WALL_N;
+                    }
+                    if r > 0 {
+                        walls[(c + (r - 1) * 10) as usize] |= WALL_S;
+                    }
+                }
+            }
+        }
+
+        // v_walls[r][c] → WALL_W on (r, c) and WALL_E on (r, c-1)
+        for r in 0..n {
+            for c in 0..=n {
+                if v_walls[(r * (n + 1) + c) as usize] {
+                    if c < n {
+                        walls[(c + r * 10) as usize] |= WALL_W;
+                    }
+                    if c > 0 {
+                        walls[((c - 1) + r * 10) as usize] |= WALL_E;
+                    }
+                }
+            }
+        }
+
+        // Exit: clear border wall, set exit flag
+        let (exit_row, exit_col, exit_mask) = match exit_side {
+            "N" => {
+                let idx = exit_pos as usize;
+                walls[idx] &= !WALL_N;
+                walls[idx] |= EXIT_N;
+                (0, exit_pos, EXIT_N)
+            }
+            "S" => {
+                let idx = (exit_pos + (n - 1) * 10) as usize;
+                walls[idx] &= !WALL_S;
+                walls[idx] |= EXIT_S;
+                (n - 1, exit_pos, EXIT_S)
+            }
+            "W" => {
+                let idx = (exit_pos * 10) as usize;
+                walls[idx] &= !WALL_W;
+                walls[idx] |= EXIT_W;
+                (exit_pos, 0, EXIT_W)
+            }
+            "E" => {
+                let idx = ((n - 1) + exit_pos * 10) as usize;
+                walls[idx] &= !WALL_E;
+                walls[idx] |= EXIT_E;
+                (exit_pos, n - 1, EXIT_E)
+            }
+            _ => (0, 0, 0),
+        };
+
+        let (m2r, m2c, has_mummy2) = match mummy2 {
+            Some((r, c)) => (r, c, true),
+            None => (99, 99, false),
+        };
+        let (sr, sc, has_scorpion) = match scorpion {
+            Some((r, c)) => (r, c, true),
+            None => (99, 99, false),
+        };
+        let (t1r, t1c) = traps.first().copied().unwrap_or((99, 99));
+        let (t2r, t2c) = traps.get(1).copied().unwrap_or((99, 99));
+        let (gr, gc, kr, kc, has_gate) = match (gate, key) {
+            (Some((gr, gc)), Some((kr, kc))) => (gr, gc, kr, kc, true),
+            _ => (99, 99, 99, 99, false),
+        };
+
+        Level {
+            grid_size,
+            flip,
+            walls,
+            player_row: player.0,
+            player_col: player.1,
+            mummy1_row: mummy1.0,
+            mummy1_col: mummy1.1,
+            mummy2_row: m2r,
+            mummy2_col: m2c,
+            has_mummy2,
+            scorpion_row: sr,
+            scorpion_col: sc,
+            has_scorpion,
+            trap1_row: t1r,
+            trap1_col: t1c,
+            trap2_row: t2r,
+            trap2_col: t2c,
+            trap_count: traps.len() as i32,
+            gate_row: gr,
+            gate_col: gc,
+            has_gate,
+            key_row: kr,
+            key_col: kc,
+            exit_row,
+            exit_col,
+            exit_mask,
+        }
+    }
 }
 
 /// Parse an entire .dat file, returning header and all sublevels.

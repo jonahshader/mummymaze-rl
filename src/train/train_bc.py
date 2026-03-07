@@ -224,6 +224,27 @@ def _write_agent_probs_bin(
     raise
 
 
+def _parse_rust_levels(
+  maze_dir: Path,
+  level_keys: list[tuple[str, int]],
+) -> list["mummymaze_rust.Level"]:
+  """Parse Level objects from .dat files for a list of (file_stem, sublevel) keys."""
+  # Group by file to avoid re-parsing the same .dat file
+  from collections import defaultdict
+
+  by_file: dict[str, list[tuple[int, int]]] = defaultdict(list)
+  for i, (stem, sub) in enumerate(level_keys):
+    by_file[stem].append((sub, i))
+
+  result: list[mummymaze_rust.Level | None] = [None] * len(level_keys)
+  for stem, entries in by_file.items():
+    levels = mummymaze_rust.parse_file(str(maze_dir / f"{stem}.dat"))
+    for sub, idx in entries:
+      result[idx] = levels[sub]
+
+  return result  # type: ignore[return-value]
+
+
 def train(
   maze_dir: Path,
   epochs: int = 10,
@@ -535,8 +556,11 @@ def train(
       level_keys = list(sources[gs])
       state_tuples_np = np.asarray(ds.state_tuples, dtype=np.int32)
 
+      # Parse Level objects for the Rust Markov solver
+      rust_levels = _parse_rust_levels(maze_dir, level_keys)
+
       win_probs = mummymaze_rust.policy_win_prob_batch(
-        str(maze_dir), level_keys, state_tuples_np, probs, offsets.tolist()
+        rust_levels, state_tuples_np, probs, offsets.tolist()
       )
 
       # Collect per-level slices for agent_probs.bin

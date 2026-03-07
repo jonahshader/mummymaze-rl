@@ -230,33 +230,24 @@ pub fn best_actions_all(
 /// Compute exact win probability under an arbitrary policy for a batch of levels.
 ///
 /// Arguments:
-/// - `maze_dir`: path to directory of .dat files
-/// - `level_keys`: (file_stem, sublevel) identifying each level
+/// - `levels`: slice of Level references, one per level
 /// - `state_tuples`: flat array of state tuples (12 i32 fields each), all levels concatenated
-/// - `action_probs`: flat array of action probabilities (5 f32 per state), same length as state_tuples
+/// - `action_probs`: flat array of action probabilities (5 f32 per state), same length
 /// - `offsets`: length n_levels + 1, slicing into state_tuples/action_probs per level
 ///
 /// Returns one f64 win probability per level.
 pub fn policy_win_prob_batch(
-    maze_dir: &Path,
-    level_keys: &[(String, usize)],
+    levels: &[&Level],
     state_tuples: &[[i32; 12]],
     action_probs: &[[f32; 5]],
     offsets: &[usize],
 ) -> Result<Vec<f64>> {
     use rustc_hash::FxHashMap;
 
-    // Parse all levels and build lookup
-    let all_levels = collect_levels(maze_dir)?;
-    let mut level_lookup: FxHashMap<(&str, usize), &Level> = FxHashMap::default();
-    for (stem, sub_idx, lev) in &all_levels {
-        level_lookup.insert((stem.as_str(), *sub_idx), lev);
-    }
-
-    let results: Vec<Result<f64>> = level_keys
+    let results: Vec<Result<f64>> = levels
         .par_iter()
         .enumerate()
-        .map(|(i, (file_stem, sublevel))| {
+        .map(|(i, lev)| {
             let start = offsets[i];
             let end = offsets[i + 1];
             let states_slice = &state_tuples[start..end];
@@ -270,23 +261,14 @@ pub fn policy_win_prob_batch(
                 policy.insert(state, probs.map(|p| p as f64));
             }
 
-            let lev = level_lookup
-                .get(&(file_stem.as_str(), *sublevel))
-                .ok_or_else(|| {
-                    crate::error::MummyMazeError::Parse(format!(
-                        "level not found: {} sub {}",
-                        file_stem, sublevel
-                    ))
-                })?;
-
             let graph = build_graph(lev);
             let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
             match chain.solve_win_probs_tol(1e-10, 200_000) {
                 Ok(win_probs) => Ok(win_probs[chain.start_idx]),
                 Err(_) => {
                     eprintln!(
-                        "WARNING: Markov solver failed to converge for {}:{} ({} states)",
-                        file_stem, sublevel, chain.n_states()
+                        "WARNING: Markov solver failed to converge for level {} ({} states)",
+                        i, chain.n_states()
                     );
                     Ok(f64::NAN)
                 }

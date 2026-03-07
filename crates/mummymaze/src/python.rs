@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::batch::{self, LevelAnalysis};
 use crate::game::State;
+use crate::parse::Level;
 
 type StateTuple = (i32, i32, i32, i32, bool, i32, i32, bool, i32, i32, bool, bool);
 
@@ -21,8 +22,18 @@ fn state_to_tuple(s: &State) -> StateTuple {
     )
 }
 
+fn action_name(a: crate::game::Action) -> &'static str {
+    match a {
+        crate::game::Action::North => "N",
+        crate::game::Action::South => "S",
+        crate::game::Action::East => "E",
+        crate::game::Action::West => "W",
+        crate::game::Action::Wait => "wait",
+    }
+}
+
 /// Convert a LevelAnalysis to a Python dict.
-fn level_analysis_to_dict(py: Python<'_>, r: &LevelAnalysis) -> PyResult<PyObject> {
+fn analysis_to_dict(py: Python<'_>, r: &LevelAnalysis) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
     dict.set_item("file", &r.file_stem)?;
     dict.set_item("sublevel", r.sublevel)?;
@@ -39,14 +50,265 @@ fn level_analysis_to_dict(py: Python<'_>, r: &LevelAnalysis) -> PyResult<PyObjec
     Ok(dict.into())
 }
 
-/// Analyze a single level, returning a dict with all results.
+/// Extract numpy arrays into Vec<[i32; 12]> and Vec<[f32; 5]>.
+fn extract_policy_arrays(
+    state_tuples: &PyReadonlyArray2<i32>,
+    action_probs: &PyReadonlyArray2<f32>,
+) -> (Vec<[i32; 12]>, Vec<[f32; 5]>) {
+    let st_array = state_tuples.as_array();
+    let ap_array = action_probs.as_array();
+    let n = st_array.nrows();
+
+    let mut st_vec: Vec<[i32; 12]> = Vec::with_capacity(n);
+    for row in st_array.rows() {
+        let mut arr = [0i32; 12];
+        for (i, &v) in row.iter().enumerate() {
+            arr[i] = v;
+        }
+        st_vec.push(arr);
+    }
+
+    let mut ap_vec: Vec<[f32; 5]> = Vec::with_capacity(n);
+    for row in ap_array.rows() {
+        let mut arr = [0f32; 5];
+        for (i, &v) in row.iter().enumerate() {
+            arr[i] = v;
+        }
+        ap_vec.push(arr);
+    }
+
+    (st_vec, ap_vec)
+}
+
+// ---------------------------------------------------------------------------
+// PyLevel — Python-accessible wrapper around Level
+// ---------------------------------------------------------------------------
+
+/// A parsed or constructed Mummy Maze level.
+///
+/// Construct via `Level.from_file()` or `Level.from_edges()`, then pass to
+/// `solve()`, `analyze()`, `build_graph()`, or `policy_win_prob()`.
+#[pyclass(name = "Level")]
+#[derive(Clone)]
+struct PyLevel {
+    inner: Level,
+}
+
+#[pymethods]
+impl PyLevel {
+    /// Parse a single level from a .dat file.
+    #[staticmethod]
+    #[pyo3(signature = (dat_path, sublevel))]
+    fn from_file(dat_path: &str, sublevel: usize) -> PyResult<Self> {
+        let path = Path::new(dat_path);
+        let (_, levels) = crate::parse::parse_file(path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        if sublevel >= levels.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err("sublevel out of range"));
+        }
+        Ok(PyLevel { inner: levels.into_iter().nth(sublevel).unwrap() })
+    }
+
+    /// Construct a level from edge-array walls and entity positions.
+    ///
+    /// Args:
+    ///     grid_size: 6, 8, or 10
+    ///     flip: True for red mummies, False for white
+    ///     h_walls: flat list of (n+1)*n bools, row-major
+    ///     v_walls: flat list of n*(n+1) bools, row-major
+    ///     exit_side: "N", "S", "E", or "W"
+    ///     exit_pos: position along the exit side (0-indexed)
+    ///     player: (row, col)
+    ///     mummy1: (row, col)
+    ///     mummy2: (row, col) or None
+    ///     scorpion: (row, col) or None
+    ///     traps: list of (row, col), up to 2
+    ///     gate: (row, col) or None
+    ///     key: (row, col) or None
+    #[staticmethod]
+    #[pyo3(signature = (grid_size, flip, h_walls, v_walls, exit_side, exit_pos, player, mummy1, mummy2=None, scorpion=None, traps=vec![], gate=None, key=None))]
+    fn from_edges(
+        grid_size: i32,
+        flip: bool,
+        h_walls: Vec<bool>,
+        v_walls: Vec<bool>,
+        exit_side: &str,
+        exit_pos: i32,
+        player: (i32, i32),
+        mummy1: (i32, i32),
+        mummy2: Option<(i32, i32)>,
+        scorpion: Option<(i32, i32)>,
+        traps: Vec<(i32, i32)>,
+        gate: Option<(i32, i32)>,
+        key: Option<(i32, i32)>,
+    ) -> Self {
+        PyLevel {
+            inner: Level::from_edges(
+                grid_size, flip, &h_walls, &v_walls,
+                exit_side, exit_pos, player, mummy1,
+                mummy2, scorpion, &traps, gate, key,
+            ),
+        }
+    }
+
+    #[getter]
+    fn grid_size(&self) -> i32 {
+        self.inner.grid_size
+    }
+
+    #[getter]
+    fn flip(&self) -> bool {
+        self.inner.flip
+    }
+
+    fn __repr__(&self) -> String {
+        let l = &self.inner;
+        format!(
+            "Level(grid_size={}, flip={}, player=({},{}), mummy1=({},{}))",
+            l.grid_size, l.flip, l.player_row, l.player_col, l.mummy1_row, l.mummy1_col,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-level operations (take PyLevel)
+// ---------------------------------------------------------------------------
+
+/// Parse all levels from a .dat file.
 #[pyfunction]
-#[pyo3(signature = (dat_path, sublevel))]
-fn analyze_level(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<PyObject> {
+#[pyo3(signature = (dat_path,))]
+fn parse_file(dat_path: &str) -> PyResult<Vec<PyLevel>> {
     let path = Path::new(dat_path);
-    let result = batch::analyze_one(path, sublevel)
+    let (_, levels) = crate::parse::parse_file(path)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    level_analysis_to_dict(py, &result)
+    Ok(levels.into_iter().map(|l| PyLevel { inner: l }).collect())
+}
+
+/// BFS solve. Returns move count or None if unsolvable.
+#[pyfunction]
+#[pyo3(signature = (level,))]
+fn solve(level: &PyLevel) -> Option<u32> {
+    crate::solver::solve(&level.inner).moves
+}
+
+/// BFS solve returning the full action sequence as a list of ints.
+/// Action indices: N=0, S=1, E=2, W=3, Wait=4. Returns None if unsolvable.
+#[pyfunction]
+#[pyo3(signature = (level,))]
+fn solve_actions(level: &PyLevel) -> Option<Vec<u32>> {
+    crate::solver::solve(&level.inner)
+        .actions
+        .map(|acts| acts.iter().map(|a| a.to_index() as u32).collect())
+}
+
+/// Full analysis: BFS + state graph + Markov chain + difficulty metrics.
+#[pyfunction]
+#[pyo3(signature = (level, label="", sublevel=0))]
+fn analyze(py: Python<'_>, level: &PyLevel, label: &str, sublevel: usize) -> PyResult<PyObject> {
+    let result = batch::analyze_level(label, sublevel, &level.inner)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    analysis_to_dict(py, &result)
+}
+
+/// Build and return the full state graph.
+/// Returns: {"states": [...], "edges": [(src_idx, action, dst), ...], "start_idx": int}
+#[pyfunction]
+#[pyo3(signature = (level,))]
+fn build_graph(py: Python<'_>, level: &PyLevel) -> PyResult<PyObject> {
+    let graph = crate::graph::build_graph(&level.inner);
+    let indices = graph.state_indices();
+    let state_to_idx = &indices.state_to_idx;
+    let state_list = &indices.idx_to_state;
+
+    let py_states: Vec<StateTuple> = state_list.iter().map(state_to_tuple).collect();
+
+    let mut py_edges: Vec<PyObject> = Vec::new();
+    for (s, transitions) in &graph.transitions {
+        let src_idx = state_to_idx[s];
+        for &(action, dest) in transitions {
+            let dst: PyObject = match dest {
+                crate::graph::StateKey::Transient(ns) => state_to_idx[&ns].into_pyobject(py)?.into(),
+                crate::graph::StateKey::Win => "WIN".into_pyobject(py)?.into(),
+                crate::graph::StateKey::Dead => "DEAD".into_pyobject(py)?.into(),
+            };
+            let edge = (src_idx, action_name(action), dst);
+            py_edges.push(edge.into_pyobject(py)?.into());
+        }
+    }
+
+    let start_idx = state_to_idx[&graph.start];
+
+    let dict = PyDict::new(py);
+    dict.set_item("states", py_states)?;
+    dict.set_item("edges", py_edges)?;
+    dict.set_item("start_idx", start_idx)?;
+    Ok(dict.into())
+}
+
+/// Compute exact win probability under an arbitrary policy for a single level.
+///
+/// Args:
+///     level: Level object
+///     state_tuples: numpy (n_states, 12) i32
+///     action_probs: numpy (n_states, 5) f32
+///
+/// Returns win probability (f64), or NaN if solver fails to converge.
+#[pyfunction]
+#[pyo3(signature = (level, state_tuples, action_probs))]
+fn policy_win_prob(
+    level: &PyLevel,
+    state_tuples: PyReadonlyArray2<i32>,
+    action_probs: PyReadonlyArray2<f32>,
+) -> PyResult<f64> {
+    use crate::markov::MarkovChain;
+    use rustc_hash::FxHashMap;
+
+    let (st_vec, ap_vec) = extract_policy_arrays(&state_tuples, &action_probs);
+
+    let mut policy: FxHashMap<State, [f64; 5]> =
+        FxHashMap::with_capacity_and_hasher(st_vec.len(), Default::default());
+    for (tuple, probs) in st_vec.iter().zip(ap_vec.iter()) {
+        let state = State::from_i32_array(tuple);
+        policy.insert(state, probs.map(|p| p as f64));
+    }
+
+    let graph = crate::graph::build_graph(&level.inner);
+    let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
+    match chain.solve_win_probs_tol(1e-10, 200_000) {
+        Ok(win_probs) => Ok(win_probs[chain.start_idx]),
+        Err(_) => Ok(f64::NAN),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch operations (take lists of PyLevel or directory paths)
+// ---------------------------------------------------------------------------
+
+/// Compute exact win probability under an arbitrary policy for a batch of levels.
+///
+/// Args:
+///     levels: list of Level objects
+///     state_tuples: numpy (total_states, 12) i32 — all levels concatenated
+///     action_probs: numpy (total_states, 5) f32
+///     offsets: list of n_levels+1 ints slicing into the flat arrays
+///
+/// Returns list of f64 win probabilities, one per level.
+#[pyfunction]
+#[pyo3(signature = (levels, state_tuples, action_probs, offsets))]
+fn policy_win_prob_batch(
+    py: Python<'_>,
+    levels: Vec<PyRef<'_, PyLevel>>,
+    state_tuples: PyReadonlyArray2<i32>,
+    action_probs: PyReadonlyArray2<f32>,
+    offsets: Vec<usize>,
+) -> PyResult<Vec<f64>> {
+    let (st_vec, ap_vec) = extract_policy_arrays(&state_tuples, &action_probs);
+    let level_refs: Vec<&Level> = levels.iter().map(|l| &l.inner).collect();
+
+    py.allow_threads(|| {
+        batch::policy_win_prob_batch(&level_refs, &st_vec, &ap_vec, &offsets)
+    })
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Analyze all levels in a directory. Releases the GIL, uses rayon internally.
@@ -54,44 +316,18 @@ fn analyze_level(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<Py
 #[pyo3(signature = (maze_dir, jobs=0))]
 fn analyze_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyObject>> {
     let path = Path::new(maze_dir);
-
     let results = py
         .allow_threads(|| batch::analyze_all(path, jobs, None))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let mut out = Vec::with_capacity(results.len());
     for r in &results {
-        out.push(level_analysis_to_dict(py, r)?);
+        out.push(analysis_to_dict(py, r)?);
     }
     Ok(out)
 }
 
-/// BFS-only solve for a single level. Returns move count.
-#[pyfunction]
-#[pyo3(signature = (dat_path, sublevel))]
-fn solve_level(_py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<Option<u32>> {
-    let path = Path::new(dat_path);
-    batch::solve_one(path, sublevel)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-}
-
-/// BFS solve returning the full action sequence as a list of ints.
-/// Action indices match JAX env: N=0, S=1, E=2, W=3, Wait=4.
-/// Returns None if unsolvable.
-#[pyfunction]
-#[pyo3(signature = (dat_path, sublevel))]
-fn solve_level_actions(_py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<Option<Vec<u32>>> {
-    let path = Path::new(dat_path);
-    let (_, levels) = crate::parse::parse_file(path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    if sublevel >= levels.len() {
-        return Err(pyo3::exceptions::PyIndexError::new_err("sublevel out of range"));
-    }
-    let result = crate::solver::solve(&levels[sublevel]);
-    Ok(result.actions.map(|acts| acts.iter().map(|a| a.to_index() as u32).collect()))
-}
-
-/// Solve all levels, returning action sequences. Releases the GIL, uses rayon internally.
+/// Solve all levels in a directory, returning action sequences. Releases the GIL.
 /// Returns list of dicts: {"file": str, "sublevel": int, "actions": list[int] | None}
 #[pyfunction]
 #[pyo3(signature = (maze_dir, jobs=0))]
@@ -114,9 +350,6 @@ fn solve_all_actions(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Ve
 
 /// Compute best (distance-reducing) actions for every winnable state across all levels.
 /// Releases the GIL, uses rayon internally.
-/// Returns list of dicts: {"file": str, "sublevel": int, "grid_size": int,
-///   "states": [(pr, pc, m1r, m1c, m1_alive, m2r, m2c, m2_alive, sr, sc, s_alive, gate_open), ...],
-///   "action_masks": [int, ...]}
 #[pyfunction]
 #[pyo3(signature = (maze_dir, jobs=0))]
 fn best_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec<PyObject>> {
@@ -146,124 +379,22 @@ fn best_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec
     Ok(out)
 }
 
-/// Build and return the full state graph as a Python dict.
-/// Returns: {"states": [state_tuple, ...], "edges": [(src_idx, action_name, dst)], "start_idx": int}
-/// where dst is an int (index into states) or "WIN" or "DEAD".
-/// state_tuple = (pr, pc, m1r, m1c, m1_alive, m2r, m2c, m2_alive, sr, sc, s_alive, gate_open)
-#[pyfunction]
-#[pyo3(signature = (dat_path, sublevel))]
-fn build_graph(py: Python<'_>, dat_path: &str, sublevel: usize) -> PyResult<PyObject> {
-    let path = Path::new(dat_path);
-    let (_, levels) = crate::parse::parse_file(path)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    if sublevel >= levels.len() {
-        return Err(pyo3::exceptions::PyIndexError::new_err("sublevel out of range"));
-    }
-    let graph = crate::graph::build_graph(&levels[sublevel]);
+// ---------------------------------------------------------------------------
+// Module
+// ---------------------------------------------------------------------------
 
-    // Map states to indices
-    let indices = graph.state_indices();
-    let state_to_idx = &indices.state_to_idx;
-    let state_list = &indices.idx_to_state;
-
-    // Convert states to Python tuples
-    let py_states: Vec<StateTuple> = state_list.iter().map(state_to_tuple).collect();
-
-    // Build edges
-    let action_name = |a: crate::game::Action| -> &'static str {
-        match a {
-            crate::game::Action::North => "N",
-            crate::game::Action::South => "S",
-            crate::game::Action::East => "E",
-            crate::game::Action::West => "W",
-            crate::game::Action::Wait => "wait",
-        }
-    };
-
-    let mut py_edges: Vec<PyObject> = Vec::new();
-    for (s, transitions) in &graph.transitions {
-        let src_idx = state_to_idx[s];
-        for &(action, dest) in transitions {
-            let dst: PyObject = match dest {
-                crate::graph::StateKey::Transient(ns) => state_to_idx[&ns].into_pyobject(py)?.into(),
-                crate::graph::StateKey::Win => "WIN".into_pyobject(py)?.into(),
-                crate::graph::StateKey::Dead => "DEAD".into_pyobject(py)?.into(),
-            };
-            let edge = (src_idx, action_name(action), dst);
-            py_edges.push(edge.into_pyobject(py)?.into());
-        }
-    }
-
-    let start_idx = state_to_idx[&graph.start];
-
-    let dict = PyDict::new(py);
-    dict.set_item("states", py_states)?;
-    dict.set_item("edges", py_edges)?;
-    dict.set_item("start_idx", start_idx)?;
-    Ok(dict.into())
-}
-
-/// Compute exact win probability under an arbitrary policy for a batch of levels.
-///
-/// Arguments:
-/// - maze_dir: path to directory of .dat files
-/// - level_keys: list of (file_stem, sublevel) tuples identifying each level
-/// - state_tuples: numpy array of shape (total_states, 12) dtype i32
-/// - action_probs: numpy array of shape (total_states, 5) dtype f32
-/// - offsets: list of n_levels+1 ints slicing into the flat arrays
-///
-/// Returns a list of f64 win probabilities, one per level.
-#[pyfunction]
-#[pyo3(signature = (maze_dir, level_keys, state_tuples, action_probs, offsets))]
-fn policy_win_prob_batch(
-    py: Python<'_>,
-    maze_dir: &str,
-    level_keys: Vec<(String, usize)>,
-    state_tuples: PyReadonlyArray2<i32>,
-    action_probs: PyReadonlyArray2<f32>,
-    offsets: Vec<usize>,
-) -> PyResult<Vec<f64>> {
-    let path = Path::new(maze_dir);
-
-    // Extract contiguous slices from numpy arrays
-    let st_array = state_tuples.as_array();
-    let ap_array = action_probs.as_array();
-
-    let n_states = st_array.nrows();
-    let mut st_vec: Vec<[i32; 12]> = Vec::with_capacity(n_states);
-    for row in st_array.rows() {
-        let mut arr = [0i32; 12];
-        for (i, &v) in row.iter().enumerate() {
-            arr[i] = v;
-        }
-        st_vec.push(arr);
-    }
-
-    let mut ap_vec: Vec<[f32; 5]> = Vec::with_capacity(n_states);
-    for row in ap_array.rows() {
-        let mut arr = [0f32; 5];
-        for (i, &v) in row.iter().enumerate() {
-            arr[i] = v;
-        }
-        ap_vec.push(arr);
-    }
-
-    py.allow_threads(|| {
-        batch::policy_win_prob_batch(path, &level_keys, &st_vec, &ap_vec, &offsets)
-    })
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-}
-
-/// Python module definition
 #[pymodule]
 fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(analyze_level, m)?)?;
-    m.add_function(wrap_pyfunction!(analyze_all, m)?)?;
-    m.add_function(wrap_pyfunction!(solve_level, m)?)?;
-    m.add_function(wrap_pyfunction!(solve_level_actions, m)?)?;
-    m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
+    m.add_class::<PyLevel>()?;
+    m.add_function(wrap_pyfunction!(parse_file, m)?)?;
+    m.add_function(wrap_pyfunction!(solve, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_actions, m)?)?;
+    m.add_function(wrap_pyfunction!(analyze, m)?)?;
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
-    m.add_function(wrap_pyfunction!(best_actions_all, m)?)?;
+    m.add_function(wrap_pyfunction!(policy_win_prob, m)?)?;
     m.add_function(wrap_pyfunction!(policy_win_prob_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(analyze_all, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
+    m.add_function(wrap_pyfunction!(best_actions_all, m)?)?;
     Ok(())
 }
