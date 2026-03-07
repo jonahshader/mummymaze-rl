@@ -34,8 +34,12 @@ struct App {
     graph: Option<StateGraph>,
     /// Precomputed BFS optimal action bitmask per state (from graph).
     bfs_optimal: FxHashMap<State, u8>,
+    /// Analysis for GA-generated levels (not in the dataset).
+    generated_analysis: Option<mummymaze::batch::LevelAnalysis>,
     agent_probs: AgentProbs,
     adversarial: adversarial_tab::AdversarialState,
+    show_bfs_overlay: bool,
+    show_agent_overlay: bool,
     right_tab: RightTab,
     maze_dir: std::path::PathBuf,
 }
@@ -58,8 +62,11 @@ impl App {
             graph_view,
             graph: None,
             bfs_optimal: FxHashMap::default(),
+            generated_analysis: None,
             agent_probs,
             adversarial: adversarial_tab::AdversarialState::new(),
+            show_bfs_overlay: false,
+            show_agent_overlay: false,
             right_tab: RightTab::Graph,
             maze_dir: maze_dir.to_path_buf(),
         }
@@ -67,6 +74,7 @@ impl App {
 
     fn select_level(&mut self, idx: usize) {
         self.store.selected = Some(idx);
+        self.generated_analysis = None;
         let row = &self.store.rows[idx];
         self.gameplay = Some(GameplayState::new(row.level.clone()));
 
@@ -122,12 +130,33 @@ impl App {
             return;
         }
 
-        // Heading
-        if let Some(sel) = selected {
+        // Heading + stats
+        let analysis = if let Some(sel) = selected {
             let row = &self.store.rows[sel];
             ui.heading(format!("{} sub {}", row.file_stem, row.sublevel));
+            row.analysis.as_ref()
         } else {
             ui.heading("Generated Level");
+            self.generated_analysis.as_ref()
+        };
+        if let Some(analysis) = analysis {
+            ui.horizontal_wrapped(|ui: &mut egui::Ui| {
+                ui.label(format!("Grid: {}", analysis.grid_size));
+                ui.separator();
+                if let Some(bfs) = analysis.bfs_moves {
+                    ui.label(format!("BFS: {bfs}"));
+                    ui.separator();
+                }
+                ui.label(format!("States: {}", analysis.n_states));
+                ui.separator();
+                ui.label(format!("Win%: {:.4}", analysis.win_prob));
+                ui.separator();
+                ui.label(format!("E[steps]: {:.1}", analysis.expected_steps));
+                if let Some(safety) = analysis.difficulty.path_safety {
+                    ui.separator();
+                    ui.label(format!("Safety: {safety:.2}"));
+                }
+            });
         }
 
         ui.separator();
@@ -140,12 +169,20 @@ impl App {
             render::draw_maze_state(&painter, response.rect, &gs.level, &gs.current_state);
 
             // Action probability + BFS optimal overlay
-            let agent_probs = selected.map(|sel| {
-                let row = &self.store.rows[sel];
-                let level_key = format!("{}:{}", row.file_stem, row.sublevel);
-                self.agent_probs.get_state_probs(&level_key, &gs.current_state)
-            }).flatten();
-            let bfs_mask = self.bfs_optimal.get(&gs.current_state).copied();
+            let agent_probs = if self.show_agent_overlay {
+                selected.and_then(|sel| {
+                    let row = &self.store.rows[sel];
+                    let level_key = format!("{}:{}", row.file_stem, row.sublevel);
+                    self.agent_probs.get_state_probs(&level_key, &gs.current_state)
+                })
+            } else {
+                None
+            };
+            let bfs_mask = if self.show_bfs_overlay {
+                self.bfs_optimal.get(&gs.current_state).copied()
+            } else {
+                None
+            };
             render::draw_action_bars(
                 &painter,
                 response.rect,
@@ -190,6 +227,12 @@ impl App {
                 if ui.button("Reset (R)").clicked() {
                     gs.reset();
                 }
+            });
+
+            // Overlay checkboxes
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.checkbox(&mut self.show_bfs_overlay, "BFS optimal");
+                ui.checkbox(&mut self.show_agent_overlay, "Agent policy");
             });
         }
     }
@@ -377,12 +420,15 @@ impl eframe::App for App {
                     {
                         // Load GA-generated level into maze panel
                         self.gameplay = Some(GameplayState::new(level.clone()));
-                        let graph = mummymaze::graph::build_graph(&level);
-                        let chain = mummymaze::markov::MarkovChain::from_graph(&graph);
-                        if let Some(ref mut gv) = self.graph_view {
-                            gv.load_level(&level, usize::MAX, &graph, &chain);
+                        if let Ok(full) =
+                            mummymaze::batch::analyze_level_full("generated", 0, &level)
+                        {
+                            self.generated_analysis = Some(full.analysis);
+                            if let Some(ref mut gv) = self.graph_view {
+                                gv.load_level(&level, usize::MAX, &full.graph, &full.chain);
+                            }
+                            self.set_graph(full.graph);
                         }
-                        self.set_graph(graph);
                         self.store.selected = None;
                     }
                 }

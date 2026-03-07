@@ -21,8 +21,19 @@ pub struct LevelAnalysis {
     pub difficulty: metrics::DifficultyMetrics,
 }
 
-/// Analyze a single level: BFS solve + full state graph + Markov chain + difficulty metrics.
-pub fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelAnalysis> {
+/// Full analysis result including intermediate artifacts (graph + Markov chain).
+pub struct FullAnalysis {
+    pub analysis: LevelAnalysis,
+    pub graph: crate::graph::StateGraph,
+    pub chain: MarkovChain,
+}
+
+/// Analyze a single level, returning metrics plus the state graph and Markov chain.
+pub fn analyze_level_full(
+    file_stem: &str,
+    sublevel: usize,
+    lev: &Level,
+) -> Result<FullAnalysis> {
     let bfs = solver::solve(lev);
     let graph = build_graph(lev);
     let chain = MarkovChain::from_graph(&graph);
@@ -30,16 +41,25 @@ pub fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<Le
     let expected_steps = chain.solve_expected_steps()?;
     let diff = metrics::compute(&graph, lev, &bfs);
 
-    Ok(LevelAnalysis {
-        file_stem: file_stem.to_string(),
-        sublevel,
-        grid_size: lev.grid_size,
-        n_states: chain.n_states(),
-        win_prob: win_probs[chain.start_idx],
-        expected_steps: expected_steps[chain.start_idx],
-        bfs_moves: bfs.moves,
-        difficulty: diff,
+    Ok(FullAnalysis {
+        analysis: LevelAnalysis {
+            file_stem: file_stem.to_string(),
+            sublevel,
+            grid_size: lev.grid_size,
+            n_states: chain.n_states(),
+            win_prob: win_probs[chain.start_idx],
+            expected_steps: expected_steps[chain.start_idx],
+            bfs_moves: bfs.moves,
+            difficulty: diff,
+        },
+        graph,
+        chain,
     })
+}
+
+/// Analyze a single level: BFS solve + full state graph + Markov chain + difficulty metrics.
+pub fn analyze_level(file_stem: &str, sublevel: usize, lev: &Level) -> Result<LevelAnalysis> {
+    analyze_level_full(file_stem, sublevel, lev).map(|full| full.analysis)
 }
 
 /// Gather all (file_stem, sublevel_index, Level) triples from a maze directory.
