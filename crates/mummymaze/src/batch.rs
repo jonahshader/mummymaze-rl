@@ -46,9 +46,9 @@ pub fn analyze_level_full(
             file_stem: file_stem.to_string(),
             sublevel,
             grid_size: lev.grid_size,
-            n_states: chain.n_states(),
-            win_prob: win_probs[chain.start_idx],
-            expected_steps: expected_steps[chain.start_idx],
+            n_states: graph.n_transient,
+            win_prob: chain.start_idx.map_or(0.0, |i| win_probs[i]),
+            expected_steps: chain.start_idx.map_or(f64::INFINITY, |i| expected_steps[i]),
             bfs_moves: bfs.moves,
             difficulty: diff,
         },
@@ -284,7 +284,7 @@ pub fn policy_win_prob_batch(
             let graph = build_graph(lev);
             let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
             match chain.solve_win_probs_tol(1e-10, 200_000) {
-                Ok(win_probs) => Ok(win_probs[chain.start_idx]),
+                Ok(win_probs) => Ok(chain.start_idx.map_or(0.0, |i| win_probs[i])),
                 Err(_) => {
                     eprintln!(
                         "WARNING: Markov solver failed to converge for level {} ({} states)",

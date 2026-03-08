@@ -275,7 +275,7 @@ fn policy_win_prob(
     let graph = crate::graph::build_graph(&level.inner);
     let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
     match chain.solve_win_probs_tol(1e-10, 200_000) {
-        Ok(win_probs) => Ok(win_probs[chain.start_idx]),
+        Ok(win_probs) => Ok(chain.start_idx.map_or(0.0, |i| win_probs[i])),
         Err(_) => Ok(f64::NAN),
     }
 }

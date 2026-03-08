@@ -10,7 +10,7 @@
 use crate::error::{MummyMazeError, Result};
 use crate::game::{Action, State};
 use crate::graph::{StateGraph, StateKey};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 const MAX_ITERATIONS: usize = 100_000;
 const TOLERANCE: f64 = 1e-12;
@@ -28,8 +28,8 @@ pub struct MarkovChain {
     diag: Vec<f64>,
     /// States where all transitions are self-loops (diag ≈ 0).
     trapped: Vec<bool>,
-    /// Index of the start state.
-    pub start_idx: usize,
+    /// Index of the start state (None if start is not winnable).
+    pub start_idx: Option<usize>,
     /// Map from index back to game state.
     pub idx_to_state: Vec<State>,
 }
@@ -44,39 +44,52 @@ impl MarkovChain {
     /// `prob_fn(state, action, action_index, k)` returns the probability for the given
     /// action, where `action_index` is its position in the transition list and `k` is
     /// the total number of valid actions for that state.
-    fn build(graph: &StateGraph, prob_fn: ProbFn<'_>) -> Self {
-        let indices = graph.state_indices();
-        let state_to_idx = &indices.state_to_idx;
-        let idx_to_state = indices.idx_to_state;
+    ///
+    /// Only states in `winnable` are included in the chain. Transitions to states
+    /// outside this set are treated as absorption into DEAD (probability lost).
+    /// `k` still counts ALL valid actions (including those leading to unwinnable
+    /// states) since the agent doesn't know which states are dead ends.
+    fn build(graph: &StateGraph, winnable: &FxHashSet<State>, prob_fn: ProbFn<'_>) -> Self {
+        // Build index mapping for winnable states only.
+        let mut state_to_idx: FxHashMap<State, usize> = FxHashMap::default();
+        let mut idx_to_state: Vec<State> = Vec::with_capacity(winnable.len());
+        for s in graph.transitions.keys() {
+            if winnable.contains(s) {
+                state_to_idx.insert(*s, idx_to_state.len());
+                idx_to_state.push(*s);
+            }
+        }
         let n = idx_to_state.len();
 
-        let start_idx = state_to_idx[&graph.start];
+        let start_idx = state_to_idx.get(&graph.start).copied();
 
         let mut q_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut win_absorb: Vec<f64> = vec![0.0; n];
         let mut diag: Vec<f64> = vec![1.0; n];
 
-        for (s, s_idx) in state_to_idx {
-            let action_map = &graph.transitions[s];
+        for (&s, &s_idx) in &state_to_idx {
+            let action_map = &graph.transitions[&s];
             let k = action_map.len();
             if k == 0 {
                 continue;
             }
 
             for (idx, &(action, next_key)) in action_map.iter().enumerate() {
-                let prob = prob_fn(s, action, idx, k);
+                let prob = prob_fn(&s, action, idx, k);
                 match next_key {
                     StateKey::Win => {
-                        win_absorb[*s_idx] += prob;
+                        win_absorb[s_idx] += prob;
                     }
                     StateKey::Dead => {}
                     StateKey::Transient(next_state) => {
-                        let j = state_to_idx[&next_state];
-                        if j == *s_idx {
-                            diag[*s_idx] -= prob;
-                        } else {
-                            q_rows[*s_idx].push((j, prob));
+                        if let Some(&j) = state_to_idx.get(&next_state) {
+                            if j == s_idx {
+                                diag[s_idx] -= prob;
+                            } else {
+                                q_rows[s_idx].push((j, prob));
+                            }
                         }
+                        // else: next_state is unwinnable, treat as DEAD (absorbed)
                     }
                 }
             }
@@ -99,9 +112,48 @@ impl MarkovChain {
         }
     }
 
+    /// Compute the set of states that can reach WIN (backward BFS).
+    fn winnable_set(graph: &StateGraph) -> FxHashSet<State> {
+        let mut reverse: FxHashMap<State, Vec<State>> = FxHashMap::default();
+        let mut win_predecessors: Vec<State> = Vec::new();
+
+        for (src, transitions) in &graph.transitions {
+            for &(_action, dest) in transitions {
+                match dest {
+                    StateKey::Win => win_predecessors.push(*src),
+                    StateKey::Transient(dst) => reverse.entry(dst).or_default().push(*src),
+                    StateKey::Dead => {}
+                }
+            }
+        }
+
+        let mut visited = FxHashSet::default();
+        let mut queue = std::collections::VecDeque::new();
+        for s in win_predecessors {
+            if visited.insert(s) {
+                queue.push_back(s);
+            }
+        }
+        while let Some(cur) = queue.pop_front() {
+            if let Some(preds) = reverse.get(&cur) {
+                for &p in preds {
+                    if visited.insert(p) {
+                        queue.push_back(p);
+                    }
+                }
+            }
+        }
+        visited
+    }
+
     /// Build the sparse Markov chain representation from a state graph.
+    ///
+    /// Trims unwinnable states: only states that can reach WIN are included.
     pub fn from_graph(graph: &StateGraph) -> Self {
-        Self::build(graph, &|_state, _action, _idx, k| 1.0 / k as f64)
+        let winnable = Self::winnable_set(graph);
+        Self::build(graph, &winnable, &|_state, _action, _idx, k| {
+            1.0 / k as f64
+        })
     }
 
     /// Build the sparse Markov chain using arbitrary per-state action probabilities.
@@ -110,10 +162,14 @@ impl MarkovChain {
     /// [N, S, E, W, Wait]. Only actions present in the state's transition map are kept;
     /// the rest are zeroed and the remaining probs are renormalized. Falls back to
     /// uniform 1/k for states not in the policy map or when all kept probs are ~0.
+    ///
+    /// Trims unwinnable states: only states that can reach WIN are included.
     pub fn from_graph_with_policy(
         graph: &StateGraph,
         policy: &FxHashMap<State, [f64; 5]>,
     ) -> Self {
+        let winnable = Self::winnable_set(graph);
+
         // Pre-compute per-state normalization sums so the prob_fn closure is cheap.
         // For each state in the graph, sum the policy probs over valid actions only.
         let sums: FxHashMap<State, f64> = graph
@@ -129,7 +185,7 @@ impl MarkovChain {
             })
             .collect();
 
-        Self::build(graph, &|state, action, _idx, k| {
+        Self::build(graph, &winnable, &|state, action, _idx, k| {
             let uniform = 1.0 / k as f64;
             let Some(raw) = policy.get(state) else {
                 return uniform;
