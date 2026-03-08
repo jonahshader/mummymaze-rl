@@ -12,7 +12,8 @@ const KEY_COLOR: Color32 = Color32::from_rgb(230, 200, 50);
 const TRAP_COLOR: Color32 = Color32::from_rgb(220, 120, 40);
 const EXIT_COLOR: Color32 = Color32::from_rgb(50, 220, 50);
 const PLAYER_COLOR: Color32 = Color32::from_rgb(80, 140, 255);
-const MUMMY_COLOR: Color32 = Color32::from_rgb(220, 220, 220);
+const MUMMY_WHITE_COLOR: Color32 = Color32::from_rgb(220, 220, 220);
+const MUMMY_RED_COLOR: Color32 = Color32::from_rgb(220, 60, 60);
 const SCORPION_COLOR: Color32 = Color32::from_rgb(230, 160, 40);
 
 const WALL_THICKNESS: f32 = 3.0;
@@ -203,11 +204,15 @@ fn draw_entities(painter: &Painter, origin: Pos2, cell_size: f32, lev: &Level, s
     let radius = cell_size * 0.3;
     let font = FontId::proportional(cell_size * 0.35);
 
+    // flip=true (is_red) moves horizontal-first internally, but the real game
+    // shows that as white; flip=false moves vertical-first, shown as red.
+    let mummy_color = if lev.flip { MUMMY_WHITE_COLOR } else { MUMMY_RED_COLOR };
+
     // Draw order: scorpion, mummy2, mummy1, player (player on top)
     let entities: [(bool, bool, i32, i32, Color32, &str); 4] = [
         (lev.has_scorpion, state.scorpion_alive, state.scorpion_row, state.scorpion_col, SCORPION_COLOR, "S"),
-        (lev.has_mummy2, state.mummy2_alive, state.mummy2_row, state.mummy2_col, MUMMY_COLOR, "M"),
-        (true, state.mummy1_alive, state.mummy1_row, state.mummy1_col, MUMMY_COLOR, "M"),
+        (lev.has_mummy2, state.mummy2_alive, state.mummy2_row, state.mummy2_col, mummy_color, "M"),
+        (true, state.mummy1_alive, state.mummy1_row, state.mummy1_col, mummy_color, "M"),
         (true, true, state.player_row, state.player_col, PLAYER_COLOR, "P"),
     ];
 
