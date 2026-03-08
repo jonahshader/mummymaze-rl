@@ -75,6 +75,7 @@ pub struct GaConfig {
     pub w_move_player: f64,
     pub w_add_entity: f64,
     pub w_remove_entity: f64,
+    pub w_move_exit: f64,
     /// Probability of an extra wall mutation after the primary mutation.
     pub extra_wall_prob: f64,
 }
@@ -94,6 +95,7 @@ impl Default for GaConfig {
             w_move_player: 2.0,
             w_add_entity: 1.0,
             w_remove_entity: 1.0,
+            w_move_exit: 1.0,
             extra_wall_prob: 0.3,
         }
     }

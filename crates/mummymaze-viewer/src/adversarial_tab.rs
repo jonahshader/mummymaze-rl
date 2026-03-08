@@ -281,6 +281,15 @@ pub fn draw_adversarial_panel(
                     );
                     ui.end_row();
 
+                    ui.label("Move exit:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.w_move_exit)
+                            .range(0.0..=20.0)
+                            .speed(0.1)
+                            .max_decimals(1),
+                    );
+                    ui.end_row();
+
                     ui.label("Extra wall prob:");
                     ui.add(
                         egui::DragValue::new(&mut state.config.extra_wall_prob)

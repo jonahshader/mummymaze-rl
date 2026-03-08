@@ -1,6 +1,6 @@
 //! Mutation operators for adversarial level generation.
 
-use crate::parse::{Level, WALL_E, WALL_N, WALL_S, WALL_W};
+use crate::parse::{Level, EXIT_E, EXIT_N, EXIT_S, EXIT_W, WALL_E, WALL_N, WALL_S, WALL_W};
 use rand::Rng;
 use std::collections::HashSet;
 
@@ -266,10 +266,47 @@ pub fn mutate_remove_entity(level: &Level, rng: &mut impl Rng) -> Option<Level> 
     Some(out)
 }
 
+/// Move the exit to a random border cell/side.
+pub fn mutate_exit(level: &Level, rng: &mut impl Rng) -> Level {
+    let mut out = level.clone();
+    let n = level.grid_size;
+
+    // Clear old exit: remove exit flag and restore border wall
+    let old_idx = (out.exit_col + out.exit_row * 10) as usize;
+    out.walls[old_idx] &= !(EXIT_N | EXIT_S | EXIT_E | EXIT_W);
+    match out.exit_mask {
+        m if m == EXIT_N => out.walls[old_idx] |= WALL_N,
+        m if m == EXIT_S => out.walls[old_idx] |= WALL_S,
+        m if m == EXIT_E => out.walls[old_idx] |= WALL_E,
+        m if m == EXIT_W => out.walls[old_idx] |= WALL_W,
+        _ => {}
+    }
+
+    // Pick a new random border position: side (0-3) + position along that side
+    let side = rng.random_range(0..4u8);
+    let p = rng.random_range(0..n);
+
+    let (er, ec, mask, wall_bit) = match side {
+        0 => (0, p, EXIT_N, WALL_N),         // North border
+        1 => (n - 1, p, EXIT_S, WALL_S),     // South border
+        2 => (p, 0, EXIT_W, WALL_W),         // West border
+        _ => (p, n - 1, EXIT_E, WALL_E),     // East border
+    };
+
+    let new_idx = (ec + er * 10) as usize;
+    out.walls[new_idx] &= !wall_bit;  // Remove border wall
+    out.walls[new_idx] |= mask;       // Set exit flag
+    out.exit_row = er;
+    out.exit_col = ec;
+    out.exit_mask = mask;
+
+    out
+}
+
 /// Apply a random mutation operator using weighted probabilities from config.
 pub fn mutate_with_config(level: &Level, rng: &mut impl Rng, config: &GaConfig) -> Level {
     let total = config.w_wall + config.w_move_entity + config.w_move_player
-        + config.w_add_entity + config.w_remove_entity;
+        + config.w_add_entity + config.w_remove_entity + config.w_move_exit;
     let r: f64 = rng.random::<f64>() * total;
 
     let mut cumulative = config.w_wall;
@@ -288,7 +325,12 @@ pub fn mutate_with_config(level: &Level, rng: &mut impl Rng, config: &GaConfig) 
                 if r < cumulative {
                     mutate_add_entity(level, rng).unwrap_or_else(|| level.clone())
                 } else {
-                    mutate_remove_entity(level, rng).unwrap_or_else(|| level.clone())
+                    cumulative += config.w_remove_entity;
+                    if r < cumulative {
+                        mutate_remove_entity(level, rng).unwrap_or_else(|| level.clone())
+                    } else {
+                        mutate_exit(level, rng)
+                    }
                 }
             }
         }
