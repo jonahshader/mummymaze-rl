@@ -295,24 +295,69 @@ impl MarkovChain {
 
     /// Solve for log10(win_prob) per state, avoiding f64 underflow.
     ///
-    /// Uses the standard linear Gauss-Seidel solver but with periodic
-    /// rescaling: when values approach subnormal range, both the solution
-    /// vector and the RHS (`win_absorb`) are multiplied by a large factor.
-    /// Since `(I-Q)x = b` is linear, scaling `b` by `C` scales `x` by `C`,
-    /// so we track `log10(C)` and subtract it at the end.
+    /// First runs the standard solver. If any winnable state underflows to
+    /// zero, re-solves with `win_absorb` pre-scaled by 10^200. Since
+    /// `(I-Q)x = b` is linear, scaling `b` by `C` scales `x` by `C`,
+    /// so `log10(x) = log10(scaled_x) - log10(C)`.
     ///
-    /// Returns log10 values. States with zero win probability get
-    /// `f64::NEG_INFINITY`.
+    /// Repeats with increasing scale until no state underflows.
+    ///
+    /// Returns log10 values. States that are truly unreachable from WIN
+    /// (shouldn't exist after trimming) get `f64::NEG_INFINITY`.
     pub fn solve_log_win_probs(&self) -> Result<Vec<f64>> {
+        const LOG10_SCALE_STEP: f64 = 200.0;
+        const SCALE_FACTOR: f64 = 1e200;
+        const MAX_RESCALES: usize = 10; // supports log10(win_prob) down to ~-2000
+
+        let mut log10_offset = 0.0f64;
+        let mut scaled_win_absorb = self.win_absorb.clone();
+
+        for _ in 0..=MAX_RESCALES {
+            let x = self.solve_with_rhs(&scaled_win_absorb)?;
+
+            // Check if any winnable state underflowed to zero.
+            let has_underflow = x.iter().enumerate().any(|(i, &v)| {
+                !self.trapped[i] && v == 0.0 && self.has_path_to_win(i)
+            });
+
+            if !has_underflow {
+                return Ok(x
+                    .iter()
+                    .map(|&v| {
+                        if v > 0.0 {
+                            v.log10() - log10_offset
+                        } else {
+                            f64::NEG_INFINITY
+                        }
+                    })
+                    .collect());
+            }
+
+            // Scale up RHS for next attempt.
+            for v in &mut scaled_win_absorb {
+                *v *= SCALE_FACTOR;
+            }
+            log10_offset += LOG10_SCALE_STEP;
+        }
+
+        // Exhausted rescales — return best effort.
+        let x = self.solve_with_rhs(&scaled_win_absorb)?;
+        Ok(x
+            .iter()
+            .map(|&v| {
+                if v > 0.0 {
+                    v.log10() - log10_offset
+                } else {
+                    f64::NEG_INFINITY
+                }
+            })
+            .collect())
+    }
+
+    /// Run Gauss-Seidel with a given RHS vector (scaled win_absorb).
+    fn solve_with_rhs(&self, win_absorb: &[f64]) -> Result<Vec<f64>> {
         let n = self.n_states();
         let mut x = vec![0.0f64; n];
-        let mut win_absorb = self.win_absorb.clone();
-        let mut log10_scale = 0.0f64;
-
-        const RESCALE_THRESHOLD: f64 = 1e-100;
-        const RESCALE_FACTOR: f64 = 1e200;
-        const LOG10_RESCALE: f64 = 200.0;
-
         for _ in 0..MAX_ITERATIONS {
             let mut converged = true;
             for i in 0..n {
@@ -331,31 +376,34 @@ impl MarkovChain {
                 x[i] = new_val;
             }
             if converged {
-                return Ok(x
-                    .iter()
-                    .map(|&v| {
-                        if v > 0.0 {
-                            v.log10() - log10_scale
-                        } else {
-                            f64::NEG_INFINITY
-                        }
-                    })
-                    .collect());
-            }
-
-            // Rescale when values get tiny to prevent underflow.
-            let max_val = x.iter().copied().fold(0.0f64, f64::max);
-            if max_val > 0.0 && max_val < RESCALE_THRESHOLD {
-                for v in &mut x {
-                    *v *= RESCALE_FACTOR;
-                }
-                for v in &mut win_absorb {
-                    *v *= RESCALE_FACTOR;
-                }
-                log10_scale += LOG10_RESCALE;
+                return Ok(x);
             }
         }
         Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
+    }
+
+    /// Check if state i has any path to a state with win_absorb > 0 (BFS through Q).
+    fn has_path_to_win(&self, start: usize) -> bool {
+        if self.win_absorb[start] > 0.0 {
+            return true;
+        }
+        let n = self.n_states();
+        let mut visited = vec![false; n];
+        visited[start] = true;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(start);
+        while let Some(cur) = queue.pop_front() {
+            for &(j, _) in &self.q_rows[cur] {
+                if self.win_absorb[j] > 0.0 {
+                    return true;
+                }
+                if !visited[j] {
+                    visited[j] = true;
+                    queue.push_back(j);
+                }
+            }
+        }
+        false
     }
 
     /// Build a map from State to its solved value for all transient states.
