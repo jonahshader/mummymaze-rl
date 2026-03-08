@@ -9,7 +9,19 @@ use super::{metric_color, GraphView, LayoutMode, NodeKind};
 use std::sync::Arc;
 
 impl GraphView {
+    /// Build the full graph visualization: topology, metrics, positions, and GPU upload.
     pub(super) fn build_from_graph(
+        &mut self,
+        graph: &StateGraph,
+        chain: &mummymaze::markov::MarkovChain,
+    ) {
+        self.build_topology(graph, chain);
+        self.rebuild_positions();
+    }
+
+    /// Compute topology (nodes, edges, terminals) and metrics from a state graph.
+    /// Results are cached on `self` for reuse by `rebuild_positions`.
+    fn build_topology(
         &mut self,
         graph: &StateGraph,
         chain: &mummymaze::markov::MarkovChain,
@@ -156,11 +168,29 @@ impl GraphView {
         self.node_metrics = vec![metric_win_prob, metric_expected, metric_depth, metric_safety];
         self.start_node_idx = Some(0); // start state is always index 0
 
-        // Compute positions based on layout mode
+        // Cache topology for rebuild_positions
+        self.state_to_idx = state_to_idx;
+        self.idx_to_state = idx_to_state;
+        self.node_kinds = node_kinds;
+        self.cached_depths = depths;
+        self.cached_win_terminals = win_terminal_for;
+        self.cached_dead_terminals = dead_terminal_for;
+        self.cached_edges = edges;
+    }
+
+    /// Compute positions for the current layout mode and upload to GPU.
+    /// Uses cached topology data from `build_topology`.
+    pub(super) fn rebuild_positions(&mut self) {
+        let n_nodes = self.idx_to_state.len();
+        let state_to_idx = &self.state_to_idx;
+        let depths = &self.cached_depths;
+        let win_terminal_for = &self.cached_win_terminals;
+        let dead_terminal_for = &self.cached_dead_terminals;
+
         let mut positions = match self.layout_mode {
             LayoutMode::ForceDirected => layout::random_positions(n_nodes, 42),
             LayoutMode::BfsLayers => {
-                let mut pos = layout::bfs_layer_positions(&state_to_idx, &depths, n_nodes);
+                let mut pos = layout::bfs_layer_positions(state_to_idx, depths, n_nodes);
                 let spacing_y = 3.0;
                 for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
                     let pi = state_to_idx[&parent];
@@ -175,7 +205,7 @@ impl GraphView {
                 pos
             }
             LayoutMode::BfsCylinder => {
-                let mut pos = layout::bfs_cylinder_positions(&state_to_idx, &depths, n_nodes);
+                let mut pos = layout::bfs_cylinder_positions(state_to_idx, depths, n_nodes);
                 let spacing_y = 3.0;
                 let min_radius = 2.0;
                 for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
@@ -205,7 +235,7 @@ impl GraphView {
                 pos
             }
             LayoutMode::RadialTree => {
-                let mut pos = layout::radial_tree_positions(&state_to_idx, &depths, n_nodes);
+                let mut pos = layout::radial_tree_positions(state_to_idx, depths, n_nodes);
                 let ring_spacing = 3.0;
                 for (&parent, &ti) in win_terminal_for.iter().chain(dead_terminal_for.iter()) {
                     let pi = state_to_idx[&parent];
@@ -229,7 +259,7 @@ impl GraphView {
 
         // For 2D layouts, jitter terminals with same parent slightly so they don't overlap
         if !self.layout_mode.is_3d() {
-            for (&parent, &wi) in &win_terminal_for {
+            for (&parent, &wi) in win_terminal_for {
                 if let Some(&di) = dead_terminal_for.get(&parent) {
                     positions[wi][0] -= 0.8;
                     positions[di][0] += 0.8;
@@ -247,7 +277,7 @@ impl GraphView {
             .collect();
 
         // Recreate GPU buffers sized to this graph
-        let n_edges_u32 = edges.len() as u32;
+        let n_edges_u32 = self.cached_edges.len() as u32;
         let new_buffers = GraphBuffers::new(
             &self.render_state.device,
             &self.pipelines,
@@ -256,8 +286,12 @@ impl GraphView {
         );
         let queue = &self.render_state.queue;
         queue.write_buffer(&new_buffers.node_buf, 0, bytemuck::cast_slice(&node_data));
-        if !edges.is_empty() {
-            queue.write_buffer(&new_buffers.edge_buf, 0, bytemuck::cast_slice(&edges));
+        if !self.cached_edges.is_empty() {
+            queue.write_buffer(
+                &new_buffers.edge_buf,
+                0,
+                bytemuck::cast_slice(&self.cached_edges),
+            );
         }
 
         // Upload sim params once
@@ -278,9 +312,6 @@ impl GraphView {
 
         self.buffers = Some(Arc::new(new_buffers));
         self.initial_positions = positions;
-        self.state_to_idx = state_to_idx;
-        self.idx_to_state = idx_to_state;
-        self.node_kinds = node_kinds;
         self.sim_running = self.layout_mode == LayoutMode::ForceDirected;
 
         // Upload initial node colors based on active metric

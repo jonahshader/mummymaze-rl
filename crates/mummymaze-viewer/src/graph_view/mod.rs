@@ -135,6 +135,16 @@ pub struct GraphView {
     /// Level associated with current graph
     pub(super) level: Option<SharedLevel>,
 
+    // --- Cached topology (invariant across layout modes) ---
+    /// BFS depth per state, for position computation.
+    pub(super) cached_depths: FxHashMap<State, u32>,
+    /// Per-source WIN terminal node indices.
+    pub(super) cached_win_terminals: FxHashMap<State, usize>,
+    /// Per-source DEAD terminal node indices.
+    pub(super) cached_dead_terminals: FxHashMap<State, usize>,
+    /// Edge list for GPU re-upload on layout change.
+    pub(super) cached_edges: Vec<types::EdgeGpu>,
+
     // --- Node coloring ---
     /// Per-node normalized metric values [0..1] for each ColorMetric.
     /// Indexed as `node_metrics[metric_index][node_index]`.
@@ -206,6 +216,10 @@ impl GraphView {
             idx_to_state: Vec::new(),
             node_kinds: Vec::new(),
             level: None,
+            cached_depths: FxHashMap::default(),
+            cached_win_terminals: FxHashMap::default(),
+            cached_dead_terminals: FxHashMap::default(),
+            cached_edges: Vec::new(),
             node_metrics: Vec::new(),
             color_metric: ColorMetric::WinProb,
             start_node_idx: None,
@@ -254,6 +268,15 @@ impl GraphView {
         self.follow_target = None;
         self.auto_follow = true;
         self.build_from_graph(graph, chain);
+    }
+
+    /// Rebuild positions and GPU buffers for the current layout mode.
+    /// Reuses cached topology/metrics — only recomputes spatial layout.
+    fn rebuild_layout(&mut self) {
+        if self.state_to_idx.is_empty() {
+            return;
+        }
+        self.rebuild_positions();
     }
 
     /// Update the tracked/current node on the graph. Does NOT change auto-follow state.
@@ -557,7 +580,7 @@ impl GraphView {
                     );
                 });
             if self.layout_mode != prev_mode {
-                self.loaded_level_idx = None;
+                self.rebuild_layout();
             }
 
             ui.separator();
@@ -568,7 +591,7 @@ impl GraphView {
                     self.sim_running = !self.sim_running;
                 }
                 if ui.button("Reset").clicked() {
-                    self.loaded_level_idx = None;
+                    self.rebuild_layout();
                 }
             }
 
