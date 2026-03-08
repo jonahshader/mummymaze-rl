@@ -121,51 +121,56 @@ fn crossover_region(a: &Level, b: &Level, rng: &mut impl Rng) -> Level {
         out.mummy1_col = pb.mummy1_col;
     }
 
-    // Optional entities: take from whichever parent has one in its half, prefer pa
+    // Optional entities: take from whichever parent has one in its half;
+    // if neither is in its half, fall back to whichever parent has one.
     // Mummy2
     let pa_m2 = pa.has_mummy2 && in_half(pa.mummy2_row, pa.mummy2_col, horizontal, split);
     let pb_m2 = pb.has_mummy2 && !in_half(pb.mummy2_row, pb.mummy2_col, horizontal, split);
-    if pa_m2 || pb_m2 {
+    if pa_m2 {
         out.has_mummy2 = true;
-        if pa_m2 {
-            out.mummy2_row = pa.mummy2_row;
-            out.mummy2_col = pa.mummy2_col;
-        } else {
-            out.mummy2_row = pb.mummy2_row;
-            out.mummy2_col = pb.mummy2_col;
-        }
+        out.mummy2_row = pa.mummy2_row;
+        out.mummy2_col = pa.mummy2_col;
+    } else if pb_m2 {
+        out.has_mummy2 = true;
+        out.mummy2_row = pb.mummy2_row;
+        out.mummy2_col = pb.mummy2_col;
+    } else if pa.has_mummy2 {
+        out.has_mummy2 = true;
+        out.mummy2_row = pa.mummy2_row;
+        out.mummy2_col = pa.mummy2_col;
+    } else if pb.has_mummy2 {
+        out.has_mummy2 = true;
+        out.mummy2_row = pb.mummy2_row;
+        out.mummy2_col = pb.mummy2_col;
     } else {
-        out.has_mummy2 = pa.has_mummy2 || pb.has_mummy2;
-        if pa.has_mummy2 {
-            out.mummy2_row = pa.mummy2_row;
-            out.mummy2_col = pa.mummy2_col;
-        } else if pb.has_mummy2 {
-            out.mummy2_row = pb.mummy2_row;
-            out.mummy2_col = pb.mummy2_col;
-        }
+        out.has_mummy2 = false;
+        out.mummy2_row = 99;
+        out.mummy2_col = 99;
     }
 
     // Scorpion
     let pa_sc = pa.has_scorpion && in_half(pa.scorpion_row, pa.scorpion_col, horizontal, split);
     let pb_sc = pb.has_scorpion && !in_half(pb.scorpion_row, pb.scorpion_col, horizontal, split);
-    if pa_sc || pb_sc {
+    if pa_sc {
         out.has_scorpion = true;
-        if pa_sc {
-            out.scorpion_row = pa.scorpion_row;
-            out.scorpion_col = pa.scorpion_col;
-        } else {
-            out.scorpion_row = pb.scorpion_row;
-            out.scorpion_col = pb.scorpion_col;
-        }
+        out.scorpion_row = pa.scorpion_row;
+        out.scorpion_col = pa.scorpion_col;
+    } else if pb_sc {
+        out.has_scorpion = true;
+        out.scorpion_row = pb.scorpion_row;
+        out.scorpion_col = pb.scorpion_col;
+    } else if pa.has_scorpion {
+        out.has_scorpion = true;
+        out.scorpion_row = pa.scorpion_row;
+        out.scorpion_col = pa.scorpion_col;
+    } else if pb.has_scorpion {
+        out.has_scorpion = true;
+        out.scorpion_row = pb.scorpion_row;
+        out.scorpion_col = pb.scorpion_col;
     } else {
-        out.has_scorpion = pa.has_scorpion || pb.has_scorpion;
-        if pa.has_scorpion {
-            out.scorpion_row = pa.scorpion_row;
-            out.scorpion_col = pa.scorpion_col;
-        } else if pb.has_scorpion {
-            out.scorpion_row = pb.scorpion_row;
-            out.scorpion_col = pb.scorpion_col;
-        }
+        out.has_scorpion = false;
+        out.scorpion_row = 99;
+        out.scorpion_col = 99;
     }
 
     // Traps: collect from both parents, keep those in their respective halves
@@ -184,13 +189,19 @@ fn crossover_region(a: &Level, b: &Level, rng: &mut impl Rng) -> Level {
     }
     traps.truncate(2);
     out.trap_count = traps.len() as i32;
-    if traps.len() >= 1 {
-        out.trap1_row = traps[0].0;
-        out.trap1_col = traps[0].1;
-    }
-    if traps.len() >= 2 {
-        out.trap2_row = traps[1].0;
-        out.trap2_col = traps[1].1;
+    match traps.len() {
+        0 => {
+            out.trap1_row = 99; out.trap1_col = 99;
+            out.trap2_row = 99; out.trap2_col = 99;
+        }
+        1 => {
+            out.trap1_row = traps[0].0; out.trap1_col = traps[0].1;
+            out.trap2_row = 99; out.trap2_col = 99;
+        }
+        _ => {
+            out.trap1_row = traps[0].0; out.trap1_col = traps[0].1;
+            out.trap2_row = traps[1].0; out.trap2_col = traps[1].1;
+        }
     }
 
     // Keep exit from pa (walls determine valid exits)
