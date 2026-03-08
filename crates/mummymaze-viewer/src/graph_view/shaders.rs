@@ -94,23 +94,31 @@ fn vs_node(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 @fragment
 fn fs_node(in: VsOut) -> @location(0) vec4<f32> {
     let dist = length(in.local_uv);
-    if dist > 1.0 {
+    let fw = fwidth(dist);
+
+    // Pixel-perfect anti-aliased circle edge
+    let aa = 1.0 - smoothstep(1.0 - fw, 1.0 + fw, dist);
+    if aa <= 0.0 {
         discard;
     }
-    // Anti-aliased edge
-    let aa = 1.0 - smoothstep(0.85, 1.0, dist);
     var col = in.color;
     col.a *= aa;
 
     // White outline ring for start/hovered nodes
     if in.outline > 0.5 {
-        let ring = smoothstep(0.6, 0.7, dist) * (1.0 - smoothstep(0.85, 1.0, dist));
+        let ring_inner = 0.7;
+        let ring_outer = 0.85;
+        let ring = smoothstep(ring_inner - fw, ring_inner + fw, dist)
+                 * (1.0 - smoothstep(ring_outer - fw, ring_outer + fw, dist));
         col = mix(col, vec4<f32>(1.0, 1.0, 1.0, col.a), ring * 0.8);
     }
 
     // Blue outline ring for current game state node
     if in.is_current > 0.5 {
-        let ring = smoothstep(0.55, 0.65, dist) * (1.0 - smoothstep(0.8, 0.9, dist));
+        let ring_inner = 0.6;
+        let ring_outer = 0.8;
+        let ring = smoothstep(ring_inner - fw, ring_inner + fw, dist)
+                 * (1.0 - smoothstep(ring_outer - fw, ring_outer + fw, dist));
         col = mix(col, vec4<f32>(0.3, 0.7, 1.0, 1.0), ring * 0.9);
     }
 
@@ -139,11 +147,10 @@ struct NodeInfoGpu {
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) alpha: f32,
-    @location(1) @interpolate(flat) highlight: u32,
-    @location(2) edge_uv: vec2<f32>,
-    @location(3) edge_len: f32,
-    @location(4) @interpolate(flat) is_bidi: u32,
+    @location(0) @interpolate(flat) highlight: u32,
+    @location(1) edge_uv: vec2<f32>,
+    @location(2) edge_len: f32,
+    @location(3) @interpolate(flat) is_bidi: u32,
 };
 
 @vertex
@@ -193,7 +200,6 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 
     var out: VsOut;
     out.pos = clip;
-    out.alpha = select(0.2, 0.6, any_highlight);
     out.highlight = hl;
     out.edge_uv = q;
     out.edge_len = len;
@@ -201,43 +207,75 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     return out;
 }
 
-// Test if (t, s) falls inside an arrowhead triangle pointing in the +t direction.
-// Returns true only for the arrowhead region (t >= arrow_start).
-fn arrowhead_hit(t: f32, s: f32, arrow_start: f32) -> bool {
-    if t < arrow_start { return false; }
-    let arrow_t = (t - arrow_start) / (1.0 - arrow_start);
-    return s < (1.0 - arrow_t);
+// SDF for a rectangle centered at origin with half-extents (hx, hy).
+// Returns negative inside, positive outside.
+fn sd_box(p: vec2<f32>, h: vec2<f32>) -> f32 {
+    let d = abs(p) - h;
+    return length(max(d, vec2(0.0))) + min(max(d.x, d.y), 0.0);
+}
+
+// SDF for an arrowhead triangle pointing in the +x direction.
+// The triangle spans x: [arrow_start, 1.0], y: [-1, 1] at base tapering to 0 at tip.
+// `t` is position along edge (0..1), `y` is signed lateral (-1..1).
+fn sd_arrowhead(t: f32, y: f32, arrow_start: f32) -> f32 {
+    let arrow_len = 1.0 - arrow_start;
+    if arrow_len < 0.001 { return 1e6; }
+    // Local coords: lx in [0, arrow_len], ly = y
+    let lx = t - arrow_start;
+    // The triangle boundary: |y| = 1.0 - lx/arrow_len, i.e. |y| + lx/arrow_len = 1
+    // Signed distance to the triangle (isosceles, tip at right)
+    // Edges: left (x=0), and two diagonal sides
+    let progress = lx / arrow_len;  // 0 at base, 1 at tip
+    let abs_y = abs(y);
+    // Distance to the diagonal edge: |y| + progress <= 1 is inside
+    // The diagonal normal (unnormalized): (1/arrow_len, 1) → normalized
+    let diag_n = normalize(vec2(1.0 / arrow_len, 1.0));
+    let diag_d = dot(vec2(lx, abs_y), diag_n) - dot(vec2(0.0, 1.0), diag_n);
+    // Distance to left edge (x = arrow_start)
+    let left_d = -lx;
+    return max(diag_d, left_d);
 }
 
 @fragment
 fn fs_edge(in: VsOut) -> @location(0) vec4<f32> {
     let t = in.edge_uv.x;  // 0 at src, 1 at dst
-    let s = abs(in.edge_uv.y);  // 0 at center, 1 at edge
+    let y = in.edge_uv.y;  // -1..1 across width
 
     // Fixed world-space arrowhead size
     let arrow_world_len = 0.5;
     let arrow_start = max(0.0, 1.0 - arrow_world_len / max(in.edge_len, 0.001));
     let line_half = 0.33;
 
-    // Line body: narrow center strip, clamped between arrowhead regions
+    // Line body SDF: rectangle from body_start..arrow_start, half-height = line_half
     let body_start = select(0.0, 1.0 - arrow_start, in.is_bidi != 0u);
-    let line_hit = s < line_half && t >= body_start && t <= arrow_start;
+    let body_center_t = (body_start + arrow_start) * 0.5;
+    let body_half_t = (arrow_start - body_start) * 0.5;
+    let body_d = sd_box(vec2(t - body_center_t, y), vec2(body_half_t, line_half));
 
-    // Forward arrowhead (at dst end)
-    let fwd_hit = arrowhead_hit(t, s, arrow_start);
-    // Reverse arrowhead (at src end) — only for bidi edges
-    let rev_hit = in.is_bidi != 0u && arrowhead_hit(1.0 - t, s, arrow_start);
+    // Forward arrowhead SDF (at dst end)
+    let fwd_d = sd_arrowhead(t, y, arrow_start);
 
-    if !line_hit && !fwd_hit && !rev_hit {
+    // Reverse arrowhead SDF (at src end) — mirror t
+    var rev_d = 1e6;
+    if in.is_bidi != 0u {
+        rev_d = sd_arrowhead(1.0 - t, y, arrow_start);
+    }
+
+    // Union: minimum distance
+    let d = min(min(body_d, fwd_d), rev_d);
+
+    // Anti-alias using screen-space derivatives
+    let fw = fwidth(d);
+    let alpha_shape = 1.0 - smoothstep(-fw, fw, d);
+    if alpha_shape <= 0.0 {
         discard;
     }
 
-    let base_color = vec4<f32>(0.5, 0.5, 0.5, in.alpha);
-    let hl_color = vec4<f32>(0.3, 0.7, 1.0, in.alpha);
-    if in.highlight != 0u {
-        return hl_color;
-    }
-    return base_color;
+    let base_color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
+    let hl_color = vec4<f32>(0.3, 0.7, 1.0, 1.0);
+    var col = select(base_color, hl_color, in.highlight != 0u);
+    col.a = alpha_shape;
+    return col;
 }
 "#,
     )
