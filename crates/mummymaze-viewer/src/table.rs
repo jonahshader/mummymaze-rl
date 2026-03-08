@@ -59,6 +59,12 @@ pub fn draw_filters(ui: &mut Ui, store: &mut DataStore) {
         {
             changed = true;
         }
+        if ui
+            .checkbox(&mut store.filter.show_rotation_duplicates, "Rotations")
+            .changed()
+        {
+            changed = true;
+        }
     });
 
     if changed {

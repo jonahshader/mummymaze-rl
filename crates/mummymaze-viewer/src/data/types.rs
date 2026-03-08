@@ -8,6 +8,7 @@ pub struct LevelRow {
     pub bfs_moves: Option<u32>,
     pub analysis: Option<LevelAnalysis>,
     pub is_duplicate: bool,
+    pub is_rotation_duplicate: bool,
     /// Pre-computed lowercase "{file_stem} {sublevel}" for filter matching.
     pub search_text: String,
 }
@@ -60,6 +61,7 @@ pub struct FilterState {
     pub grid_size: Option<i32>,
     pub solvable_only: bool,
     pub show_duplicates: bool,
+    pub show_rotation_duplicates: bool,
 }
 
 impl Default for FilterState {
@@ -69,6 +71,7 @@ impl Default for FilterState {
             grid_size: None,
             solvable_only: true,
             show_duplicates: false,
+            show_rotation_duplicates: false,
         }
     }
 }

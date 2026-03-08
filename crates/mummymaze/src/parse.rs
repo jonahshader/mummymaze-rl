@@ -414,6 +414,23 @@ pub fn parse_sublevel(data: &[u8], offset: usize, hdr: &Header) -> Result<Level>
     Ok(out)
 }
 
+/// Remap wall/exit bits according to a mapping table.
+/// Each entry `(from, to)` means: if bit `from` is set in `w`, set bit `to` in output.
+/// Bits not mentioned in any `from` are preserved as-is.
+fn remap_bits(w: u32, mapping: &[(u32, u32)]) -> u32 {
+    let mut mentioned = 0u32;
+    for &(from, _) in mapping {
+        mentioned |= from;
+    }
+    let mut out = w & !mentioned; // preserve unmapped bits
+    for &(from, to) in mapping {
+        if w & from != 0 {
+            out |= to;
+        }
+    }
+    out
+}
+
 impl Level {
     /// Construct a `Level` from edge-array walls and entity positions.
     ///
@@ -547,6 +564,124 @@ impl Level {
             exit_mask,
         }
     }
+
+    /// Apply a dihedral symmetry transform.
+    ///
+    /// `sym` is 0..8 for the 8 elements of the dihedral group D4:
+    ///   0=identity, 1=rot90cw, 2=rot180, 3=rot270cw,
+    ///   4=h_mirror, 5=v_mirror, 6=transpose, 7=anti_transpose
+    ///
+    /// Transforms that swap horizontal/vertical axes (1,3,6,7) toggle `flip`.
+    /// Gate levels should only use transforms that preserve the gate's E/W
+    /// orientation (0=identity, 4=h_mirror).
+    pub fn apply_dihedral(&self, sym: u8) -> Level {
+        let n = self.grid_size;
+
+        // Each transform: (r,c) → (r',c'), wall bits remapped
+        //   rot90cw:  N→E, E→S, S→W, W→N  coord: (r,c)→(c, n-1-r)
+        //   rot180:   N→S, S→N, E→W, W→E  coord: (r,c)→(n-1-r, n-1-c)
+        //   rot270cw: N→W, W→S, S→E, E→N  coord: (r,c)→(n-1-c, r)
+        //   h_mirror: N↔S                  coord: (r,c)→(n-1-r, c)
+        //   v_mirror: W↔E                  coord: (r,c)→(r, n-1-c)
+        //   transpose: N↔W, S↔E            coord: (r,c)→(c, r)
+        //   anti_transpose: N↔E, S↔W       coord: (r,c)→(n-1-c, n-1-r)
+
+        let coord = |r: i32, c: i32| -> (i32, i32) {
+            match sym {
+                0 => (r, c),
+                1 => (c, n - 1 - r),
+                2 => (n - 1 - r, n - 1 - c),
+                3 => (n - 1 - c, r),
+                4 => (n - 1 - r, c),
+                5 => (r, n - 1 - c),
+                6 => (c, r),
+                7 => (n - 1 - c, n - 1 - r),
+                _ => unreachable!(),
+            }
+        };
+
+        let remap_walls = |w: u32| -> u32 {
+            match sym {
+                0 => w,
+                1 => remap_bits(w, &[
+                    (WALL_N, WALL_E), (WALL_E, WALL_S), (WALL_S, WALL_W), (WALL_W, WALL_N),
+                    (EXIT_N, EXIT_E), (EXIT_E, EXIT_S), (EXIT_S, EXIT_W), (EXIT_W, EXIT_N),
+                ]),
+                2 => remap_bits(w, &[
+                    (WALL_N, WALL_S), (WALL_S, WALL_N), (WALL_E, WALL_W), (WALL_W, WALL_E),
+                    (EXIT_N, EXIT_S), (EXIT_S, EXIT_N), (EXIT_E, EXIT_W), (EXIT_W, EXIT_E),
+                ]),
+                3 => remap_bits(w, &[
+                    (WALL_N, WALL_W), (WALL_W, WALL_S), (WALL_S, WALL_E), (WALL_E, WALL_N),
+                    (EXIT_N, EXIT_W), (EXIT_W, EXIT_S), (EXIT_S, EXIT_E), (EXIT_E, EXIT_N),
+                ]),
+                4 => remap_bits(w, &[
+                    (WALL_N, WALL_S), (WALL_S, WALL_N),
+                    (EXIT_N, EXIT_S), (EXIT_S, EXIT_N),
+                ]),
+                5 => remap_bits(w, &[
+                    (WALL_W, WALL_E), (WALL_E, WALL_W),
+                    (EXIT_W, EXIT_E), (EXIT_E, EXIT_W),
+                ]),
+                6 => remap_bits(w, &[
+                    (WALL_N, WALL_W), (WALL_W, WALL_N), (WALL_S, WALL_E), (WALL_E, WALL_S),
+                    (EXIT_N, EXIT_W), (EXIT_W, EXIT_N), (EXIT_S, EXIT_E), (EXIT_E, EXIT_S),
+                ]),
+                7 => remap_bits(w, &[
+                    (WALL_N, WALL_E), (WALL_E, WALL_N), (WALL_S, WALL_W), (WALL_W, WALL_S),
+                    (EXIT_N, EXIT_E), (EXIT_E, EXIT_N), (EXIT_S, EXIT_W), (EXIT_W, EXIT_S),
+                ]),
+                _ => unreachable!(),
+            }
+        };
+
+        let flip_toggle = matches!(sym, 1 | 3 | 6 | 7);
+
+        let mut walls = [0u32; MAX_GRID * MAX_GRID];
+        for r in 0..n {
+            for c in 0..n {
+                let (nr, nc) = coord(r, c);
+                walls[(nc + nr * 10) as usize] = remap_walls(self.walls[(c + r * 10) as usize]);
+            }
+        }
+
+        let remap_exit = |m: u32| -> u32 { remap_walls(m) };
+
+        let xf = |r: i32, c: i32, exists: bool| -> (i32, i32) {
+            if !exists || r >= 90 { return (r, c); }
+            coord(r, c)
+        };
+
+        let (pr, pc) = xf(self.player_row, self.player_col, true);
+        let (m1r, m1c) = xf(self.mummy1_row, self.mummy1_col, true);
+        let (m2r, m2c) = xf(self.mummy2_row, self.mummy2_col, self.has_mummy2);
+        let (sr, sc) = xf(self.scorpion_row, self.scorpion_col, self.has_scorpion);
+        let (t1r, t1c) = xf(self.trap1_row, self.trap1_col, self.trap_count >= 1);
+        let (t2r, t2c) = xf(self.trap2_row, self.trap2_col, self.trap_count >= 2);
+        let (gr, gc) = xf(self.gate_row, self.gate_col, self.has_gate);
+        let (kr, kc) = xf(self.key_row, self.key_col, self.has_gate);
+        let (er, ec) = coord(self.exit_row, self.exit_col);
+
+        Level {
+            grid_size: n,
+            flip: self.flip ^ flip_toggle,
+            walls,
+            player_row: pr, player_col: pc,
+            mummy1_row: m1r, mummy1_col: m1c,
+            mummy2_row: m2r, mummy2_col: m2c,
+            has_mummy2: self.has_mummy2,
+            scorpion_row: sr, scorpion_col: sc,
+            has_scorpion: self.has_scorpion,
+            trap1_row: t1r, trap1_col: t1c,
+            trap2_row: t2r, trap2_col: t2c,
+            trap_count: self.trap_count,
+            gate_row: gr, gate_col: gc,
+            has_gate: self.has_gate,
+            key_row: kr, key_col: kc,
+            exit_row: er, exit_col: ec,
+            exit_mask: remap_exit(self.exit_mask),
+        }
+    }
 }
 
 /// Parse an entire .dat file, returning header and all sublevels.
@@ -567,4 +702,55 @@ pub fn parse_file(path: &Path) -> Result<(Header, Vec<Level>)> {
     }
 
     Ok((hdr, levels))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dihedral_rot90_matches_known_pair() {
+        let mazes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap().join("mazes");
+
+        let (_, levels_a) = parse_file(&mazes.join("B-53.dat")).unwrap();
+        let (_, levels_b) = parse_file(&mazes.join("B-55.dat")).unwrap();
+        let a = &levels_a[85];
+        let b = &levels_b[85];
+
+        // B-55 sub 85 should be a 90° CW rotation (sym=1) of B-53 sub 85
+        let rotated = a.apply_dihedral(1);
+        assert_eq!(rotated.walls, b.walls);
+        assert_eq!(rotated.flip, b.flip);
+        assert_eq!((rotated.player_row, rotated.player_col), (b.player_row, b.player_col));
+        assert_eq!((rotated.mummy1_row, rotated.mummy1_col), (b.mummy1_row, b.mummy1_col));
+        assert_eq!((rotated.exit_row, rotated.exit_col, rotated.exit_mask),
+                   (b.exit_row, b.exit_col, b.exit_mask));
+    }
+
+    #[test]
+    fn dihedral_double_application_is_identity() {
+        let mazes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap().join("mazes");
+        let (_, levels) = parse_file(&mazes.join("B-53.dat")).unwrap();
+        let lev = &levels[85];
+
+        // rot90 applied 4 times = identity
+        let mut l = lev.clone();
+        for _ in 0..4 { l = l.apply_dihedral(1); }
+        assert_eq!(l.walls, lev.walls);
+        assert_eq!(l.flip, lev.flip);
+        assert_eq!((l.player_row, l.player_col), (lev.player_row, lev.player_col));
+
+        // h_mirror applied twice = identity
+        let hh = lev.apply_dihedral(4).apply_dihedral(4);
+        assert_eq!(hh.walls, lev.walls);
+        assert_eq!((hh.player_row, hh.player_col), (lev.player_row, lev.player_col));
+
+        // transpose applied twice = identity
+        let tt = lev.apply_dihedral(6).apply_dihedral(6);
+        assert_eq!(tt.walls, lev.walls);
+        assert_eq!((tt.player_row, tt.player_col), (lev.player_row, lev.player_col));
+    }
+
 }

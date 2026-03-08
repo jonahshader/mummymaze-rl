@@ -46,6 +46,17 @@ fn level_fingerprint(lev: &Level) -> u64 {
     h.finish()
 }
 
+/// Canonical fingerprint under dihedral symmetry (rotations + reflections).
+/// Gate-free levels: all 8 D4 symmetries. Gate levels: identity + h_mirror only
+/// (the gate is a vertical barrier on the east edge; only h_mirror preserves that).
+fn canonical_fingerprint(lev: &Level) -> u64 {
+    let syms: &[u8] = if lev.has_gate { &[0, 4] } else { &[0, 1, 2, 3, 4, 5, 6, 7] };
+    syms.iter()
+        .map(|&s| level_fingerprint(&lev.apply_dihedral(s)))
+        .min()
+        .unwrap()
+}
+
 pub struct DataStore {
     pub rows: Vec<LevelRow>,
     pub sorted_indices: Vec<usize>,
@@ -75,12 +86,20 @@ impl DataStore {
         let total = all_levels.len();
 
         let mut seen = HashSet::new();
+        let mut seen_canonical = HashSet::new();
         let rows: Vec<LevelRow> = all_levels
             .into_iter()
             .map(|(stem, sub, lev)| {
                 let bfs = solver::solve(&lev).moves;
                 let fp = level_fingerprint(&lev);
                 let is_duplicate = !seen.insert(fp);
+                // Canonical fingerprint: min over all dihedral symmetries.
+                // A rotation duplicate is a non-exact duplicate whose canonical
+                // form was already seen.
+                let cfp = canonical_fingerprint(&lev);
+                let is_rotation_duplicate = !is_duplicate && !seen_canonical.insert(cfp);
+                // Also insert for exact duplicates so later rotations are caught
+                if is_duplicate { seen_canonical.insert(cfp); }
                 let search_text = format!("{stem} {sub}").to_lowercase();
                 LevelRow {
                     file_stem: stem,
@@ -89,6 +108,7 @@ impl DataStore {
                     bfs_moves: bfs,
                     analysis: None,
                     is_duplicate,
+                    is_rotation_duplicate,
                     search_text,
                 }
             })
@@ -245,6 +265,9 @@ impl DataStore {
                     return false;
                 }
                 if !filter.show_duplicates && row.is_duplicate {
+                    return false;
+                }
+                if !filter.show_rotation_duplicates && row.is_rotation_duplicate {
                     return false;
                 }
                 true
