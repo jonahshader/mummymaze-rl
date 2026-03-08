@@ -78,28 +78,62 @@ impl GraphView {
 
         let n_nodes = idx;
 
-        // Build edges + edge lookup
+        // Build edges + edge lookup.
+        // Deduplicated: one visual edge per unique undirected pair.
+        // Bidirectional edges (A→B and B→A both exist) are merged into one with EDGE_FLAG_BIDI.
+        // For bidi edges, src < dst by convention.
         let mut edges: Vec<EdgeGpu> = Vec::new();
         let mut edge_lookup: FxHashMap<(u32, u32), Vec<usize>> = FxHashMap::default();
 
+        // First pass: collect all unique directed edges
+        let mut directed_edges: rustc_hash::FxHashSet<(u32, u32)> = Default::default();
         for (state, transitions) in &graph.transitions {
-            let src = state_to_idx[state];
+            let src = state_to_idx[state] as u32;
             for &(_, dest) in transitions {
                 let dst = match dest {
-                    StateKey::Transient(ns) => state_to_idx[&ns],
-                    StateKey::Win => win_terminal_for[state],
-                    StateKey::Dead => dead_terminal_for[state],
+                    StateKey::Transient(ns) => state_to_idx[&ns] as u32,
+                    StateKey::Win => win_terminal_for[state] as u32,
+                    StateKey::Dead => dead_terminal_for[state] as u32,
                 };
-                let edge_idx = edges.len();
+                directed_edges.insert((src, dst));
+            }
+        }
+
+        // Second pass: merge bidirectional pairs, canonical key has src < dst
+        for &(src, dst) in &directed_edges {
+            let canon = (src.min(dst), src.max(dst));
+            if edge_lookup.contains_key(&canon) {
+                continue;
+            }
+            let reverse_exists = directed_edges.contains(&(dst, src));
+            let (edge_src, edge_dst) = if reverse_exists {
+                canon // bidi: use canonical order
+            } else {
+                (src, dst) // uni: keep original direction
+            };
+            let flags = if reverse_exists {
+                super::types::EDGE_FLAG_BIDI
+            } else {
+                0
+            };
+            let edge_idx = edges.len();
+            // Map both directions to the same edge index for highlight lookup
+            edge_lookup
+                .entry((edge_src, edge_dst))
+                .or_default()
+                .push(edge_idx);
+            if reverse_exists {
                 edge_lookup
-                    .entry((src as u32, dst as u32))
+                    .entry((edge_dst, edge_src))
                     .or_default()
                     .push(edge_idx);
-                edges.push(EdgeGpu {
-                    src: src as u32,
-                    dst: dst as u32,
-                });
             }
+            edges.push(EdgeGpu {
+                src: edge_src,
+                dst: edge_dst,
+                flags,
+                _pad: 0,
+            });
         }
 
         self.edge_lookup = edge_lookup;

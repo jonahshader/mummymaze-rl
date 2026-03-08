@@ -21,12 +21,18 @@ pub struct NodeInfo {
 }
 
 /// Edge defined by source and destination node indices.
+/// For bidirectional edges, src < dst by convention and EDGE_FLAG_BIDI is set.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct EdgeGpu {
     pub src: u32,
     pub dst: u32,
+    pub flags: u32,
+    pub _pad: u32,
 }
+
+// Edge flag bits (must match WGSL constants)
+pub const EDGE_FLAG_BIDI: u32 = 1;
 
 /// Camera transform for 3D rendering: view-projection matrix + billboard vectors.
 /// `camera_right.w` carries the current node index (as f32-reinterpreted u32).

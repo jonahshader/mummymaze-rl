@@ -92,7 +92,7 @@ impl GraphPipelines {
                 entries: &[storage_ro_entry(0), storage_ro_entry(1)],
             });
 
-        // Edge render: nodes(0), edges(1), highlights(2) — all storage read-only
+        // Edge render: nodes(0), edges(1), highlights(2), node_info(3) — all storage read-only
         let edge_render_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("edge_render_bgl"),
@@ -100,6 +100,7 @@ impl GraphPipelines {
                     storage_ro_entry(0),
                     storage_ro_entry(1),
                     storage_ro_entry(2),
+                    storage_ro_entry(3),
                 ],
             });
 
@@ -426,6 +427,10 @@ impl GraphBuffers {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: edge_highlight_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: node_info_buf.as_entire_binding(),
                 },
             ],
         });

@@ -16,6 +16,8 @@ struct NodeGpu {
 struct EdgeGpu {
     src: u32,
     dst: u32,
+    flags: u32,
+    _pad: u32,
 };
 
 // Node flag bits (must match types.rs constants)
@@ -23,6 +25,9 @@ const FLAG_START: u32 = 1u;
 const FLAG_WIN: u32 = 2u;
 const FLAG_DEAD: u32 = 4u;
 const FLAG_HOVERED: u32 = 8u;
+
+// Edge flag bits (must match types.rs constants)
+const EDGE_FLAG_BIDI: u32 = 1u;
 ";
 
 /// Build a complete shader source by prepending common structs.
@@ -118,27 +123,47 @@ fn fs_node(in: VsOut) -> @location(0) vec4<f32> {
 pub fn edge_shader() -> String {
     shader(
         r#"
+struct NodeInfoGpu {
+    color: vec4<f32>,
+    flags: u32,
+    bfs_depth: u32,
+    radius: f32,
+    _pad: f32,
+};
+
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<storage, read> nodes: array<NodeGpu>;
 @group(1) @binding(1) var<storage, read> edges: array<EdgeGpu>;
 @group(1) @binding(2) var<storage, read> highlights: array<u32>;
+@group(1) @binding(3) var<storage, read> node_info: array<NodeInfoGpu>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) alpha: f32,
-    @location(1) highlight: f32,
+    @location(1) @interpolate(flat) highlight: u32,
+    @location(2) edge_uv: vec2<f32>,
+    @location(3) edge_len: f32,
+    @location(4) @interpolate(flat) is_bidi: u32,
 };
 
 @vertex
 fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VsOut {
     let edge = edges[iid];
-    let p0 = nodes[edge.src].pos.xyz;
-    let p1 = nodes[edge.dst].pos.xyz;
-    let is_highlighted = highlights[iid];
+    let raw_p0 = nodes[edge.src].pos.xyz;
+    let raw_p1 = nodes[edge.dst].pos.xyz;
+    let hl = highlights[iid];
 
+    let raw_dir = raw_p1 - raw_p0;
+    let raw_len = length(raw_dir);
+    let fwd = select(vec3<f32>(1.0, 0.0, 0.0), raw_dir / raw_len, raw_len > 0.001);
+
+    // Inset endpoints by node radii so edges don't overlap node billboards
+    let r0 = node_info[edge.src].radius;
+    let r1 = node_info[edge.dst].radius;
+    let p0 = raw_p0 + fwd * r0;
+    let p1 = raw_p1 - fwd * r1;
     let dir = p1 - p0;
-    let len = length(dir);
-    let fwd = select(vec3<f32>(1.0, 0.0, 0.0), dir / len, len > 0.001);
+    let len = max(length(dir), 0.0);
 
     // Camera forward = cross(right, up)
     let cam_fwd = cross(camera.camera_right.xyz, camera.camera_up.xyz);
@@ -146,37 +171,73 @@ fn vs_edge(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     // Perpendicular in camera-facing plane
     var perp = cross(fwd, cam_fwd);
     let perp_len = length(perp);
-    // Fallback to camera_up when edge points at camera (degenerate cross product)
     if perp_len < 0.001 {
         perp = camera.camera_up.xyz;
     } else {
         perp = perp / perp_len;
     }
 
-    // Highlighted edges are thicker
-    let thickness = select(0.1, 0.2, is_highlighted != 0u);
+    let is_bidi = (edge.flags & EDGE_FLAG_BIDI) != 0u;
+    let any_highlight = hl != 0u;
+    let line_thick = select(0.1, 0.2, any_highlight);
+    let half_width = line_thick * 3.0;
+
     var quad = array<vec2<f32>, 6>(
         vec2(0.0, -1.0), vec2(1.0, -1.0), vec2(0.0, 1.0),
         vec2(0.0, 1.0),  vec2(1.0, -1.0), vec2(1.0, 1.0),
     );
     let q = quad[vid];
-    let world = p0 + fwd * q.x * len + perp * q.y * thickness;
+    let world = p0 + fwd * q.x * len + perp * q.y * half_width;
 
     let clip = camera.view_proj * vec4<f32>(world, 1.0);
 
     var out: VsOut;
     out.pos = clip;
-    out.alpha = select(0.2, 0.6, is_highlighted != 0u);
-    out.highlight = f32(is_highlighted);
+    out.alpha = select(0.2, 0.6, any_highlight);
+    out.highlight = hl;
+    out.edge_uv = q;
+    out.edge_len = len;
+    out.is_bidi = select(0u, 1u, is_bidi);
     return out;
+}
+
+// Test if (t, s) falls inside an arrowhead triangle pointing in the +t direction.
+// Returns true only for the arrowhead region (t >= arrow_start).
+fn arrowhead_hit(t: f32, s: f32, arrow_start: f32) -> bool {
+    if t < arrow_start { return false; }
+    let arrow_t = (t - arrow_start) / (1.0 - arrow_start);
+    return s < (1.0 - arrow_t);
 }
 
 @fragment
 fn fs_edge(in: VsOut) -> @location(0) vec4<f32> {
-    if in.highlight > 0.5 {
-        return vec4<f32>(0.3, 0.7, 1.0, in.alpha);
+    let t = in.edge_uv.x;  // 0 at src, 1 at dst
+    let s = abs(in.edge_uv.y);  // 0 at center, 1 at edge
+
+    // Fixed world-space arrowhead size
+    let arrow_world_len = 0.5;
+    let arrow_start = max(0.0, 1.0 - arrow_world_len / max(in.edge_len, 0.001));
+    let line_half = 0.33;
+
+    // Line body: narrow center strip, clamped between arrowhead regions
+    let body_start = select(0.0, 1.0 - arrow_start, in.is_bidi != 0u);
+    let line_hit = s < line_half && t >= body_start && t <= arrow_start;
+
+    // Forward arrowhead (at dst end)
+    let fwd_hit = arrowhead_hit(t, s, arrow_start);
+    // Reverse arrowhead (at src end) — only for bidi edges
+    let rev_hit = in.is_bidi != 0u && arrowhead_hit(1.0 - t, s, arrow_start);
+
+    if !line_hit && !fwd_hit && !rev_hit {
+        discard;
     }
-    return vec4<f32>(0.5, 0.5, 0.5, in.alpha);
+
+    let base_color = vec4<f32>(0.5, 0.5, 0.5, in.alpha);
+    let hl_color = vec4<f32>(0.3, 0.7, 1.0, in.alpha);
+    if in.highlight != 0u {
+        return hl_color;
+    }
+    return base_color;
 }
 "#,
     )

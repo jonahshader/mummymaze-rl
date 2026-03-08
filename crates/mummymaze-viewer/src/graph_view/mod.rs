@@ -326,7 +326,12 @@ impl GraphView {
                 if let Some(edge_indices) = self.edge_lookup.get(&key) {
                     for &ei in edge_indices {
                         if ei < highlight_data.len() {
-                            highlight_data[ei] = 1;
+                            let edge = &self.cached_edges[ei];
+                            if key.0 == edge.src && key.1 == edge.dst {
+                                highlight_data[ei] |= 1; // forward highlight
+                            } else {
+                                highlight_data[ei] |= 2; // reverse highlight
+                            }
                         }
                     }
                 }
