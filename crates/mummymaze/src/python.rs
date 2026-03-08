@@ -380,6 +380,65 @@ fn best_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec
 }
 
 // ---------------------------------------------------------------------------
+// Fitness expression evaluation
+// ---------------------------------------------------------------------------
+
+/// Evaluate a fitness expression against a dict of metric values.
+///
+/// Available variables: win_prob, bfs_moves, n_states, dead_end_ratio,
+/// avg_branching, n_optimal, greedy_deviation, path_safety.
+///
+/// >>> eval_fitness("-win_prob + bfs_moves / 1000", {"win_prob": 0.5, "bfs_moves": 20})
+/// -0.48
+#[pyfunction]
+#[pyo3(signature = (expr, metrics))]
+fn eval_fitness(expr: &str, metrics: &Bound<'_, PyDict>) -> PyResult<f64> {
+    use crate::ga::fitness::{FitnessExpr, FitnessVars};
+
+    let get = |key: &str| -> f64 {
+        metrics
+            .get_item(key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.extract::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+
+    let vars = FitnessVars {
+        win_prob: get("win_prob"),
+        bfs_moves: get("bfs_moves"),
+        n_states: get("n_states"),
+        dead_end_ratio: get("dead_end_ratio"),
+        avg_branching: get("avg_branching"),
+        n_optimal: get("n_optimal"),
+        greedy_deviation: get("greedy_deviation"),
+        path_safety: get("path_safety"),
+    };
+
+    let fitness = FitnessExpr::parse(expr)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+    Ok(fitness.eval(&vars))
+}
+
+/// Return the list of available fitness variable names and descriptions.
+///
+/// >>> fitness_variables()
+/// [("win_prob", "Win probability under uniform-random policy (0–1)"), ...]
+#[pyfunction]
+fn fitness_variables() -> Vec<(&'static str, &'static str)> {
+    crate::ga::fitness::VARIABLES.to_vec()
+}
+
+/// Return the list of built-in fitness presets.
+///
+/// >>> fitness_presets()
+/// [("Default", "-win_prob + bfs_moves / 1000"), ...]
+#[pyfunction]
+fn fitness_presets() -> Vec<(&'static str, &'static str)> {
+    crate::ga::fitness::PRESETS.to_vec()
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -396,5 +455,8 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(analyze_all, m)?)?;
     m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
     m.add_function(wrap_pyfunction!(best_actions_all, m)?)?;
+    m.add_function(wrap_pyfunction!(eval_fitness, m)?)?;
+    m.add_function(wrap_pyfunction!(fitness_variables, m)?)?;
+    m.add_function(wrap_pyfunction!(fitness_presets, m)?)?;
     Ok(())
 }

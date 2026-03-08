@@ -4,12 +4,14 @@
 //! solution) but difficult (low win probability under uniform-random policy).
 
 pub mod crossover;
+pub mod fitness;
 pub mod mutation;
 
 use crate::graph::build_graph;
 use crate::markov::MarkovChain;
 use crate::parse::Level;
 use crate::solver;
+use fitness::FitnessExpr;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -78,6 +80,8 @@ pub struct GaConfig {
     pub w_move_exit: f64,
     /// Probability of an extra wall mutation after the primary mutation.
     pub extra_wall_prob: f64,
+    /// Fitness expression (math formula over metric variables).
+    pub fitness_expr: String,
 }
 
 impl Default for GaConfig {
@@ -97,6 +101,7 @@ impl Default for GaConfig {
             w_remove_entity: 1.0,
             w_move_exit: 1.0,
             extra_wall_prob: 0.3,
+            fitness_expr: fitness::PRESET_DEFAULT.to_string(),
         }
     }
 }
@@ -121,10 +126,10 @@ pub enum GaMessage {
     Error(String),
 }
 
-/// Evaluate a level: solve + Markov analysis. Returns None if unsolvable.
-pub fn evaluate(level: &Level) -> Option<Individual> {
-    let result = solver::solve(level);
-    let moves = result.moves?;
+/// Evaluate a level: solve + Markov analysis + fitness expression. Returns None if unsolvable.
+pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual> {
+    let solve = solver::solve(level);
+    let moves = solve.moves?;
 
     let graph = build_graph(level);
     let chain = MarkovChain::from_graph(&graph);
@@ -135,8 +140,8 @@ pub fn evaluate(level: &Level) -> Option<Individual> {
         .unwrap_or(0.0);
     let n_states = graph.n_transient;
 
-    // Fitness: prioritize low win probability (harder), break ties with longer BFS
-    let fitness = -win_prob + moves as f64 / 1000.0;
+    let vars = fitness_expr.compute_vars(&graph, level, &solve, win_prob);
+    let fitness = fitness_expr.eval(&vars);
 
     Some(Individual {
         level: level.clone(),
@@ -167,12 +172,20 @@ pub fn run_ga(
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
 ) {
+    let fitness_expr = match FitnessExpr::parse(&config.fitness_expr) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tx.send(GaMessage::Error(format!("Bad fitness expression: {e}")));
+            return;
+        }
+    };
+
     let mut rng = StdRng::seed_from_u64(config.seed);
 
     // Evaluate seed levels
     let mut population: Vec<Individual> = seed_levels
         .iter()
-        .filter_map(|lev| evaluate(lev))
+        .filter_map(|lev| evaluate(lev, &fitness_expr))
         .collect();
 
     let n_solvable = population.len();
@@ -243,7 +256,7 @@ pub fn run_ga(
         let n_evaluated = non_elite.len();
         let evaluated: Vec<Individual> = non_elite
             .par_iter()
-            .filter_map(|level| evaluate(level))
+            .filter_map(|level| evaluate(level, &fitness_expr))
             .collect();
         let n_solvable_gen = evaluated.len();
 

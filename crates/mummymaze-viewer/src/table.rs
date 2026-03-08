@@ -214,7 +214,14 @@ pub fn draw_table(ui: &mut Ui, store: &mut DataStore) -> Option<usize> {
                     });
                     row.col(|ui: &mut Ui| {
                         ui.label(match a.map(|a| a.win_prob) {
-                            Some(p) => format!("{:.1}%", p * 100.0),
+                            Some(p) => {
+                                let pct = p * 100.0;
+                                if p != 0.0 && pct.abs() < 0.01 {
+                                    format!("{:.2e}%", pct)
+                                } else {
+                                    format!("{:.1}%", pct)
+                                }
+                            }
                             None => "...".to_string(),
                         });
                     });

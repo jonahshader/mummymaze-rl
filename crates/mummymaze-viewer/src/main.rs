@@ -149,7 +149,12 @@ impl App {
                 }
                 ui.label(format!("States: {}", analysis.n_states));
                 ui.separator();
-                ui.label(format!("Win%: {:.4}", analysis.win_prob));
+                let wp = if analysis.win_prob != 0.0 && analysis.win_prob.abs() < 0.0001 {
+                    format!("{:.2e}", analysis.win_prob)
+                } else {
+                    format!("{:.4}", analysis.win_prob)
+                };
+                ui.label(format!("Win%: {wp}"));
                 ui.separator();
                 ui.label(format!("E[steps]: {:.1}", analysis.expected_steps));
                 if let Some(safety) = analysis.difficulty.path_safety {

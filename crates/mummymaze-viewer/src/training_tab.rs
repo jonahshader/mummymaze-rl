@@ -199,7 +199,13 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
                     ui.separator();
                     ui.label(format!("BFS Moves: {}", row.bfs_moves.map(|m| m.to_string()).unwrap_or("-".into())));
                     ui.separator();
-                    ui.label(format!("Win% (random): {:.1}%", a.win_prob * 100.0));
+                    let wp_pct = a.win_prob * 100.0;
+                    let wp = if a.win_prob != 0.0 && wp_pct.abs() < 0.01 {
+                        format!("{:.2e}%", wp_pct)
+                    } else {
+                        format!("{:.1}%", wp_pct)
+                    };
+                    ui.label(format!("Win% (random): {wp}"));
                     ui.separator();
                     ui.label(format!("Dead-end%: {:.1}%", a.difficulty.dead_end_ratio * 100.0));
                 }

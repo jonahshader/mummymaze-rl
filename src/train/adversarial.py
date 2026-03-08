@@ -276,7 +276,7 @@ def crossover(a: Individual, b: Individual) -> Individual:
 # ---------------------------------------------------------------------------
 
 
-def evaluate(pop: list[Individual]) -> list[Individual]:
+def evaluate(pop: list[Individual], fitness_expr: str) -> list[Individual]:
   """Evaluate fitness for all individuals. Filters out unsolvable levels."""
   evaluated: list[Individual] = []
 
@@ -291,9 +291,7 @@ def evaluate(pop: list[Individual]) -> list[Individual]:
     ind.n_states = analysis["n_states"]
     ind.win_prob = analysis["win_prob"]
 
-    # Fitness: prioritize low uniform-random win probability (harder),
-    # break ties with longer BFS solutions
-    ind.fitness = -ind.win_prob + moves / 1000.0
+    ind.fitness = mummymaze_rust.eval_fitness(fitness_expr, analysis)
     evaluated.append(ind)
 
   return evaluated
@@ -342,6 +340,7 @@ def run_ga(
   elite_frac: float = 0.1,
   crossover_rate: float = 0.2,
   seed: int | None = None,
+  fitness_expr: str = "-win_prob + bfs_moves / 1000",
 ) -> Individual:
   if seed is not None:
     random.seed(seed)
@@ -350,8 +349,12 @@ def run_ga(
   all_seeds = load_seed_population(maze_dir, grid_size)
   print(f"  {len(all_seeds)} levels loaded")
 
+  # Validate the fitness expression early
+  mummymaze_rust.eval_fitness(fitness_expr, {"win_prob": 1.0, "bfs_moves": 1.0})
+  print(f"Fitness: {fitness_expr}")
+
   print("Evaluating seed population...")
-  evaluated_seeds = evaluate(all_seeds)
+  evaluated_seeds = evaluate(all_seeds, fitness_expr)
   print(f"  {len(evaluated_seeds)} solvable")
 
   if not evaluated_seeds:
@@ -383,7 +386,7 @@ def run_ga(
       offspring.append(child)
 
     to_eval = [ind for ind in offspring[n_elite:] if ind.fitness is None]
-    evaluated_new = evaluate(to_eval)
+    evaluated_new = evaluate(to_eval, fitness_expr)
 
     population = offspring[:n_elite] + evaluated_new
 
@@ -429,6 +432,13 @@ def main() -> None:
   parser.add_argument("--pop-size", type=int, default=64)
   parser.add_argument("--generations", type=int, default=50)
   parser.add_argument("--seed", type=int, default=None)
+  parser.add_argument(
+    "--fitness",
+    type=str,
+    default="-win_prob + bfs_moves / 1000",
+    help="Fitness expression over: win_prob, bfs_moves, n_states, "
+    "dead_end_ratio, avg_branching, n_optimal, greedy_deviation, path_safety",
+  )
   args = parser.parse_args()
 
   run_ga(
@@ -437,6 +447,7 @@ def main() -> None:
     pop_size=args.pop_size,
     generations=args.generations,
     seed=args.seed,
+    fitness_expr=args.fitness,
   )
 
 
