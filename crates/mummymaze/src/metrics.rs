@@ -28,14 +28,8 @@ pub fn compute(graph: &StateGraph, lev: &Level, solve: &SolveResult) -> Difficul
     let winning = winning_set(graph);
     let dead_end_ratio = compute_dead_end_ratio(graph, &winning);
     let avg_branching_factor = compute_avg_branching_factor(graph);
-    let n_optimal_solutions = count_optimal_solutions(graph, solve);
-
-    let (greedy_deviation_count, path_safety) = if let Some(ref actions) = solve.actions {
-        let (greedy, safety) = replay_path_metrics(graph, lev, actions, &winning);
-        (Some(greedy), Some(safety))
-    } else {
-        (None, None)
-    };
+    let (n_optimal_solutions, greedy_deviation_count, path_safety) =
+        optimal_path_metrics(graph, lev, solve, &winning);
 
     DifficultyMetrics {
         dead_end_ratio,
@@ -131,50 +125,53 @@ fn compute_avg_branching_factor(graph: &StateGraph) -> f64 {
     total_actions as f64 / n as f64
 }
 
-/// Count the number of distinct shortest action sequences that reach WIN.
-/// Uses BFS on the state graph with distance and path-count tracking.
-fn count_optimal_solutions(graph: &StateGraph, solve: &SolveResult) -> u64 {
+/// Compute optimal path metrics: n_optimal_solutions, greedy_deviation_count, and path_safety.
+///
+/// path_safety is the expected safety under a uniformly random optimal path.
+/// For each state on any optimal path, we compute its safety (fraction of actions
+/// leading to winnable states) and weight it by `fwd_count * bwd_count` — the number
+/// of optimal paths passing through it. This makes the metric rotation-invariant.
+fn optimal_path_metrics(
+    graph: &StateGraph,
+    lev: &Level,
+    solve: &SolveResult,
+    winning: &FxHashSet<State>,
+) -> (u64, Option<u32>, Option<f64>) {
     let optimal_depth = match solve.moves {
         Some(d) => d,
-        None => return 0,
+        None => return (0, None, None),
     };
 
-    // BFS tracking (distance, path_count) per state in a single map.
-    let mut info: FxHashMap<State, (u32, u64)> = FxHashMap::default();
-    info.insert(graph.start, (0, 1));
-
+    // Forward BFS: (distance_from_start, path_count_from_start) per state.
+    let mut fwd: FxHashMap<State, (u32, u64)> = FxHashMap::default();
+    fwd.insert(graph.start, (0, 1));
     let mut queue = VecDeque::new();
     queue.push_back(graph.start);
 
-    let mut win_count: u64 = 0;
+    // Track which states have a WIN transition at optimal depth, with their fwd counts.
+    let mut win_predecessors: Vec<(State, u64)> = Vec::new();
 
     while let Some(cur) = queue.pop_front() {
-        let (cur_dist, cur_count) = info[&cur];
-
-        // Don't expand beyond optimal depth
+        let (cur_dist, cur_count) = fwd[&cur];
         if cur_dist >= optimal_depth {
             continue;
         }
-
         if let Some(transitions) = graph.transitions.get(&cur) {
             for &(_action, dest) in transitions {
                 let next_dist = cur_dist + 1;
                 match dest {
                     StateKey::Win => {
                         if next_dist == optimal_depth {
-                            win_count = win_count.saturating_add(cur_count);
+                            win_predecessors.push((cur, cur_count));
                         }
                     }
                     StateKey::Transient(ns) => {
-                        if let Some(entry) = info.get_mut(&ns) {
+                        if let Some(entry) = fwd.get_mut(&ns) {
                             if next_dist == entry.0 {
-                                // Same distance — add path count
                                 entry.1 = entry.1.saturating_add(cur_count);
                             }
-                            // If next_dist > entry.0, skip (not shortest)
                         } else {
-                            // First time reaching this state
-                            info.insert(ns, (next_dist, cur_count));
+                            fwd.insert(ns, (next_dist, cur_count));
                             queue.push_back(ns);
                         }
                     }
@@ -184,44 +181,114 @@ fn count_optimal_solutions(graph: &StateGraph, solve: &SolveResult) -> u64 {
         }
     }
 
-    win_count
-}
+    let n_optimal_solutions: u64 = win_predecessors.iter().map(|&(_, c)| c).sum();
 
-/// Compute greedy_deviation_count and path_safety in a single replay pass.
-fn replay_path_metrics(
-    graph: &StateGraph,
-    lev: &Level,
-    actions: &[Action],
-    winning: &FxHashSet<State>,
-) -> (u32, f64) {
-    let n_steps = actions.len();
-    if n_steps == 0 {
-        return (0, 1.0);
-    }
+    // Backward BFS from WIN along optimal edges: (distance_to_win, path_count_to_win).
+    // A backward edge from dst to src exists if fwd_dist[src] + 1 == fwd_dist[dst]
+    // (i.e., it's on a shortest path).
+    let mut bwd: FxHashMap<State, (u32, u64)> = FxHashMap::default();
+    let mut bwd_queue = VecDeque::new();
 
-    let mut state = State::from_level(lev);
-    let exit_row = lev.exit_row;
-    let exit_col = lev.exit_col;
-    let mut deviations = 0u32;
-    let mut total_safety = 0.0;
-
-    for &action in actions {
-        // Greedy deviation: check if action decreases Manhattan distance
-        let old_dist = (state.player_row - exit_row).abs() + (state.player_col - exit_col).abs();
-
-        // Path safety: fraction of actions leading to winnable states
-        if let Some(transitions) = graph.transitions.get(&state) {
-            total_safety += state_safety(transitions, winning);
-        }
-
-        // Advance state
-        step(lev, &mut state, action);
-
-        let new_dist = (state.player_row - exit_row).abs() + (state.player_col - exit_col).abs();
-        if new_dist >= old_dist {
-            deviations += 1;
+    // States with direct WIN transitions at optimal depth get bwd distance 1.
+    // bwd_count = number of WIN transitions from this state on optimal paths.
+    for &(s, _) in &win_predecessors {
+        let win_actions = graph.transitions.get(&s).map_or(0u64, |tr| {
+            tr.iter().filter(|&&(_, d)| d == StateKey::Win).count() as u64
+        });
+        if let Some(entry) = bwd.get_mut(&s) {
+            entry.1 = entry.1.saturating_add(win_actions);
+        } else {
+            bwd.insert(s, (1, win_actions));
+            bwd_queue.push_back(s);
         }
     }
 
-    (deviations, total_safety / n_steps as f64)
+    // Build reverse optimal-edge adjacency: for each state, who are its optimal predecessors?
+    let mut reverse_optimal: FxHashMap<State, Vec<State>> = FxHashMap::default();
+    for (&src, transitions) in &graph.transitions {
+        let src_dist = match fwd.get(&src) {
+            Some(&(d, _)) => d,
+            None => continue,
+        };
+        if src_dist >= optimal_depth {
+            continue;
+        }
+        for &(_action, dest) in transitions {
+            if let StateKey::Transient(dst) = dest {
+                if let Some(&(dst_dist, _)) = fwd.get(&dst) {
+                    if dst_dist == src_dist + 1 {
+                        reverse_optimal.entry(dst).or_default().push(src);
+                    }
+                }
+            }
+        }
+    }
+
+    // Propagate backward path counts.
+    while let Some(cur) = bwd_queue.pop_front() {
+        let (cur_bwd_dist, cur_bwd_count) = bwd[&cur];
+        if let Some(preds) = reverse_optimal.get(&cur) {
+            // For each predecessor: count how many optimal forward edges go from pred to cur.
+            for &pred in preds {
+                let n_edges = graph.transitions.get(&pred).map_or(0u64, |tr| {
+                    tr.iter()
+                        .filter(|&&(_, d)| d == StateKey::Transient(cur))
+                        .count() as u64
+                });
+                let contrib = cur_bwd_count.saturating_mul(n_edges);
+                if let Some(entry) = bwd.get_mut(&pred) {
+                    if cur_bwd_dist + 1 == entry.0 {
+                        entry.1 = entry.1.saturating_add(contrib);
+                    }
+                } else {
+                    bwd.insert(pred, (cur_bwd_dist + 1, contrib));
+                    bwd_queue.push_back(pred);
+                }
+            }
+        }
+    }
+
+    // Compute weighted path_safety over all states on optimal paths.
+    // Weight of state s = fwd_count[s] * bwd_count[s] (number of optimal paths through s).
+    let mut weighted_safety = 0.0f64;
+    let mut total_weight = 0u64;
+
+    for (&state, &(fwd_dist, fwd_count)) in &fwd {
+        if let Some(&(bwd_dist, bwd_count)) = bwd.get(&state) {
+            if fwd_dist + bwd_dist == optimal_depth {
+                let weight = fwd_count.saturating_mul(bwd_count);
+                if let Some(transitions) = graph.transitions.get(&state) {
+                    weighted_safety += weight as f64 * state_safety(transitions, winning);
+                }
+                total_weight = total_weight.saturating_add(weight);
+            }
+        }
+    }
+
+    let path_safety = if total_weight > 0 {
+        Some(weighted_safety / total_weight as f64)
+    } else {
+        Some(1.0)
+    };
+
+    // Greedy deviation count (replay-based, uses specific solution path).
+    let greedy_deviation_count = solve.actions.as_ref().map(|actions| {
+        let mut state = State::from_level(lev);
+        let exit_row = lev.exit_row;
+        let exit_col = lev.exit_col;
+        let mut deviations = 0u32;
+        for &action in actions {
+            let old_dist =
+                (state.player_row - exit_row).abs() + (state.player_col - exit_col).abs();
+            step(lev, &mut state, action);
+            let new_dist =
+                (state.player_row - exit_row).abs() + (state.player_col - exit_col).abs();
+            if new_dist >= old_dist {
+                deviations += 1;
+            }
+        }
+        deviations
+    });
+
+    (n_optimal_solutions, greedy_deviation_count, path_safety)
 }

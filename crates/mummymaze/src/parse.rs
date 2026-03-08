@@ -709,6 +709,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn path_safety_invariant_under_rotation() {
+        use crate::{graph, metrics, solver};
+
+        let mazes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap().join("mazes");
+
+        let (_, levels_a) = parse_file(&mazes.join("B-53.dat")).unwrap();
+        let (_, levels_b) = parse_file(&mazes.join("B-55.dat")).unwrap();
+        let a = &levels_a[85];
+        let b = &levels_b[85];
+
+        let graph_a = graph::build_graph(a);
+        let solve_a = solver::solve(a);
+        let metrics_a = metrics::compute(&graph_a, a, &solve_a);
+
+        let graph_b = graph::build_graph(b);
+        let solve_b = solver::solve(b);
+        let metrics_b = metrics::compute(&graph_b, b, &solve_b);
+
+        assert_eq!(solve_a.moves, solve_b.moves);
+        assert_eq!(metrics_a.n_optimal_solutions, metrics_b.n_optimal_solutions);
+        assert_eq!(metrics_a.dead_end_ratio, metrics_b.dead_end_ratio);
+
+        let safety_a = metrics_a.path_safety.unwrap();
+        let safety_b = metrics_b.path_safety.unwrap();
+        assert!(
+            (safety_a - safety_b).abs() < 1e-10,
+            "path_safety should be identical for rotations: {safety_a} vs {safety_b}"
+        );
+    }
+
+    #[test]
     fn dihedral_rot90_matches_known_pair() {
         let mazes = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent().unwrap().parent().unwrap().join("mazes");
