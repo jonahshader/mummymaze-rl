@@ -134,19 +134,17 @@ pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual>
     let graph = build_graph(level);
     let chain = MarkovChain::from_graph(&graph);
     let start_idx = chain.start_idx.expect("BFS-solvable level must have winnable start");
-    let win_prob = match chain.solve_win_probs() {
-        Ok(wp) => {
-            let p = wp[start_idx];
-            // BFS-solvable levels always have win_prob > 0 mathematically,
-            // but f64 can underflow to 0.0 for extreme levels. Clamp to
-            // MIN_POSITIVE so log(win_prob) stays finite.
-            if p == 0.0 { f64::MIN_POSITIVE } else { p }
-        }
-        Err(_) => return None, // Markov solver failed to converge
+
+    // Use log-space solver to get log10(win_prob) without underflow,
+    // then recover win_prob (may be 0.0 for extreme levels, but log is always finite).
+    let log_win_prob = match chain.solve_log_win_probs() {
+        Ok(lp) => lp[start_idx],
+        Err(_) => return None,
     };
+    let win_prob = 10.0f64.powf(log_win_prob).max(0.0);
     let n_states = graph.n_transient;
 
-    let vars = fitness_expr.compute_vars(&graph, level, &solve, win_prob);
+    let vars = fitness_expr.compute_vars(&graph, level, &solve, win_prob, log_win_prob);
     let fitness = fitness_expr.eval(&vars);
 
     Some(Individual {

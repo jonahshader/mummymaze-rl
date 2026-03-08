@@ -12,6 +12,7 @@ use crate::solver::SolveResult;
 /// All variables available in fitness expressions.
 pub const VARIABLES: &[(&str, &str)] = &[
     ("win_prob", "Win probability under uniform-random policy (0–1)"),
+    ("log_win_prob", "log10(win_prob) — no underflow, always finite for solvable levels"),
     ("bfs_moves", "Optimal BFS solution length"),
     ("n_states", "Number of reachable transient states"),
     ("dead_end_ratio", "Fraction of states from which winning is impossible (0–1)"),
@@ -49,6 +50,7 @@ pub const PRESETS: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub struct FitnessVars {
     pub win_prob: f64,
+    pub log_win_prob: f64,
     pub bfs_moves: f64,
     pub n_states: f64,
     pub dead_end_ratio: f64,
@@ -60,9 +62,10 @@ pub struct FitnessVars {
 
 impl FitnessVars {
     /// Build from basic GA metrics (cheap — no difficulty metrics needed).
-    pub fn basic(win_prob: f64, bfs_moves: u32, n_states: usize) -> Self {
+    pub fn basic(win_prob: f64, log_win_prob: f64, bfs_moves: u32, n_states: usize) -> Self {
         FitnessVars {
             win_prob,
+            log_win_prob,
             bfs_moves: bfs_moves as f64,
             n_states: n_states as f64,
             dead_end_ratio: 0.0,
@@ -87,6 +90,7 @@ impl FitnessVars {
     fn get(&self, name: &str) -> Option<f64> {
         match name {
             "win_prob" => Some(self.win_prob),
+            "log_win_prob" => Some(self.log_win_prob),
             "bfs_moves" => Some(self.bfs_moves),
             "n_states" => Some(self.n_states),
             "dead_end_ratio" => Some(self.dead_end_ratio),
@@ -121,6 +125,7 @@ impl FitnessExpr {
         // Test-evaluate to catch errors early.
         let test_vars = FitnessVars {
             win_prob: 1.0,
+            log_win_prob: 0.0,
             bfs_moves: 1.0,
             n_states: 1.0,
             dead_end_ratio: 1.0,
@@ -156,8 +161,10 @@ impl FitnessExpr {
         level: &Level,
         solve: &SolveResult,
         win_prob: f64,
+        log_win_prob: f64,
     ) -> FitnessVars {
-        let vars = FitnessVars::basic(win_prob, solve.moves.unwrap_or(0), graph.n_transient);
+        let vars =
+            FitnessVars::basic(win_prob, log_win_prob, solve.moves.unwrap_or(0), graph.n_transient);
         if self.needs_difficulty_metrics {
             let dm = metrics::compute(graph, level, solve);
             vars.with_difficulty(&dm)
@@ -200,7 +207,7 @@ mod tests {
     #[test]
     fn test_eval_basic() {
         let expr = FitnessExpr::parse("-win_prob + bfs_moves / 1000").unwrap();
-        let vars = FitnessVars::basic(0.5, 20, 100);
+        let vars = FitnessVars::basic(0.5, 0.5f64.log10(), 20, 100);
         let result = expr.eval(&vars);
         assert!((result - (-0.5 + 20.0 / 1000.0)).abs() < 1e-10);
     }
@@ -234,7 +241,7 @@ mod tests {
     fn test_math_functions() {
         // fasteval supports: +, -, *, /, %, ^, abs(), log(), ceil(), floor(), etc.
         let expr = FitnessExpr::parse("abs(-win_prob) + bfs_moves ^ 0.5").unwrap();
-        let vars = FitnessVars::basic(0.5, 16, 100);
+        let vars = FitnessVars::basic(0.5, 0.5f64.log10(), 16, 100);
         let result = expr.eval(&vars);
         assert!((result - (0.5 + 4.0)).abs() < 1e-10);
     }

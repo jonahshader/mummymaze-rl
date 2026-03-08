@@ -293,6 +293,71 @@ impl MarkovChain {
         Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
     }
 
+    /// Solve for log10(win_prob) per state, avoiding f64 underflow.
+    ///
+    /// Uses the standard linear Gauss-Seidel solver but with periodic
+    /// rescaling: when values approach subnormal range, both the solution
+    /// vector and the RHS (`win_absorb`) are multiplied by a large factor.
+    /// Since `(I-Q)x = b` is linear, scaling `b` by `C` scales `x` by `C`,
+    /// so we track `log10(C)` and subtract it at the end.
+    ///
+    /// Returns log10 values. States with zero win probability get
+    /// `f64::NEG_INFINITY`.
+    pub fn solve_log_win_probs(&self) -> Result<Vec<f64>> {
+        let n = self.n_states();
+        let mut x = vec![0.0f64; n];
+        let mut win_absorb = self.win_absorb.clone();
+        let mut log10_scale = 0.0f64;
+
+        const RESCALE_THRESHOLD: f64 = 1e-100;
+        const RESCALE_FACTOR: f64 = 1e200;
+        const LOG10_RESCALE: f64 = 200.0;
+
+        for _ in 0..MAX_ITERATIONS {
+            let mut converged = true;
+            for i in 0..n {
+                if self.trapped[i] {
+                    continue;
+                }
+                let mut sum = win_absorb[i];
+                for &(j, qij) in &self.q_rows[i] {
+                    sum += qij * x[j];
+                }
+                let new_val = sum / self.diag[i];
+                let diff = (new_val - x[i]).abs();
+                if diff > TOLERANCE && diff > TOLERANCE * new_val.abs() {
+                    converged = false;
+                }
+                x[i] = new_val;
+            }
+            if converged {
+                return Ok(x
+                    .iter()
+                    .map(|&v| {
+                        if v > 0.0 {
+                            v.log10() - log10_scale
+                        } else {
+                            f64::NEG_INFINITY
+                        }
+                    })
+                    .collect());
+            }
+
+            // Rescale when values get tiny to prevent underflow.
+            let max_val = x.iter().copied().fold(0.0f64, f64::max);
+            if max_val > 0.0 && max_val < RESCALE_THRESHOLD {
+                for v in &mut x {
+                    *v *= RESCALE_FACTOR;
+                }
+                for v in &mut win_absorb {
+                    *v *= RESCALE_FACTOR;
+                }
+                log10_scale += LOG10_RESCALE;
+            }
+        }
+        Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
+    }
+
     /// Build a map from State to its solved value for all transient states.
     pub fn per_state_map(&self, values: &[f64]) -> FxHashMap<State, f64> {
         self.idx_to_state
@@ -300,5 +365,77 @@ impl MarkovChain {
             .enumerate()
             .map(|(i, &state)| (state, values[i]))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::build_graph;
+    use crate::parse;
+    use std::path::Path;
+
+    #[test]
+    fn log_solver_matches_regular_solver() {
+        let maze_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mazes");
+        if !maze_dir.exists() {
+            eprintln!("Skipping: mazes/ not found");
+            return;
+        }
+
+        let mut max_err: f64 = 0.0;
+        let mut tested = 0;
+
+        for entry in std::fs::read_dir(&maze_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().map_or(true, |e| e != "dat") {
+                continue;
+            }
+            let Ok((_, levels)) = parse::parse_file(&path) else {
+                continue;
+            };
+
+            for lev in &levels {
+                let bfs = crate::solver::solve(lev);
+                if bfs.moves.is_none() {
+                    continue;
+                }
+
+                let graph = build_graph(lev);
+                let chain = MarkovChain::from_graph(&graph);
+
+                let Some(start) = chain.start_idx else {
+                    continue;
+                };
+
+                let wp = chain.solve_win_probs().unwrap();
+                let log_wp = chain.solve_log_win_probs().unwrap();
+
+                let p = wp[start];
+                let log_p = log_wp[start];
+
+                let expected_log = p.log10();
+                let err = (expected_log - log_p).abs();
+                if err > max_err {
+                    max_err = err;
+                    if err > 0.01 {
+                        eprintln!(
+                            "  {:?} p={:.6e} log10(p)={:.4} log_solver={:.4} err={:.6}",
+                            path.file_stem().unwrap(),
+                            p,
+                            expected_log,
+                            log_p,
+                            err
+                        );
+                    }
+                }
+                tested += 1;
+            }
+        }
+        eprintln!("Tested {tested} solvable levels. Max log10 error: {max_err:.6e}");
+        assert!(
+            max_err < 0.1,
+            "log solver diverged: max error {max_err:.6e}"
+        );
     }
 }
