@@ -154,11 +154,14 @@ impl MarkovChain {
     }
 
     /// Solve (I-Q)x = win_absorb with custom convergence parameters.
+    ///
+    /// Uses a combined absolute + relative convergence criterion so that
+    /// extremely small win probabilities (e.g. 1e-34) can still converge.
     pub fn solve_win_probs_tol(&self, tol: f64, max_iter: usize) -> Result<Vec<f64>> {
         let n = self.n_states();
         let mut x = vec![0.0f64; n];
         for _ in 0..max_iter {
-            let mut max_diff = 0.0f64;
+            let mut converged = true;
             for i in 0..n {
                 if self.trapped[i] {
                     continue; // x[i] stays 0 (can never reach absorption)
@@ -169,12 +172,13 @@ impl MarkovChain {
                 }
                 let new_val = sum / self.diag[i];
                 let diff = (new_val - x[i]).abs();
-                if diff > max_diff {
-                    max_diff = diff;
+                // Converged when absolute diff < tol OR relative diff < tol
+                if diff > tol && diff > tol * new_val.abs() {
+                    converged = false;
                 }
                 x[i] = new_val;
             }
-            if max_diff < tol {
+            if converged {
                 return Ok(x);
             }
         }
