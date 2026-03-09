@@ -6,6 +6,7 @@ pub mod graph;
 pub mod markov;
 pub mod metrics;
 pub mod parse;
+pub mod policy_client;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod solver;

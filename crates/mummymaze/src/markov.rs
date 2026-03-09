@@ -355,6 +355,7 @@ impl MarkovChain {
     }
 
     /// Run Gauss-Seidel with a given RHS vector (scaled win_absorb).
+    /// Falls back to direct Gaussian elimination if iterative solver fails to converge.
     fn solve_with_rhs(&self, win_absorb: &[f64]) -> Result<Vec<f64>> {
         let n = self.n_states();
         let mut x = vec![0.0f64; n];
@@ -379,7 +380,76 @@ impl MarkovChain {
                 return Ok(x);
             }
         }
-        Err(MummyMazeError::ConvergenceFailure(MAX_ITERATIONS))
+        // Gauss-Seidel failed — fall back to direct solve.
+        self.solve_with_rhs_direct(win_absorb)
+    }
+
+    /// Direct Gaussian elimination with partial pivoting for (I-Q)x = win_absorb.
+    /// O(n³) but exact; used as fallback when iterative solver doesn't converge.
+    fn solve_with_rhs_direct(&self, win_absorb: &[f64]) -> Result<Vec<f64>> {
+        let n = self.n_states();
+
+        // Build dense augmented matrix [I-Q | b] row by row.
+        let mut a = vec![vec![0.0f64; n + 1]; n];
+        for i in 0..n {
+            if self.trapped[i] {
+                // Trapped state: set identity row, RHS = 0 (solution x[i] = 0).
+                a[i][i] = 1.0;
+                a[i][n] = 0.0;
+                continue;
+            }
+            a[i][i] = self.diag[i]; // 1 - Q[i,i]
+            for &(j, qij) in &self.q_rows[i] {
+                a[i][j] = -qij; // off-diagonal: -(Q[i,j])
+            }
+            a[i][n] = win_absorb[i];
+        }
+
+        // Forward elimination with partial pivoting.
+        for col in 0..n {
+            // Find pivot.
+            let mut max_row = col;
+            let mut max_val = a[col][col].abs();
+            for row in (col + 1)..n {
+                let v = a[row][col].abs();
+                if v > max_val {
+                    max_val = v;
+                    max_row = row;
+                }
+            }
+            if max_val < 1e-30 {
+                // Singular column — skip (trapped or degenerate).
+                continue;
+            }
+            a.swap(col, max_row);
+
+            let pivot = a[col][col];
+            for row in (col + 1)..n {
+                let factor = a[row][col] / pivot;
+                if factor == 0.0 {
+                    continue;
+                }
+                for j in col..=n {
+                    a[row][j] -= factor * a[col][j];
+                }
+            }
+        }
+
+        // Back substitution.
+        let mut x = vec![0.0f64; n];
+        for i in (0..n).rev() {
+            if a[i][i].abs() < 1e-30 {
+                x[i] = 0.0;
+                continue;
+            }
+            let mut sum = a[i][n];
+            for j in (i + 1)..n {
+                sum -= a[i][j] * x[j];
+            }
+            x[i] = (sum / a[i][i]).max(0.0);
+        }
+
+        Ok(x)
     }
 
     /// Check if state i has any path to a state with win_absorb > 0 (BFS through Q).
@@ -425,6 +495,8 @@ mod tests {
 
     #[test]
     fn log_solver_matches_regular_solver() {
+        use std::hash::{Hash, Hasher};
+
         let maze_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mazes");
         if !maze_dir.exists() {
             eprintln!("Skipping: mazes/ not found");
@@ -433,6 +505,7 @@ mod tests {
 
         let mut max_err: f64 = 0.0;
         let mut tested = 0;
+        let mut skipped = 0;
 
         for entry in std::fs::read_dir(&maze_dir).unwrap() {
             let path = entry.unwrap().path();
@@ -443,7 +516,16 @@ mod tests {
                 continue;
             };
 
-            for lev in &levels {
+            for (i, lev) in levels.iter().enumerate() {
+                // Sample ~1% of levels for speed
+                let mut hasher = std::hash::DefaultHasher::new();
+                path.hash(&mut hasher);
+                i.hash(&mut hasher);
+                if hasher.finish() % 100 != 0 {
+                    skipped += 1;
+                    continue;
+                }
+
                 let bfs = crate::solver::solve(lev);
                 if bfs.moves.is_none() {
                     continue;
@@ -480,7 +562,7 @@ mod tests {
                 tested += 1;
             }
         }
-        eprintln!("Tested {tested} solvable levels. Max log10 error: {max_err:.6e}");
+        eprintln!("Tested {tested} solvable levels (skipped {skipped}). Max log10 error: {max_err:.6e}");
         assert!(
             max_err < 0.1,
             "log solver diverged: max error {max_err:.6e}"

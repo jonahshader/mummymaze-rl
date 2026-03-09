@@ -5,6 +5,8 @@ use mummymaze::ga::fitness::{FitnessExpr, PRESETS};
 use mummymaze::ga::{CrossoverMode, GaConfig, GaMessage, Individual};
 use mummymaze::game::State;
 use mummymaze::parse::Level;
+use mummymaze::policy_client::PolicyClient;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -12,6 +14,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum GaStatus {
     Idle,
+    Starting(String),
     Running {
         generation: usize,
         total_generations: usize,
@@ -30,6 +33,10 @@ pub struct AdversarialState {
     stop_flag: Option<Arc<AtomicBool>>,
     /// Validation error for the fitness expression (empty = valid).
     fitness_error: String,
+    /// Optional policy checkpoint path for policy_win_prob evaluation.
+    pub policy_checkpoint: String,
+    /// Whether to use the policy net for fitness evaluation.
+    pub use_policy: bool,
 }
 
 impl AdversarialState {
@@ -49,6 +56,8 @@ impl AdversarialState {
             rx: None,
             stop_flag: None,
             fitness_error: String::new(),
+            policy_checkpoint: latest_checkpoint().unwrap_or_default(),
+            use_policy: false,
         }
     }
 
@@ -57,18 +66,44 @@ impl AdversarialState {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let config = self.config.clone();
         let flag = stop_flag.clone();
+        let use_policy = self.use_policy;
+        let checkpoint_path = self.policy_checkpoint.clone();
 
         self.history.clear();
         self.best = None;
-        self.status = GaStatus::Running {
-            generation: 0,
-            total_generations: config.generations,
+        self.status = if use_policy && !checkpoint_path.is_empty() {
+            GaStatus::Starting("Starting policy server...".to_string())
+        } else {
+            GaStatus::Starting("Evaluating seeds...".to_string())
         };
         self.rx = Some(rx);
         self.stop_flag = Some(stop_flag);
 
         std::thread::spawn(move || {
-            mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+            if use_policy && !checkpoint_path.is_empty() {
+                let path = PathBuf::from(&checkpoint_path);
+                let _ = tx.send(GaMessage::Status(
+                    "Starting policy server...".to_string(),
+                ));
+                match PolicyClient::spawn(&path) {
+                    Ok(policy_client) => {
+                        mummymaze::ga::run_ga_with_policy(
+                            &config,
+                            seed_levels,
+                            tx,
+                            flag,
+                            policy_client,
+                        );
+                    }
+                    Err(e) => {
+                        let _ = tx.send(GaMessage::Error(format!(
+                            "Failed to start policy server: {e}"
+                        )));
+                    }
+                }
+            } else {
+                mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+            }
         });
     }
 
@@ -89,6 +124,9 @@ impl AdversarialState {
         while let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             changed = true;
             match msg {
+                GaMessage::Status(s) => {
+                    self.status = GaStatus::Starting(s);
+                }
                 GaMessage::SeedsDone { .. } => {}
                 GaMessage::Generation(result) => {
                     self.history
@@ -117,7 +155,10 @@ impl AdversarialState {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self.status, GaStatus::Running { .. })
+        matches!(
+            self.status,
+            GaStatus::Starting(_) | GaStatus::Running { .. }
+        )
     }
 }
 
@@ -153,6 +194,19 @@ pub fn draw_adversarial_panel(
         match &state.status {
             GaStatus::Idle => {
                 ui.label("Idle");
+            }
+            GaStatus::Starting(msg) => {
+                // Try to parse "Evaluating seeds: 123/456" for a progress bar
+                if let Some(frac) = parse_progress_frac(msg) {
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .text(msg.as_str())
+                            .desired_width(200.0),
+                    );
+                } else {
+                    ui.spinner();
+                    ui.label(msg);
+                }
             }
             GaStatus::Running {
                 generation,
@@ -305,6 +359,28 @@ pub fn draw_adversarial_panel(
                 });
 
             ui.separator();
+
+            // Policy net section
+            ui.checkbox(&mut state.use_policy, "Use policy net");
+            if state.use_policy {
+                ui.horizontal(|ui| {
+                    ui.label("Checkpoint:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.policy_checkpoint)
+                            .desired_width(ui.available_width() - 4.0)
+                            .hint_text("path/to/model.eqx")
+                            .font(egui::TextStyle::Monospace),
+                    );
+                });
+                if state.policy_checkpoint.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Set checkpoint path to use policy_win_prob",
+                    );
+                }
+            }
+
+            ui.separator();
             ui.label("Fitness expression:");
 
             // Preset dropdown
@@ -429,4 +505,35 @@ pub fn draw_adversarial_panel(
     }
 
     load_level
+}
+
+/// Try to extract a progress fraction from "... N/M" strings.
+fn parse_progress_frac(msg: &str) -> Option<f32> {
+    let slash_part = msg.rsplit_once(' ')?.1;
+    let (done_s, total_s) = slash_part.split_once('/')?;
+    let done: f32 = done_s.parse().ok()?;
+    let total: f32 = total_s.parse().ok()?;
+    if total > 0.0 {
+        Some(done / total)
+    } else {
+        None
+    }
+}
+
+/// Find the newest .eqx checkpoint in `checkpoints/`.
+fn latest_checkpoint() -> Option<String> {
+    let dir = PathBuf::from("checkpoints");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().map_or(true, |e| e != "eqx") {
+            continue;
+        }
+        let mtime = entry.metadata().ok()?.modified().ok()?;
+        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+            best = Some((mtime, path));
+        }
+    }
+    best.map(|(_, p)| p.to_string_lossy().into_owned())
 }

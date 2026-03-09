@@ -13,6 +13,8 @@ use crate::solver::SolveResult;
 pub const VARIABLES: &[(&str, &str)] = &[
     ("win_prob", "Win probability under uniform-random policy (0–1)"),
     ("log_win_prob", "log10(win_prob) — no underflow, always finite for solvable levels"),
+    ("policy_win_prob", "Win probability under the loaded policy net (0–1, requires policy)"),
+    ("log_policy_win_prob", "log10(policy_win_prob) — no underflow, requires policy"),
     ("bfs_moves", "Optimal BFS solution length"),
     ("n_states", "Number of reachable transient states"),
     ("dead_end_ratio", "Fraction of states from which winning is impossible (0–1)"),
@@ -31,6 +33,9 @@ const EXPENSIVE_VARS: &[&str] = &[
     "path_safety",
 ];
 
+/// Variable names that require a policy net.
+const POLICY_VARS: &[&str] = &["policy_win_prob", "log_policy_win_prob"];
+
 // Preset fitness expressions.
 pub const PRESET_DEFAULT: &str = "-win_prob + bfs_moves / 1000";
 pub const PRESET_HARD: &str = "-win_prob";
@@ -38,12 +43,15 @@ pub const PRESET_COMPLEX: &str = "-win_prob + n_states / 10000 + bfs_moves / 100
 pub const PRESET_DECEPTIVE: &str = "-win_prob + greedy_deviation / 10";
 pub const PRESET_TRAP: &str = "-win_prob - path_safety + dead_end_ratio";
 
+pub const PRESET_POLICY: &str = "-log_policy_win_prob";
+
 pub const PRESETS: &[(&str, &str)] = &[
     ("Default", PRESET_DEFAULT),
     ("Hard", PRESET_HARD),
     ("Complex", PRESET_COMPLEX),
     ("Deceptive", PRESET_DECEPTIVE),
     ("Trap-heavy", PRESET_TRAP),
+    ("Policy", PRESET_POLICY),
 ];
 
 /// Metric values for fitness evaluation.
@@ -51,6 +59,8 @@ pub const PRESETS: &[(&str, &str)] = &[
 pub struct FitnessVars {
     pub win_prob: f64,
     pub log_win_prob: f64,
+    pub policy_win_prob: f64,
+    pub log_policy_win_prob: f64,
     pub bfs_moves: f64,
     pub n_states: f64,
     pub dead_end_ratio: f64,
@@ -66,6 +76,8 @@ impl FitnessVars {
         FitnessVars {
             win_prob,
             log_win_prob,
+            policy_win_prob: 0.0,
+            log_policy_win_prob: f64::NEG_INFINITY,
             bfs_moves: bfs_moves as f64,
             n_states: n_states as f64,
             dead_end_ratio: 0.0,
@@ -86,11 +98,20 @@ impl FitnessVars {
         self
     }
 
+    /// Set policy win prob (from policy server evaluation).
+    pub fn with_policy_win_prob(mut self, p: f64, log_p: f64) -> Self {
+        self.policy_win_prob = p;
+        self.log_policy_win_prob = log_p;
+        self
+    }
+
     /// Look up a variable by name.
     fn get(&self, name: &str) -> Option<f64> {
         match name {
             "win_prob" => Some(self.win_prob),
             "log_win_prob" => Some(self.log_win_prob),
+            "policy_win_prob" => Some(self.policy_win_prob),
+            "log_policy_win_prob" => Some(self.log_policy_win_prob),
             "bfs_moves" => Some(self.bfs_moves),
             "n_states" => Some(self.n_states),
             "dead_end_ratio" => Some(self.dead_end_ratio),
@@ -109,6 +130,8 @@ pub struct FitnessExpr {
     expression: String,
     /// Whether the expression references any expensive difficulty metrics.
     pub needs_difficulty_metrics: bool,
+    /// Whether the expression references policy_win_prob (requires a policy server).
+    pub needs_policy: bool,
 }
 
 impl FitnessExpr {
@@ -126,6 +149,8 @@ impl FitnessExpr {
         let test_vars = FitnessVars {
             win_prob: 1.0,
             log_win_prob: 0.0,
+            policy_win_prob: 1.0,
+            log_policy_win_prob: 0.0,
             bfs_moves: 1.0,
             n_states: 1.0,
             dead_end_ratio: 1.0,
@@ -137,10 +162,12 @@ impl FitnessExpr {
         eval_expr(&expr, &test_vars)?;
 
         let needs_difficulty_metrics = EXPENSIVE_VARS.iter().any(|v| expr.contains(v));
+        let needs_policy = POLICY_VARS.iter().any(|v| expr.contains(v));
 
         Ok(FitnessExpr {
             expression: expr,
             needs_difficulty_metrics,
+            needs_policy,
         })
     }
 

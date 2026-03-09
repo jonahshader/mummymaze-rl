@@ -7,15 +7,17 @@ pub mod crossover;
 pub mod fitness;
 pub mod mutation;
 
-use crate::graph::build_graph;
+use crate::graph::{build_graph, StateGraph};
 use crate::markov::MarkovChain;
 use crate::parse::Level;
+use crate::policy_client::PolicyClient;
 use crate::solver;
-use fitness::FitnessExpr;
+use fitness::{FitnessExpr, FitnessVars};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use rustc_hash::FxHashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
@@ -117,6 +119,7 @@ pub struct GenerationResult {
 
 #[derive(Debug, Clone)]
 pub enum GaMessage {
+    Status(String),
     SeedsDone {
         n_seeds: usize,
         n_solvable: usize,
@@ -126,8 +129,23 @@ pub enum GaMessage {
     Error(String),
 }
 
-/// Evaluate a level: solve + Markov analysis + fitness expression. Returns None if unsolvable.
-pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual> {
+/// Intermediate evaluation result before fitness scoring.
+/// Holds everything needed to compute fitness, including the state graph
+/// (retained for policy evaluation).
+struct EvalResult {
+    level: Level,
+    bfs_moves: u32,
+    n_states: usize,
+    win_prob: f64,
+    #[allow(dead_code)]
+    log_win_prob: f64,
+    vars: FitnessVars,
+    graph: StateGraph,
+}
+
+/// Evaluate a level: solve + Markov analysis. Returns None if unsolvable.
+/// Does NOT compute final fitness yet (policy_win_prob may be needed).
+fn evaluate_base(level: &Level, fitness_expr: &FitnessExpr) -> Option<EvalResult> {
     let solve = solver::solve(level);
     let moves = solve.moves?;
 
@@ -135,8 +153,6 @@ pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual>
     let chain = MarkovChain::from_graph(&graph);
     let start_idx = chain.start_idx.expect("BFS-solvable level must have winnable start");
 
-    // Use log-space solver to get log10(win_prob) without underflow,
-    // then recover win_prob (may be 0.0 for extreme levels, but log is always finite).
     let log_win_prob = match chain.solve_log_win_probs() {
         Ok(lp) => lp[start_idx],
         Err(_) => return None,
@@ -145,15 +161,139 @@ pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual>
     let n_states = graph.n_transient;
 
     let vars = fitness_expr.compute_vars(&graph, level, &solve, win_prob, log_win_prob);
-    let fitness = fitness_expr.eval(&vars);
 
-    Some(Individual {
+    Some(EvalResult {
         level: level.clone(),
         bfs_moves: moves,
         n_states,
         win_prob,
-        fitness,
+        log_win_prob,
+        vars,
+        graph,
     })
+}
+
+/// Convert an EvalResult to an Individual by computing fitness.
+fn finalize(result: EvalResult, fitness_expr: &FitnessExpr) -> Individual {
+    let fitness = fitness_expr.eval(&result.vars);
+    Individual {
+        level: result.level,
+        bfs_moves: result.bfs_moves,
+        n_states: result.n_states,
+        win_prob: result.win_prob,
+        fitness,
+    }
+}
+
+/// Evaluate a level without policy (original API for backward compat).
+pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual> {
+    evaluate_base(level, fitness_expr).map(|r| finalize(r, fitness_expr))
+}
+
+/// Batch-evaluate levels, optionally querying a policy server for policy_win_prob.
+/// If `progress` is provided, increments it atomically as levels are evaluated.
+/// If `tx` is provided, sends status messages for policy evaluation phase.
+fn evaluate_batch(
+    levels: &[Level],
+    fitness_expr: &FitnessExpr,
+    policy_client: Option<&mut PolicyClient>,
+    progress: Option<&AtomicUsize>,
+    tx: Option<&Sender<GaMessage>>,
+) -> Vec<Individual> {
+    // Phase 1: parallel BFS + uniform Markov evaluation
+    let mut results: Vec<EvalResult> = levels
+        .par_iter()
+        .filter_map(|level| {
+            let r = evaluate_base(level, fitness_expr);
+            if let Some(ctr) = progress {
+                ctr.fetch_add(1, Ordering::Relaxed);
+            }
+            r
+        })
+        .collect();
+
+    // Phase 2: if policy needed, batch-query the policy server
+    if fitness_expr.needs_policy {
+        if let Some(client) = policy_client {
+            if let Some(ref tx) = tx {
+                let n = results.len();
+                let total_states: usize = results.iter().map(|r| r.graph.n_transient).sum();
+                let jit_note = if client.needs_jit() {
+                    " (JIT compiling…)"
+                } else {
+                    ""
+                };
+                let _ = tx.send(GaMessage::Status(format!(
+                    "Policy inference: {n} levels, {total_states} states{jit_note}"
+                )));
+            }
+            let pairs: Vec<(&Level, &StateGraph)> = results
+                .iter()
+                .map(|r| (&r.level, &r.graph))
+                .collect();
+
+            match client.query(&pairs) {
+                Ok(policy_results) => {
+                    for (result, state_probs) in results.iter_mut().zip(policy_results.iter()) {
+                        // Build policy map and solve Markov chain under policy
+                        let mut policy: FxHashMap<crate::game::State, [f64; 5]> =
+                            FxHashMap::with_capacity_and_hasher(
+                                state_probs.len(),
+                                Default::default(),
+                            );
+                        for &(state, probs) in state_probs {
+                            policy.insert(state, probs.map(|p| p as f64));
+                        }
+
+                        let chain =
+                            MarkovChain::from_graph_with_policy(&result.graph, &policy);
+                        // Use log-space solver to avoid f64 underflow on hard levels,
+                        // then recover linear probability.
+                        let (policy_wp, log_policy_wp) = match chain.solve_log_win_probs() {
+                            Ok(lp) => {
+                                let log_p = chain
+                                    .start_idx
+                                    .map_or(f64::NEG_INFINITY, |i| lp[i]);
+                                (10.0f64.powf(log_p).max(0.0), log_p)
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "WARNING: policy Markov solve failed \
+                                     (n_states={}, start_idx={:?}): {e}",
+                                    chain.n_states(),
+                                    chain.start_idx,
+                                );
+                                (0.0, f64::NEG_INFINITY)
+                            }
+                        };
+                        if log_policy_wp == f64::NEG_INFINITY {
+                            eprintln!(
+                                "DEBUG: log_policy_wp=-inf for level with \
+                                 bfs_moves={}, n_states={}, start_idx={:?}, \
+                                 chain_n_states={}",
+                                result.bfs_moves,
+                                result.n_states,
+                                chain.start_idx,
+                                chain.n_states(),
+                            );
+                        }
+                        result.vars =
+                            result.vars.clone().with_policy_win_prob(policy_wp, log_policy_wp);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("WARNING: policy server query failed: {e}");
+                    // Leave policy_win_prob at 0.0
+                }
+            }
+        }
+    }
+
+    // Phase 3: compute fitness
+    results
+        .into_iter()
+        .map(|r| finalize(r, fitness_expr))
+        .collect()
 }
 
 /// Tournament selection: pick k random individuals, return the fittest.
@@ -176,6 +316,27 @@ pub fn run_ga(
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
 ) {
+    run_ga_inner(config, seed_levels, tx, stop_flag, None);
+}
+
+/// Run the GA with a policy server for policy_win_prob evaluation.
+pub fn run_ga_with_policy(
+    config: &GaConfig,
+    seed_levels: Vec<Level>,
+    tx: Sender<GaMessage>,
+    stop_flag: Arc<AtomicBool>,
+    policy_client: PolicyClient,
+) {
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(policy_client));
+}
+
+fn run_ga_inner(
+    config: &GaConfig,
+    seed_levels: Vec<Level>,
+    tx: Sender<GaMessage>,
+    stop_flag: Arc<AtomicBool>,
+    mut policy_client: Option<PolicyClient>,
+) {
     let fitness_expr = match FitnessExpr::parse(&config.fitness_expr) {
         Ok(f) => f,
         Err(e) => {
@@ -184,13 +345,43 @@ pub fn run_ga(
         }
     };
 
+    if fitness_expr.needs_policy && policy_client.is_none() {
+        let _ = tx.send(GaMessage::Error(
+            "Fitness expression uses policy_win_prob but no policy checkpoint is configured"
+                .to_string(),
+        ));
+        return;
+    }
+
     let mut rng = StdRng::seed_from_u64(config.seed);
 
-    // Evaluate seed levels
-    let mut population: Vec<Individual> = seed_levels
-        .iter()
-        .filter_map(|lev| evaluate(lev, &fitness_expr))
-        .collect();
+    // Evaluate seed levels with progress reporting
+    let total_seeds = seed_levels.len();
+    let progress = Arc::new(AtomicUsize::new(0));
+    {
+        let progress = progress.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut last = 0;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let done = progress.load(Ordering::Relaxed);
+                if done != last {
+                    last = done;
+                    let _ = tx.send(GaMessage::Status(format!(
+                        "Evaluating seeds: {done}/{total_seeds}"
+                    )));
+                }
+                if done >= total_seeds {
+                    break;
+                }
+            }
+        });
+    }
+    let mut population: Vec<Individual> =
+        evaluate_batch(&seed_levels, &fitness_expr, policy_client.as_mut(), Some(&progress), Some(&tx));
+    // Ensure progress reaches total so reporter thread exits
+    progress.store(total_seeds, Ordering::Relaxed);
 
     let n_solvable = population.len();
     if tx
@@ -255,13 +446,11 @@ pub fn run_ga(
             offspring_levels.push(child_level);
         }
 
-        // Evaluate non-elite offspring in parallel
-        let non_elite = &offspring_levels[n_elite..];
+        // Evaluate non-elite offspring
+        let non_elite: Vec<Level> = offspring_levels[n_elite..].to_vec();
         let n_evaluated = non_elite.len();
-        let evaluated: Vec<Individual> = non_elite
-            .par_iter()
-            .filter_map(|level| evaluate(level, &fitness_expr))
-            .collect();
+        let evaluated =
+            evaluate_batch(&non_elite, &fitness_expr, policy_client.as_mut(), None, Some(&tx));
         let n_solvable_gen = evaluated.len();
 
         let mut new_pop: Vec<Individual> = Vec::with_capacity(config.pop_size);
