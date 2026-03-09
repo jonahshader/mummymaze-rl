@@ -245,34 +245,9 @@ impl Drop for PolicyClient {
 
 /// Extract the observation data from a Level that the policy server needs.
 fn extract_level_obs_data(level: &Level) -> LevelObsData {
-    let n = level.grid_size as usize;
-    let n1 = n + 1;
-
-    // Convert cell bitmasks to edge arrays
-    let mut h_walls = vec![0u8; n1 * n];
-    let mut v_walls = vec![0u8; n * n1];
-
-    for r in 0..n {
-        for c in 0..n {
-            let w = level.walls[c + r * 10];
-            // WALL_N on cell (r,c) means h_wall at row r (above cell)
-            if w & crate::parse::WALL_N != 0 {
-                h_walls[r * n + c] = 1;
-            }
-            // WALL_S on cell (r,c) means h_wall at row r+1 (below cell)
-            if w & crate::parse::WALL_S != 0 {
-                h_walls[(r + 1) * n + c] = 1;
-            }
-            // WALL_W on cell (r,c) means v_wall at col c (left of cell)
-            if w & crate::parse::WALL_W != 0 {
-                v_walls[r * n1 + c] = 1;
-            }
-            // WALL_E on cell (r,c) means v_wall at col c+1 (right of cell)
-            if w & crate::parse::WALL_E != 0 {
-                v_walls[r * n1 + (c + 1)] = 1;
-            }
-        }
-    }
+    let (h_bools, v_bools) = level.to_edges();
+    let h_walls: Vec<u8> = h_bools.into_iter().map(|b| b as u8).collect();
+    let v_walls: Vec<u8> = v_bools.into_iter().map(|b| b as u8).collect();
 
     let has_key_gate = level.has_gate;
 

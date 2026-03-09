@@ -14,6 +14,14 @@ from src.env.obs import observe
 from src.env.types import EnvState
 
 
+def decode_action_masks(action_masks_raw: bytes) -> np.ndarray:
+  """Decode action bitmasks (u8 per state) to soft label vectors (n, 5) float32."""
+  masks_np = np.frombuffer(action_masks_raw, dtype=np.uint8).astype(np.int32)
+  bits = ((masks_np[:, None] >> np.arange(5)[None, :]) & 1).astype(np.float32)
+  counts = np.maximum(bits.sum(axis=1, keepdims=True), 1)
+  return bits / counts
+
+
 @dataclass(frozen=True)
 class BCDataset:
   """Behavioral cloning dataset for one grid_size."""
@@ -159,13 +167,7 @@ def load_bc_dataset(
     # Convert state tuples to numpy array (vectorized)
     tuples_np = np.array(states, dtype=np.int32).reshape(n, 12)
 
-    # Convert action bitmasks to soft label vectors (vectorized)
-    # PyO3 returns Vec<u8> as Python bytes; use frombuffer to decode
-    masks_np = np.frombuffer(action_masks_raw, dtype=np.uint8).astype(np.int32)
-    bits = ((masks_np[:, None] >> np.arange(5)[None, :]) & 1).astype(np.float32)
-    counts = bits.sum(axis=1, keepdims=True)
-    counts = np.maximum(counts, 1)  # avoid division by zero
-    targets_np = bits / counts
+    targets_np = decode_action_masks(action_masks_raw)
 
     if grid_size not in gs_tuples:
       gs_tuples[grid_size] = []

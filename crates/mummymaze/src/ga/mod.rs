@@ -3,6 +3,7 @@
 //! Mutates existing levels to find configurations that are solvable (BFS finds a
 //! solution) but difficult (low win probability under uniform-random policy).
 
+pub mod archive;
 pub mod crossover;
 pub mod fitness;
 pub mod mutation;
@@ -30,6 +31,7 @@ pub struct Individual {
     pub bfs_moves: u32,
     pub n_states: usize,
     pub win_prob: f64,
+    pub log_policy_win_prob: f64,
     pub fitness: f64,
 }
 
@@ -125,6 +127,10 @@ pub enum GaMessage {
         n_solvable: usize,
     },
     Generation(GenerationResult),
+    ArchiveUpdate {
+        occupancy: usize,
+        total_cells: usize,
+    },
     Done,
     Error(String),
 }
@@ -178,6 +184,7 @@ fn finalize(result: EvalResult, fitness_expr: &FitnessExpr) -> Individual {
         bfs_moves: result.bfs_moves,
         n_states: result.n_states,
         win_prob: result.win_prob,
+        log_policy_win_prob: result.vars.log_policy_win_prob,
         fitness,
     }
 }
@@ -244,17 +251,9 @@ fn evaluate_batch(
 
                         let chain =
                             MarkovChain::from_graph_with_policy(&result.graph, &policy);
-                        // Use log-space solver to avoid f64 underflow on hard levels,
-                        // then recover linear probability.
-                        let (policy_wp, log_policy_wp) = match chain.solve_log_win_probs() {
-                            Ok(lp) => {
-                                let log_p = chain
-                                    .start_idx
-                                    .map_or(f64::NEG_INFINITY, |i| lp[i]);
-                                (10.0f64.powf(log_p).max(0.0), log_p)
-                            }
-                            Err(_) => (0.0, f64::NEG_INFINITY),
-                        };
+                        let (policy_wp, log_policy_wp) = chain
+                            .start_log_win_prob()
+                            .unwrap_or((0.0, f64::NEG_INFINITY));
                         result.vars.set_policy_win_prob(policy_wp, log_policy_wp);
                     }
                 }
@@ -293,7 +292,7 @@ pub fn run_ga(
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
 ) {
-    run_ga_inner(config, seed_levels, tx, stop_flag, None);
+    run_ga_inner(config, seed_levels, tx, stop_flag, None, None);
 }
 
 /// Run the GA with a policy server for policy_win_prob evaluation.
@@ -304,7 +303,38 @@ pub fn run_ga_with_policy(
     stop_flag: Arc<AtomicBool>,
     policy_client: PolicyClient,
 ) {
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(policy_client));
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(policy_client), None);
+}
+
+/// Run the GA with a policy server and MAP-Elites archive.
+/// Returns the final archive.
+pub fn run_ga_with_archive(
+    config: &GaConfig,
+    seed_levels: Vec<Level>,
+    tx: Sender<GaMessage>,
+    stop_flag: Arc<AtomicBool>,
+    policy_client: PolicyClient,
+    archive: archive::MapElitesArchive,
+) -> archive::MapElitesArchive {
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(policy_client), Some(archive)).unwrap()
+}
+
+/// Insert individuals into archive (if present) and send update message.
+fn archive_insert_batch(
+    archive: &mut Option<archive::MapElitesArchive>,
+    individuals: &[Individual],
+    tx: &Sender<GaMessage>,
+) {
+    if let Some(arch) = archive {
+        for ind in individuals {
+            arch.try_insert(ind);
+        }
+        let (occ, total) = arch.occupancy();
+        let _ = tx.send(GaMessage::ArchiveUpdate {
+            occupancy: occ,
+            total_cells: total,
+        });
+    }
 }
 
 fn run_ga_inner(
@@ -313,12 +343,13 @@ fn run_ga_inner(
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
     mut policy_client: Option<PolicyClient>,
-) {
+    mut archive: Option<archive::MapElitesArchive>,
+) -> Option<archive::MapElitesArchive> {
     let fitness_expr = match FitnessExpr::parse(&config.fitness_expr) {
         Ok(f) => f,
         Err(e) => {
             let _ = tx.send(GaMessage::Error(format!("Bad fitness expression: {e}")));
-            return;
+            return archive;
         }
     };
 
@@ -327,7 +358,7 @@ fn run_ga_inner(
             "Fitness expression uses policy_win_prob but no policy checkpoint is configured"
                 .to_string(),
         ));
-        return;
+        return archive;
     }
 
     let mut rng = StdRng::seed_from_u64(config.seed);
@@ -368,15 +399,18 @@ fn run_ga_inner(
         })
         .is_err()
     {
-        return;
+        return archive;
     }
 
     if population.is_empty() {
         let _ = tx.send(GaMessage::Error(
             "No solvable seed levels found".to_string(),
         ));
-        return;
+        return archive;
     }
+
+    // Insert seeds into archive
+    archive_insert_batch(&mut archive, &population, &tx);
 
     // Sort by fitness descending, take top pop_size
     population.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
@@ -442,6 +476,9 @@ fn run_ga_inner(
             new_pop.push(best_ever.clone());
         }
 
+        // Insert new offspring into archive
+        archive_insert_batch(&mut archive, &new_pop[n_elite..], &tx);
+
         population = new_pop;
         population.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
 
@@ -467,9 +504,10 @@ fn run_ga_inner(
             }))
             .is_err()
         {
-            return;
+            return archive;
         }
     }
 
     let _ = tx.send(GaMessage::Done);
+    archive
 }

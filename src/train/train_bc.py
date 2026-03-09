@@ -245,95 +245,26 @@ def _parse_rust_levels(
   return result  # type: ignore[return-value]
 
 
-def train(
+def train_epochs(
+  model: MazeCNN,
+  opt_state: optax.OptState,
+  optimizer: optax.GradientTransformation,
+  datasets: dict[int, BCDataset],
+  sources: dict[int, list[tuple[str, int]]],
+  *,
+  epochs: int,
+  batch_size: int,
+  checkpoint_dir: Path,
+  reporter: FileReporter | StdioReporter,
   maze_dir: Path,
-  epochs: int = 10,
-  batch_size: int = 1024,
-  lr: float = 3e-4,
-  seed: int = 0,
+  key: jax.Array,
+  epoch_offset: int = 0,
+  step_offset: int = 0,
   wandb_project: str | None = None,
-  metrics_path: Path = Path("level_metrics.json"),
-  checkpoint_dir: Path = Path("checkpoints"),
-  reporter: FileReporter | StdioReporter | None = None,
-) -> MazeCNN:
-  """Main training loop."""
-  if reporter is None:
-    reporter = FileReporter(metrics_path)
-
+  run_id: str = "bc-cnn",
+) -> tuple[MazeCNN, optax.OptState, int, jax.Array]:
+  """Run training epochs. Returns (model, opt_state, final_step, key)."""
   use_tqdm = isinstance(reporter, FileReporter)
-  key = jr.key(seed)
-
-  # Load dataset
-  if use_tqdm:
-    print("Loading dataset...")
-  t0 = time.time()
-  datasets, sources = load_bc_dataset(maze_dir)
-  if use_tqdm:
-    print(f"Dataset loaded in {time.time() - t0:.1f}s")
-    for gs, ds in sorted(datasets.items()):
-      n_train = int(ds.train_mask.sum())
-      n_val = int(ds.val_mask.sum())
-      print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
-
-  # Initialize model
-  key, model_key = jr.split(key)
-  model = MazeCNN(model_key)
-  n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
-  if use_tqdm:
-    print(f"Model: {n_params:,} parameters")
-
-  # Optimizer
-  total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
-  steps_per_epoch = sum(
-    int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
-  )
-  total_steps = steps_per_epoch * epochs
-
-  schedule = optax.warmup_cosine_decay_schedule(
-    init_value=lr * 0.1,
-    peak_value=lr,
-    warmup_steps=min(500, total_steps // 10),
-    decay_steps=total_steps,
-    end_value=lr * 0.01,
-  )
-  optimizer = optax.chain(
-    optax.clip_by_global_norm(1.0),
-    optax.adam(schedule),
-  )
-  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-
-  # wandb init
-  run_id = f"bc-cnn-{seed}"
-  if wandb_project is not None:
-    import wandb
-
-    wandb.init(
-      project=wandb_project,
-      name=run_id,
-      config={
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "lr": lr,
-        "seed": seed,
-        "n_params": n_params,
-        "total_train_states": total_train_states,
-      },
-    )
-
-  # Report init
-  reporter.report_init(
-    {
-      "n_params": n_params,
-      "epochs": epochs,
-      "batch_size": batch_size,
-      "lr": lr,
-      "seed": seed,
-      "datasets": {
-        str(gs): {"n_states": ds.n_states, "n_levels": ds.n_levels}
-        for gs, ds in datasets.items()
-      },
-    }
-  )
 
   # Pre-extract train/val indices per grid_size
   train_indices: dict[int, Int[Array, "n_train"]] = {}
@@ -351,26 +282,32 @@ def train(
       )
     )
 
-  # Pre-allocate logits buffers for accumulation (~56MB total)
+  # Pre-allocate logits buffers for accumulation
   logits_buffers: dict[int, np.ndarray] = {}
   for gs, ds in datasets.items():
     logits_buffers[gs] = np.zeros((ds.n_states, 5), dtype=np.float32)
 
   jitted_grid_sizes: set[int] = set()
 
-  global_step = 0
+  global_step = step_offset
   stop_requested = False
+
+  steps_per_epoch = sum(
+    int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
+  )
   if use_tqdm:
+    total_steps = steps_per_epoch * epochs
     print(f"\nTraining for {epochs} epochs ({total_steps} steps)...")
 
-  for epoch in range(epochs):
+  for epoch_rel in range(epochs):
     if stop_requested:
       break
 
+    epoch = epoch_offset + epoch_rel
     epoch_t0 = time.time()
     epoch_losses: list[float] = []
     epoch_accs: list[float] = []
-    reporter.report_epoch_start(epoch + 1, epochs, steps_per_epoch)
+    reporter.report_epoch_start(epoch + 1, epoch_offset + epochs, steps_per_epoch)
 
     # Build train batches across all grid sizes for a single progress bar
     # Each entry: (grid_size, jax_indices, numpy_indices_for_scatter)
@@ -391,7 +328,8 @@ def train(
         train_batches.append((gs, shuffled[slc], shuffled_np[slc]))
 
     if use_tqdm:
-      pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{epochs}", unit="batch")
+      total_epochs = epoch_offset + epochs
+      pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{total_epochs}", unit="batch")
     else:
       pbar = train_batches
     epoch_step = 0
@@ -438,7 +376,6 @@ def train(
             "train/loss": loss_val,
             "train/accuracy": acc_val,
             "train/grid_size": gs,
-            "lr": float(schedule(global_step)),  # type: ignore[arg-type]
           },
           step=global_step,
         )
@@ -598,8 +535,115 @@ def train(
       print(f"  Wrote {probs_path}")
 
     reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
-    if use_tqdm:
-      print(f"  Wrote {metrics_path}")
+
+  return model, opt_state, global_step, key
+
+
+def train(
+  maze_dir: Path,
+  epochs: int = 10,
+  batch_size: int = 1024,
+  lr: float = 3e-4,
+  seed: int = 0,
+  wandb_project: str | None = None,
+  metrics_path: Path = Path("level_metrics.json"),
+  checkpoint_dir: Path = Path("checkpoints"),
+  reporter: FileReporter | StdioReporter | None = None,
+) -> MazeCNN:
+  """Main training loop."""
+  if reporter is None:
+    reporter = FileReporter(metrics_path)
+
+  use_tqdm = isinstance(reporter, FileReporter)
+  key = jr.key(seed)
+
+  # Load dataset
+  if use_tqdm:
+    print("Loading dataset...")
+  t0 = time.time()
+  datasets, sources = load_bc_dataset(maze_dir)
+  if use_tqdm:
+    print(f"Dataset loaded in {time.time() - t0:.1f}s")
+    for gs, ds in sorted(datasets.items()):
+      n_train = int(ds.train_mask.sum())
+      n_val = int(ds.val_mask.sum())
+      print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
+
+  # Initialize model
+  key, model_key = jr.split(key)
+  model = MazeCNN(model_key)
+  n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
+  if use_tqdm:
+    print(f"Model: {n_params:,} parameters")
+
+  # Optimizer
+  total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
+  steps_per_epoch = sum(
+    int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
+  )
+  total_steps = steps_per_epoch * epochs
+
+  schedule = optax.warmup_cosine_decay_schedule(
+    init_value=lr * 0.1,
+    peak_value=lr,
+    warmup_steps=min(500, total_steps // 10),
+    decay_steps=total_steps,
+    end_value=lr * 0.01,
+  )
+  optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),
+    optax.adam(schedule),
+  )
+  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
+  # wandb init
+  run_id = f"bc-cnn-{seed}"
+  if wandb_project is not None:
+    import wandb
+
+    wandb.init(
+      project=wandb_project,
+      name=run_id,
+      config={
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "lr": lr,
+        "seed": seed,
+        "n_params": n_params,
+        "total_train_states": total_train_states,
+      },
+    )
+
+  # Report init
+  reporter.report_init(
+    {
+      "n_params": n_params,
+      "epochs": epochs,
+      "batch_size": batch_size,
+      "lr": lr,
+      "seed": seed,
+      "datasets": {
+        str(gs): {"n_states": ds.n_states, "n_levels": ds.n_levels}
+        for gs, ds in datasets.items()
+      },
+    }
+  )
+
+  model, _opt_state, _final_step, _key = train_epochs(
+    model,
+    opt_state,
+    optimizer,
+    datasets,
+    sources,
+    epochs=epochs,
+    batch_size=batch_size,
+    checkpoint_dir=checkpoint_dir,
+    reporter=reporter,
+    maze_dir=maze_dir,
+    key=key,
+    wandb_project=wandb_project,
+    run_id=run_id,
+  )
 
   reporter.report_done()
 

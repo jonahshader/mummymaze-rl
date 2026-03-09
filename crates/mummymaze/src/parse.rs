@@ -565,6 +565,52 @@ impl Level {
         }
     }
 
+    /// Convert internal wall bitmasks to edge arrays.
+    ///
+    /// Returns `(h_walls, v_walls)`:
+    /// * `h_walls` — `(n+1) * n` bools, `h_walls[r * n + c]` = wall on top edge of `(r, c)`.
+    /// * `v_walls` — `n * (n+1)` bools, `v_walls[r * (n+1) + c]` = wall on left edge of `(r, c)`.
+    pub fn to_edges(&self) -> (Vec<bool>, Vec<bool>) {
+        let n = self.grid_size;
+        let mut h_walls = vec![false; ((n + 1) * n) as usize];
+        let mut v_walls = vec![false; (n * (n + 1)) as usize];
+
+        for r in 0..n {
+            for c in 0..n {
+                let w = self.walls[(c + r * 10) as usize];
+                if w & WALL_N != 0 {
+                    h_walls[(r * n + c) as usize] = true;
+                }
+                if w & WALL_S != 0 {
+                    h_walls[((r + 1) * n + c) as usize] = true;
+                }
+                if w & WALL_W != 0 {
+                    v_walls[(r * (n + 1) + c) as usize] = true;
+                }
+                if w & WALL_E != 0 {
+                    v_walls[(r * (n + 1) + (c + 1)) as usize] = true;
+                }
+            }
+        }
+        (h_walls, v_walls)
+    }
+
+    /// Exit side as a string: `"N"`, `"S"`, `"E"`, or `"W"`.
+    pub fn exit_side_str(&self) -> &'static str {
+        if self.exit_mask & EXIT_N != 0 { "N" }
+        else if self.exit_mask & EXIT_S != 0 { "S" }
+        else if self.exit_mask & EXIT_W != 0 { "W" }
+        else { "E" }
+    }
+
+    /// Position along the exit side (column for N/S, row for E/W).
+    pub fn exit_pos(&self) -> i32 {
+        match self.exit_side_str() {
+            "N" | "S" => self.exit_col,
+            _ => self.exit_row,
+        }
+    }
+
     /// Apply a dihedral symmetry transform.
     ///
     /// `sym` is 0..8 for the 8 elements of the dihedral group D4:

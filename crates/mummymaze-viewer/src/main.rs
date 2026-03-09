@@ -400,7 +400,7 @@ impl eframe::App for App {
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.selectable_value(&mut self.right_tab, RightTab::Graph, "Graph");
                 ui.selectable_value(&mut self.right_tab, RightTab::Training, "Training");
-                ui.selectable_value(&mut self.right_tab, RightTab::Adversarial, "Adversarial");
+                ui.selectable_value(&mut self.right_tab, RightTab::Adversarial, "Level Gen");
                 let log_label = if self.store.log_messages.is_empty() {
                     "Logs".to_string()
                 } else {

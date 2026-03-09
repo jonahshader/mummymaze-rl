@@ -168,6 +168,62 @@ impl PyLevel {
             l.grid_size, l.flip, l.player_row, l.player_col, l.mummy1_row, l.mummy1_col,
         )
     }
+
+    /// Serialize level to a Python dict (all fields).
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let l = &self.inner;
+        let dict = PyDict::new(py);
+        dict.set_item("grid_size", l.grid_size)?;
+        dict.set_item("flip", l.flip)?;
+
+        let (h_walls, v_walls) = l.to_edges();
+        dict.set_item("h_walls", h_walls)?;
+        dict.set_item("v_walls", v_walls)?;
+        dict.set_item("exit_side", l.exit_side_str())?;
+        dict.set_item("exit_pos", l.exit_pos())?;
+
+        dict.set_item("player", (l.player_row, l.player_col))?;
+        dict.set_item("mummy1", (l.mummy1_row, l.mummy1_col))?;
+        dict.set_item("mummy2", if l.has_mummy2 { Some((l.mummy2_row, l.mummy2_col)) } else { None })?;
+        dict.set_item("scorpion", if l.has_scorpion { Some((l.scorpion_row, l.scorpion_col)) } else { None })?;
+
+        let mut traps: Vec<(i32, i32)> = Vec::new();
+        if l.trap_count >= 1 { traps.push((l.trap1_row, l.trap1_col)); }
+        if l.trap_count >= 2 { traps.push((l.trap2_row, l.trap2_col)); }
+        dict.set_item("traps", traps)?;
+
+        dict.set_item("gate", if l.has_gate { Some((l.gate_row, l.gate_col)) } else { None })?;
+        dict.set_item("key", if l.has_gate { Some((l.key_row, l.key_col)) } else { None })?;
+
+        Ok(dict)
+    }
+
+    /// Reconstruct a Level from a dict (as returned by to_dict).
+    #[staticmethod]
+    #[pyo3(signature = (d,))]
+    fn from_dict(d: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let grid_size: i32 = d.get_item("grid_size")?.unwrap().extract()?;
+        let flip: bool = d.get_item("flip")?.unwrap().extract()?;
+        let h_walls: Vec<bool> = d.get_item("h_walls")?.unwrap().extract()?;
+        let v_walls: Vec<bool> = d.get_item("v_walls")?.unwrap().extract()?;
+        let exit_side: String = d.get_item("exit_side")?.unwrap().extract()?;
+        let exit_pos: i32 = d.get_item("exit_pos")?.unwrap().extract()?;
+        let player: (i32, i32) = d.get_item("player")?.unwrap().extract()?;
+        let mummy1: (i32, i32) = d.get_item("mummy1")?.unwrap().extract()?;
+        let mummy2: Option<(i32, i32)> = d.get_item("mummy2")?.unwrap().extract()?;
+        let scorpion: Option<(i32, i32)> = d.get_item("scorpion")?.unwrap().extract()?;
+        let traps: Vec<(i32, i32)> = d.get_item("traps")?.unwrap().extract()?;
+        let gate: Option<(i32, i32)> = d.get_item("gate")?.unwrap().extract()?;
+        let key: Option<(i32, i32)> = d.get_item("key")?.unwrap().extract()?;
+
+        Ok(PyLevel {
+            inner: Level::from_edges(
+                grid_size, flip, &h_walls, &v_walls,
+                &exit_side, exit_pos, player, mummy1,
+                mummy2, scorpion, &traps, gate, key,
+            ),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,8 +330,9 @@ fn policy_win_prob(
 
     let graph = crate::graph::build_graph(&level.inner);
     let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
-    match chain.solve_win_probs_tol(1e-10, 200_000) {
-        Ok(win_probs) => Ok(chain.start_idx.map_or(0.0, |i| win_probs[i])),
+    // Use log-space solver — always converges, even for very low win probs.
+    match chain.start_log_win_prob() {
+        Ok((wp, _log_p)) => Ok(wp),
         Err(_) => Ok(f64::NAN),
     }
 }
@@ -348,6 +405,15 @@ fn solve_all_actions(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Ve
     Ok(out)
 }
 
+/// Set "states" and "action_masks" on a dict from a state-actions list.
+fn set_state_actions(dict: &Bound<'_, PyDict>, state_actions: &[(crate::game::State, u8)]) -> PyResult<()> {
+    let states: Vec<StateTuple> = state_actions.iter().map(|(s, _)| state_to_tuple(s)).collect();
+    dict.set_item("states", states)?;
+    let masks: Vec<u8> = state_actions.iter().map(|(_, m)| *m).collect();
+    dict.set_item("action_masks", masks)?;
+    Ok(())
+}
+
 /// Compute best (distance-reducing) actions for every winnable state across all levels.
 /// Releases the GIL, uses rayon internally.
 #[pyfunction]
@@ -364,16 +430,7 @@ fn best_actions_all(py: Python<'_>, maze_dir: &str, jobs: usize) -> PyResult<Vec
         dict.set_item("file", stem)?;
         dict.set_item("sublevel", sub_idx)?;
         dict.set_item("grid_size", grid_size)?;
-
-        let states: Vec<StateTuple> = state_actions
-            .iter()
-            .map(|(s, _)| state_to_tuple(s))
-            .collect();
-        dict.set_item("states", states)?;
-
-        let masks: Vec<u8> = state_actions.iter().map(|(_, m)| *m).collect();
-        dict.set_item("action_masks", masks)?;
-
+        set_state_actions(&dict, state_actions)?;
         out.push(dict.into());
     }
     Ok(out)
@@ -443,6 +500,170 @@ fn fitness_presets() -> Vec<(&'static str, &'static str)> {
 }
 
 // ---------------------------------------------------------------------------
+// Best actions for arbitrary level lists
+// ---------------------------------------------------------------------------
+
+/// Compute best (distance-reducing) actions for every winnable state in a list of levels.
+/// Returns dicts with `level_idx`, `grid_size`, `states`, `action_masks` (no `file`/`sublevel`).
+#[pyfunction]
+#[pyo3(signature = (levels,))]
+fn best_actions_for_levels(py: Python<'_>, levels: Vec<PyRef<'_, PyLevel>>) -> PyResult<Vec<PyObject>> {
+    use crate::graph::build_graph as bg;
+    use rayon::prelude::*;
+
+    let inner_levels: Vec<&Level> = levels.iter().map(|l| &l.inner).collect();
+
+    let results: Vec<Option<(i32, Vec<(crate::game::State, u8)>)>> = py.allow_threads(|| {
+        inner_levels
+            .par_iter()
+            .map(|lev| {
+                let graph = bg(lev);
+                let optimal = graph.best_actions_per_state();
+                if optimal.is_empty() {
+                    None
+                } else {
+                    Some((lev.grid_size, optimal))
+                }
+            })
+            .collect()
+    });
+
+    let mut out = Vec::new();
+    for (i, result) in results.into_iter().enumerate() {
+        if let Some((grid_size, state_actions)) = result {
+            let dict = PyDict::new(py);
+            dict.set_item("level_idx", i)?;
+            dict.set_item("grid_size", grid_size)?;
+            set_state_actions(&dict, &state_actions)?;
+            out.push(dict.into());
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// GA round (synchronous, for adversarial loop)
+// ---------------------------------------------------------------------------
+
+/// Run one GA round with policy evaluation and MAP-Elites archive.
+///
+/// Args:
+///     seed_levels: list of Level objects to seed the GA
+///     config: dict with GA configuration (grid_size, pop_size, generations, etc.)
+///     checkpoint_path: path to policy checkpoint for policy_win_prob evaluation
+///     target_log_wp: target log10(policy_win_prob) for archive insertion
+///     archive_bfs_range: (min, max) BFS moves range
+///     archive_states_range: (min, max) n_states range
+///     archive_bfs_bins: number of BFS bins
+///     archive_states_bins: number of n_states bins
+///
+/// Returns: list of dicts for archive levels, each with
+///     {"level": Level, "bfs_moves": int, "n_states": int, "win_prob": float,
+///      "log_policy_win_prob": float, "fitness": float}
+#[pyfunction]
+#[pyo3(signature = (seed_levels, config, checkpoint_path, target_log_wp,
+                    archive_bfs_range=(1, 50), archive_states_range=(1, 500),
+                    archive_bfs_bins=20, archive_states_bins=20))]
+fn run_ga_round(
+    py: Python<'_>,
+    seed_levels: Vec<PyRef<'_, PyLevel>>,
+    config: &Bound<'_, PyDict>,
+    checkpoint_path: &str,
+    target_log_wp: f64,
+    archive_bfs_range: (usize, usize),
+    archive_states_range: (usize, usize),
+    archive_bfs_bins: usize,
+    archive_states_bins: usize,
+) -> PyResult<Vec<PyObject>> {
+    use crate::ga::{self, archive::MapElitesArchive, GaConfig};
+    use crate::policy_client::PolicyClient;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    let get_f64 = |key: &str, default: f64| -> f64 {
+        config.get_item(key).ok().flatten().and_then(|v| v.extract().ok()).unwrap_or(default)
+    };
+    let get_usize = |key: &str, default: usize| -> usize {
+        config.get_item(key).ok().flatten().and_then(|v| v.extract().ok()).unwrap_or(default)
+    };
+    let get_u64 = |key: &str, default: u64| -> u64 {
+        config.get_item(key).ok().flatten().and_then(|v| v.extract().ok()).unwrap_or(default)
+    };
+    let get_str = |key: &str, default: &str| -> String {
+        config.get_item(key).ok().flatten().and_then(|v| v.extract().ok()).unwrap_or_else(|| default.to_string())
+    };
+
+    let ga_config = GaConfig {
+        grid_size: get_f64("grid_size", 6.0) as i32,
+        pop_size: get_usize("pop_size", 64),
+        generations: get_usize("generations", 50),
+        elite_frac: get_f64("elite_frac", 0.1),
+        crossover_rate: get_f64("crossover_rate", 0.2),
+        crossover_mode: ga::CrossoverMode::SwapEntities,
+        seed: get_u64("seed", 42),
+        w_wall: get_f64("w_wall", 5.0),
+        w_move_entity: get_f64("w_move_entity", 3.0),
+        w_move_player: get_f64("w_move_player", 2.0),
+        w_add_entity: get_f64("w_add_entity", 1.0),
+        w_remove_entity: get_f64("w_remove_entity", 1.0),
+        w_move_exit: get_f64("w_move_exit", 1.0),
+        extra_wall_prob: get_f64("extra_wall_prob", 0.3),
+        fitness_expr: get_str("fitness_expr", crate::ga::fitness::PRESET_POLICY),
+    };
+
+    let levels: Vec<Level> = seed_levels.iter().map(|l| l.inner.clone()).collect();
+
+    let archive = MapElitesArchive::new(
+        archive_bfs_range,
+        archive_states_range,
+        archive_bfs_bins,
+        archive_states_bins,
+        target_log_wp,
+    );
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let checkpoint = checkpoint_path.to_string();
+
+    // Run GA synchronously, releasing the GIL
+    let final_archive = py.allow_threads(move || {
+        let (tx, rx) = mpsc::channel();
+
+        let policy_client = PolicyClient::spawn(
+            std::path::Path::new(&checkpoint),
+        ).expect("Failed to start policy server");
+
+        let archive = ga::run_ga_with_archive(
+            &ga_config,
+            levels,
+            tx,
+            stop_flag,
+            policy_client,
+            archive,
+        );
+
+        // Drain messages
+        while rx.try_recv().is_ok() {}
+
+        archive
+    });
+
+    // Convert archive individuals to Python dicts
+    let mut out = Vec::new();
+    for ind in final_archive.all_individuals() {
+        let dict = PyDict::new(py);
+        dict.set_item("level", Py::new(py, PyLevel { inner: ind.level.clone() })?)?;
+        dict.set_item("bfs_moves", ind.bfs_moves)?;
+        dict.set_item("n_states", ind.n_states)?;
+        dict.set_item("win_prob", ind.win_prob)?;
+        dict.set_item("log_policy_win_prob", ind.log_policy_win_prob)?;
+        dict.set_item("fitness", ind.fitness)?;
+        out.push(dict.into());
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -462,5 +683,7 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eval_fitness, m)?)?;
     m.add_function(wrap_pyfunction!(fitness_variables, m)?)?;
     m.add_function(wrap_pyfunction!(fitness_presets, m)?)?;
+    m.add_function(wrap_pyfunction!(best_actions_for_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(run_ga_round, m)?)?;
     Ok(())
 }

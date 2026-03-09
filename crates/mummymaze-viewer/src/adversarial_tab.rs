@@ -128,6 +128,7 @@ impl AdversarialState {
                     self.status = GaStatus::Starting(s);
                 }
                 GaMessage::SeedsDone { .. } => {}
+                GaMessage::ArchiveUpdate { .. } => {}
                 GaMessage::Generation(result) => {
                     self.history
                         .push((result.generation, result.best.fitness, result.avg_fitness));

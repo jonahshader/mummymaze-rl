@@ -359,6 +359,15 @@ impl MarkovChain {
             .collect())
     }
 
+    /// Solve for the start state's win probability using the log-space solver.
+    ///
+    /// Returns `(win_prob, log10_win_prob)`. Always converges.
+    pub fn start_log_win_prob(&self) -> Result<(f64, f64)> {
+        let log_wp = self.solve_log_win_probs()?;
+        let log_p = self.start_idx.map_or(f64::NEG_INFINITY, |i| log_wp[i]);
+        Ok((10.0f64.powf(log_p).max(0.0), log_p))
+    }
+
     /// Run Gauss-Seidel with a given RHS vector (scaled win_absorb).
     /// Falls back to direct Gaussian elimination if iterative solver fails to converge.
     fn solve_with_rhs(&self, win_absorb: &[f64]) -> Result<Vec<f64>> {

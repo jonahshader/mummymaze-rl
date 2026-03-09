@@ -283,11 +283,12 @@ pub fn policy_win_prob_batch(
 
             let graph = build_graph(lev);
             let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
-            match chain.solve_win_probs_tol(1e-10, 200_000) {
-                Ok(win_probs) => Ok(chain.start_idx.map_or(0.0, |i| win_probs[i])),
+            // Use log-space solver — always converges, even for very low win probs.
+            match chain.start_log_win_prob() {
+                Ok((wp, _log_p)) => Ok(wp),
                 Err(_) => {
                     eprintln!(
-                        "WARNING: Markov solver failed to converge for level {} ({} states)",
+                        "WARNING: log Markov solver failed for level {} ({} states)",
                         i, chain.n_states()
                     );
                     Ok(f64::NAN)
