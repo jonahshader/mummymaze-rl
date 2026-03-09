@@ -98,11 +98,10 @@ impl FitnessVars {
         self
     }
 
-    /// Set policy win prob (from policy server evaluation).
-    pub fn with_policy_win_prob(mut self, p: f64, log_p: f64) -> Self {
+    /// Set policy win prob in-place (from policy server evaluation).
+    pub fn set_policy_win_prob(&mut self, p: f64, log_p: f64) {
         self.policy_win_prob = p;
         self.log_policy_win_prob = log_p;
-        self
     }
 
     /// Look up a variable by name.

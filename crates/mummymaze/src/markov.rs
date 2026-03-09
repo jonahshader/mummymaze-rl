@@ -14,6 +14,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 const MAX_ITERATIONS: usize = 100_000;
 const TOLERANCE: f64 = 1e-12;
+/// Threshold for detecting trapped states (all-self-loop diagonal ≈ 0).
+/// Looser than PIVOT_ZERO because diag values accumulate float rounding error.
+const TRAPPED_THRESHOLD: f64 = 1e-15;
+/// Threshold below which a pivot or normalization sum is treated as zero.
+const PIVOT_ZERO: f64 = 1e-30;
 
 /// Sparse representation of an absorbing Markov chain built from a state graph.
 ///
@@ -97,7 +102,7 @@ impl MarkovChain {
 
         let mut trapped = vec![false; n];
         for i in 0..n {
-            if diag[i].abs() < 1e-15 {
+            if diag[i].abs() < TRAPPED_THRESHOLD {
                 trapped[i] = true;
             }
         }
@@ -191,7 +196,7 @@ impl MarkovChain {
                 return uniform;
             };
             let sum = sums[state];
-            if sum > 1e-30 {
+            if sum > PIVOT_ZERO {
                 raw[action.to_index() as usize] / sum
             } else {
                 uniform
@@ -417,7 +422,7 @@ impl MarkovChain {
                     max_row = row;
                 }
             }
-            if max_val < 1e-30 {
+            if max_val < PIVOT_ZERO {
                 // Singular column — skip (trapped or degenerate).
                 continue;
             }
@@ -438,7 +443,7 @@ impl MarkovChain {
         // Back substitution.
         let mut x = vec![0.0f64; n];
         for i in (0..n).rev() {
-            if a[i][i].abs() < 1e-30 {
+            if a[i][i].abs() < PIVOT_ZERO {
                 x[i] = 0.0;
                 continue;
             }

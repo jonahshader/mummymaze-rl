@@ -175,12 +175,14 @@ impl PolicyClient {
             .as_mut()
             .ok_or("stdout not available")?;
 
+        let max_states = all_states.iter().map(|s| s.len()).max().unwrap_or(0);
+        let mut buf = vec![0u8; max_states * 5 * 4];
         let mut results = Vec::with_capacity(all_states.len());
         for states in &all_states {
             let n_states = states.len();
-            let mut buf = vec![0u8; n_states * 5 * 4];
+            let n_bytes = n_states * 5 * 4;
             stdout
-                .read_exact(&mut buf)
+                .read_exact(&mut buf[..n_bytes])
                 .map_err(|e| format!("read error: {e}"))?;
 
             let mut level_results = Vec::with_capacity(n_states);

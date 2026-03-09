@@ -137,8 +137,6 @@ struct EvalResult {
     bfs_moves: u32,
     n_states: usize,
     win_prob: f64,
-    #[allow(dead_code)]
-    log_win_prob: f64,
     vars: FitnessVars,
     graph: StateGraph,
 }
@@ -167,7 +165,6 @@ fn evaluate_base(level: &Level, fitness_expr: &FitnessExpr) -> Option<EvalResult
         bfs_moves: moves,
         n_states,
         win_prob,
-        log_win_prob,
         vars,
         graph,
     })
@@ -256,29 +253,9 @@ fn evaluate_batch(
                                     .map_or(f64::NEG_INFINITY, |i| lp[i]);
                                 (10.0f64.powf(log_p).max(0.0), log_p)
                             }
-                            Err(e) => {
-                                eprintln!(
-                                    "WARNING: policy Markov solve failed \
-                                     (n_states={}, start_idx={:?}): {e}",
-                                    chain.n_states(),
-                                    chain.start_idx,
-                                );
-                                (0.0, f64::NEG_INFINITY)
-                            }
+                            Err(_) => (0.0, f64::NEG_INFINITY),
                         };
-                        if log_policy_wp == f64::NEG_INFINITY {
-                            eprintln!(
-                                "DEBUG: log_policy_wp=-inf for level with \
-                                 bfs_moves={}, n_states={}, start_idx={:?}, \
-                                 chain_n_states={}",
-                                result.bfs_moves,
-                                result.n_states,
-                                chain.start_idx,
-                                chain.n_states(),
-                            );
-                        }
-                        result.vars =
-                            result.vars.clone().with_policy_win_prob(policy_wp, log_policy_wp);
+                        result.vars.set_policy_win_prob(policy_wp, log_policy_wp);
                     }
                 }
                 Err(e) => {
@@ -447,10 +424,10 @@ fn run_ga_inner(
         }
 
         // Evaluate non-elite offspring
-        let non_elite: Vec<Level> = offspring_levels[n_elite..].to_vec();
+        let non_elite = &offspring_levels[n_elite..];
         let n_evaluated = non_elite.len();
         let evaluated =
-            evaluate_batch(&non_elite, &fitness_expr, policy_client.as_mut(), None, Some(&tx));
+            evaluate_batch(non_elite, &fitness_expr, policy_client.as_mut(), None, Some(&tx));
         let n_solvable_gen = evaluated.len();
 
         let mut new_pop: Vec<Individual> = Vec::with_capacity(config.pop_size);
