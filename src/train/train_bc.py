@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from jaxtyping import Array, Float, Int
 
+from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
 from src.train.reporter import FileReporter, FrameReporter, StdioReporter
@@ -262,6 +263,8 @@ def train_epochs(
   step_offset: int = 0,
   wandb_project: str | None = None,
   run_id: str = "bc-cnn",
+  arch: str = DEFAULT_ARCH,
+  lr: float = 3e-4,
 ) -> tuple[eqx.Module, optax.OptState, int, jax.Array]:
   """Run training epochs. Returns (model, opt_state, final_step, key)."""
   use_tqdm = isinstance(reporter, FileReporter)
@@ -448,9 +451,18 @@ def train_epochs(
       )
 
     # Checkpoint
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = checkpoint_dir / f"model_epoch{epoch + 1:03d}.eqx"
-    eqx.tree_serialise_leaves(ckpt_path, model)
+    ckpt_path = checkpoint_dir / f"epoch{epoch + 1:03d}"
+    save_checkpoint(
+      ckpt_path,
+      model,
+      opt_state,
+      epoch=epoch + 1,
+      global_step=global_step,
+      arch=arch,
+      key=key,
+      lr=lr,
+      batch_size=batch_size,
+    )
 
     # Compute level metrics
     reporter.report_status("Computing level metrics...")
@@ -599,18 +611,27 @@ def train(
         n_train = int(ds.train_mask.sum())
         print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
 
-  # Initialize model
-  key, model_key = jr.split(key)
-  model = make_model(arch, model_key)
-
-  # Load checkpoint weights if provided
+  # Initialize model (or resume from checkpoint)
   if checkpoint is not None:
     if use_tqdm:
       print(f"Loading checkpoint: {checkpoint}")
-    model = eqx.tree_deserialise_leaves(checkpoint, model)
+    ckpt = load_checkpoint(checkpoint, arch=arch)
+    model = ckpt.model
+    arch = ckpt.arch
+    # Use checkpoint's training state for resume if no explicit offsets given
+    if epoch_offset == 0 and ckpt.epoch > 0:
+      epoch_offset = ckpt.epoch
+    if step_offset == 0 and ckpt.global_step > 0:
+      step_offset = ckpt.global_step
+    if ckpt.key is not None:
+      key = ckpt.key
+  else:
+    key, model_key = jr.split(key)
+    model = make_model(arch, model_key)
+
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
   if use_tqdm:
-    print(f"Model: {n_params:,} parameters")
+    print(f"Model: {arch} ({n_params:,} parameters)")
 
   # Optimizer
   total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
@@ -630,7 +651,12 @@ def train(
     optax.clip_by_global_norm(1.0),
     optax.adam(schedule),
   )
-  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
+  # Restore optimizer state from checkpoint if available
+  if checkpoint is not None and ckpt.has_optimizer:
+    opt_state = ckpt.opt_state
+  else:
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
   # wandb init
   run_id = f"bc-{arch}-{seed}"
@@ -681,6 +707,8 @@ def train(
     step_offset=step_offset,
     wandb_project=wandb_project,
     run_id=run_id,
+    arch=arch,
+    lr=lr,
   )
 
   reporter.report_done()
@@ -719,7 +747,7 @@ def main() -> None:
     "--checkpoint",
     type=Path,
     default=None,
-    help="Load model weights from .eqx file instead of random init",
+    help="Resume from checkpoint (directory or legacy .eqx file)",
   )
   parser.add_argument(
     "--augment-levels",

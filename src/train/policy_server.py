@@ -41,14 +41,14 @@ import functools
 import sys
 from pathlib import Path
 
-import equinox as eqx
 import jax
 import numpy as np
 from scipy.special import softmax as scipy_softmax
 
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
-from src.train.model import DEFAULT_ARCH, make_model
+from src.train.checkpoint import load_model_weights
+from src.train.model import DEFAULT_ARCH
 from src.train.wire import (
   next_power_of_2,
   read_exact,
@@ -68,8 +68,7 @@ def serve(
       and process large levels in chunks. Prevents GPU OOM on huge state graphs.
     arch: Model architecture name from MODEL_REGISTRY.
   """
-  model = make_model(arch, jax.random.key(0))
-  model = eqx.tree_deserialise_leaves(checkpoint_path, model)
+  model = load_model_weights(checkpoint_path, arch=arch)
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def _obs_and_forward(

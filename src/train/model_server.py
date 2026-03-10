@@ -40,6 +40,7 @@ from scipy.special import softmax as scipy_softmax
 
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
+from src.train.checkpoint import load_model_weights
 from src.train.dataset import BCDataset, load_bc_dataset
 from src.train.model import DEFAULT_ARCH, make_model
 from src.train.reporter import (
@@ -101,12 +102,12 @@ class ModelServer:
     self.arch = arch
 
     # Initialize model
-    self.model = make_model(arch, jax.random.key(0))
     if checkpoint is not None and checkpoint.exists():
       _log(f"loading checkpoint: {checkpoint}")
-      self.model = eqx.tree_deserialise_leaves(checkpoint, self.model)
+      self.model = load_model_weights(checkpoint, arch=arch)
     else:
       _log("starting with random initialization")
+      self.model = make_model(arch, jax.random.key(0))
 
     # JIT'd inference function
     @functools.partial(jax.jit, static_argnums=(0,))
@@ -330,6 +331,8 @@ class ModelServer:
       epoch_offset=epoch_offset,
       step_offset=step_offset,
       run_id=run_id,
+      arch=self.arch,
+      lr=lr,
     )
 
     reporter.report_done()
@@ -338,14 +341,14 @@ class ModelServer:
     _log("training complete, model weights updated in-place")
 
   def handle_reload_checkpoint(self, payload: bytes, stdout: BinaryIO) -> None:
-    """Reload model weights from a checkpoint file."""
+    """Reload model weights from a checkpoint (directory or legacy .eqx)."""
     path = Path(payload.decode("utf-8").strip())
     _log(f"reloading checkpoint: {path}")
     if not path.exists():
       msg = f"Checkpoint not found: {path}".encode("utf-8")
       write_frame(stdout, FRAME_TYPE_ERROR, msg)
       return
-    self.model = eqx.tree_deserialise_leaves(path, self.model)
+    self.model = load_model_weights(path, arch=self.arch)
     self._rebind_forward()
     # Acknowledge with a training event
     ack = {"type": "status", "status": f"Reloaded checkpoint: {path}"}

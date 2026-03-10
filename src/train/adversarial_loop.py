@@ -131,19 +131,27 @@ def adversarial_loop(
       epoch_offset=global_epoch,
       step_offset=global_step,
       run_id=f"adversarial-{arch}-r{round_idx}",
+      arch=arch,
+      lr=lr,
     )
     global_epoch += epochs_per_round
 
-    # Save latest checkpoint for GA to reference
-    latest_ckpt = round_ckpt_dir / f"model_epoch{global_epoch:03d}.eqx"
-    if not latest_ckpt.exists():
-      # Find the most recent checkpoint in this round's dir
-      ckpts = sorted(round_ckpt_dir.glob("model_epoch*.eqx"))
-      if ckpts:
-        latest_ckpt = ckpts[-1]
+    # Save latest checkpoint for GA to reference — find model.eqx inside
+    # the checkpoint directory for the last epoch of this round
+    latest_ckpt_dir = round_ckpt_dir / f"epoch{global_epoch:03d}"
+    if latest_ckpt_dir.exists():
+      latest_ckpt = latest_ckpt_dir / "model.eqx"
+    else:
+      # Find the most recent checkpoint directory
+      ckpt_dirs = sorted(round_ckpt_dir.glob("epoch*"))
+      if ckpt_dirs:
+        latest_ckpt = ckpt_dirs[-1] / "model.eqx"
       else:
         print("WARNING: No checkpoint found, skipping GA phase")
         continue
+    if not latest_ckpt.exists():
+      print("WARNING: No model.eqx in checkpoint dir, skipping GA phase")
+      continue
 
     # Skip GA on the last round (no point generating levels we won't train on)
     if round_idx == n_rounds - 1:
