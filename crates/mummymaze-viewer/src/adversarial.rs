@@ -1,14 +1,15 @@
 //! Adversarial training loop state machine.
 //!
 //! Orchestrates: Training(round N) → GA(gs=6) → GA(gs=8) → GA(gs=10) → Training(round N+1) → ...
+//!
+//! Uses a shared `ModelServer` for both training and GA policy evaluation.
 
 use crate::level_gen_tab::latest_checkpoint;
-use crate::data::{EpochRecord, TrainingConfig, TrainingPhase};
-use crate::training_process::{TrainingEvent, TrainingProcess, TrainingSpawnArgs};
+use crate::data::{EpochRecord, TrainingPhase};
 use mummymaze::ga::archive::ArchiveSnapshot;
 use mummymaze::ga::{self, GaConfig, GaMessage};
+use mummymaze::model_server::{ModelServer, TrainingEvent};
 use mummymaze::parse::Level;
-use mummymaze::policy_client::PolicyClient;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -103,7 +104,6 @@ pub struct AdversarialState {
     pub round_boundaries: Vec<usize>,
     pub curve_plot_height: f32,
     // Internal
-    training_process: Option<TrainingProcess>,
     ga_rx: Option<Receiver<GaMessage>>,
     ga_stop_flag: Option<Arc<AtomicBool>>,
     round_archive_levels: Vec<Level>,
@@ -127,7 +127,6 @@ impl AdversarialState {
             archive_occupancy_history: Vec::new(),
             round_boundaries: Vec::new(),
             curve_plot_height: 150.0,
-            training_process: None,
             ga_rx: None,
             ga_stop_flag: None,
             round_archive_levels: Vec::new(),
@@ -140,7 +139,7 @@ impl AdversarialState {
     }
 
     /// Begin the adversarial loop from round 0.
-    pub fn start(&mut self, maze_dir: &Path, rows: &[crate::data::LevelRow]) {
+    pub fn start(&mut self, model_server: &Arc<ModelServer>, rows: &[crate::data::LevelRow]) {
         self.epoch_history.clear();
         self.batch_loss_history.clear();
         self.ga_history.clear();
@@ -154,48 +153,49 @@ impl AdversarialState {
         self.log_messages.clear();
 
         self.checkpoint_dir = PathBuf::from("checkpoints/adversarial");
-        self.start_training_phase(0, maze_dir, rows);
+        self.start_training_phase(0, model_server, rows);
     }
 
-    /// Start a training subprocess for the given round.
+    /// Start a training round via the model server.
     fn start_training_phase(
         &mut self,
         round: usize,
-        maze_dir: &Path,
+        model_server: &Arc<ModelServer>,
         _rows: &[crate::data::LevelRow],
     ) {
         self.round_boundaries.push(self.global_epoch);
 
         let round_ckpt_dir = self.checkpoint_dir.join(format!("round{round:03}"));
-        let training_config = TrainingConfig {
-            epochs: self.config.epochs_per_round,
-            batch_size: self.config.batch_size,
-            lr: self.config.lr,
-            seed: self.config.seed,
-            wandb: false,
-            wandb_project: String::new(),
-        };
 
-        // Build extra args for checkpoint continuation + augmentation
+        // Build archive augmentation path from previous round
         let archive_path = if round > 0 {
             let prev_dir = self.checkpoint_dir.join(format!("round{:03}", round - 1));
             let path = prev_dir.join("archive.json");
-            if path.exists() { Some(path) } else { None }
+            if path.exists() {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        let extra = TrainingSpawnArgs {
-            checkpoint: self.latest_checkpoint.clone(),
-            augment_levels: archive_path,
-            checkpoint_dir: Some(round_ckpt_dir),
-            epoch_offset: self.global_epoch as u32,
-            step_offset: self.global_step as u32,
-        };
+        let mut train_config = serde_json::json!({
+            "epochs": self.config.epochs_per_round,
+            "batch_size": self.config.batch_size,
+            "lr": self.config.lr,
+            "seed": self.config.seed,
+            "checkpoint_dir": round_ckpt_dir.to_string_lossy(),
+            "epoch_offset": self.global_epoch,
+            "step_offset": self.global_step,
+        });
 
-        match TrainingProcess::spawn_with_args(maze_dir, &training_config, Some(&extra)) {
-            Ok(proc) => {
-                self.training_process = Some(proc);
+        if let Some(aug) = archive_path {
+            train_config["augment_levels"] = serde_json::Value::String(aug);
+        }
+
+        match model_server.send_train(&train_config) {
+            Ok(()) => {
                 self.status = AdversarialStatus::Running {
                     round,
                     phase: AdversarialPhase::Training,
@@ -222,6 +222,7 @@ impl AdversarialState {
         &mut self,
         round: usize,
         gs_idx: usize,
+        model_server: &Arc<ModelServer>,
         rows: &[crate::data::LevelRow],
     ) {
         let grid_size = self.config.grid_sizes[gs_idx];
@@ -232,6 +233,7 @@ impl AdversarialState {
         config.grid_size = grid_size;
         config.fitness_expr = self.config.fitness_expr();
         config.seed = self.config.seed as u64 + round as u64 + gs_idx as u64 + 1;
+        config.eval_batch_size = self.config.batch_size;
         let total_generations = config.generations;
 
         let seed_levels: Vec<Level> = rows
@@ -241,44 +243,27 @@ impl AdversarialState {
             .collect();
 
         let flag = stop_flag.clone();
-        let checkpoint_path = self.latest_checkpoint.clone();
+        let server = model_server.clone();
         let target = self.config.target_log_wp;
         let bfs_bins = self.config.archive_bfs_bins;
         let states_bins = self.config.archive_states_bins;
-        let max_batch_size = self.config.batch_size;
 
         std::thread::spawn(move || {
-            if let Some(ref ckpt) = checkpoint_path {
-                let _ = tx.send(GaMessage::Status("Starting policy server...".to_string()));
-                match PolicyClient::spawn_with_max_batch(ckpt, max_batch_size) {
-                    Ok(policy_client) => {
-                        let archive = ga::archive::MapElitesArchive::new(
-                            (1, 50),
-                            (1, 500),
-                            bfs_bins,
-                            states_bins,
-                            target,
-                        );
-                        ga::run_ga_with_archive(
-                            &config,
-                            seed_levels,
-                            tx,
-                            flag,
-                            policy_client,
-                            archive,
-                        );
-                    }
-                    Err(e) => {
-                        let _ = tx.send(GaMessage::Error(format!(
-                            "Failed to start policy server: {e}"
-                        )));
-                    }
-                }
-            } else {
-                let _ = tx.send(GaMessage::Error(
-                    "No checkpoint available for policy evaluation".to_string(),
-                ));
-            }
+            let archive = ga::archive::MapElitesArchive::new(
+                (1, 50),
+                (1, 500),
+                bfs_bins,
+                states_bins,
+                target,
+            );
+            ga::run_ga_with_model_server_archive(
+                &config,
+                seed_levels,
+                tx,
+                flag,
+                &server,
+                archive,
+            );
         });
 
         self.ga_rx = Some(rx);
@@ -304,7 +289,11 @@ impl AdversarialState {
     }
 
     /// Poll for events and handle phase transitions. Returns true if anything changed.
-    pub fn poll(&mut self, maze_dir: &Path, rows: &[crate::data::LevelRow]) -> bool {
+    pub fn poll(
+        &mut self,
+        model_server: &Arc<ModelServer>,
+        rows: &[crate::data::LevelRow],
+    ) -> bool {
         match &self.status {
             AdversarialStatus::Idle | AdversarialStatus::Done | AdversarialStatus::Error(_) => return false,
             _ => {}
@@ -317,32 +306,20 @@ impl AdversarialState {
         };
 
         match phase {
-            AdversarialPhase::Training => self.poll_training(round, maze_dir, rows),
-            AdversarialPhase::GA { gs_idx, .. } => self.poll_ga(round, gs_idx, maze_dir, rows),
+            AdversarialPhase::Training => self.poll_training(round, model_server, rows),
+            AdversarialPhase::GA { gs_idx, .. } => self.poll_ga(round, gs_idx, model_server, rows),
         }
     }
 
-    /// Poll training subprocess events.
+    /// Poll model server for training events.
     fn poll_training(
         &mut self,
         round: usize,
-        maze_dir: &Path,
+        model_server: &Arc<ModelServer>,
         rows: &[crate::data::LevelRow],
     ) -> bool {
-        let Some(ref mut proc) = self.training_process else {
-            return false;
-        };
-
-        let events = proc.poll();
+        let events = model_server.poll_events();
         if events.is_empty() {
-            if !proc.is_running() {
-                if matches!(self.status, AdversarialStatus::Running { .. }) {
-                    self.status = AdversarialStatus::Error(
-                        "Training process exited unexpectedly".into(),
-                    );
-                }
-                self.training_process = None;
-            }
             return false;
         }
 
@@ -433,14 +410,12 @@ impl AdversarialState {
                 }
                 TrainingEvent::Error(msg) => {
                     self.status = AdversarialStatus::Error(msg);
-                    self.training_process = None;
                     return true;
                 }
             }
         }
 
         if training_done {
-            self.training_process = None;
             // Find latest checkpoint
             self.latest_checkpoint = find_latest_checkpoint_in(
                 self.checkpoint_dir.to_str().unwrap_or("checkpoints/adversarial"),
@@ -456,10 +431,10 @@ impl AdversarialState {
                 self.status = AdversarialStatus::Done;
             } else if !self.config.grid_sizes.is_empty() {
                 // Start GA for first grid_size
-                self.start_ga_phase(round, 0, rows);
+                self.start_ga_phase(round, 0, model_server, rows);
             } else {
                 // No grid sizes configured, skip GA
-                self.start_training_phase(round + 1, maze_dir, rows);
+                self.start_training_phase(round + 1, model_server, rows);
             }
         }
 
@@ -471,7 +446,7 @@ impl AdversarialState {
         &mut self,
         round: usize,
         gs_idx: usize,
-        maze_dir: &Path,
+        model_server: &Arc<ModelServer>,
         rows: &[crate::data::LevelRow],
     ) -> bool {
         let Some(ref rx) = self.ga_rx else {
@@ -540,7 +515,7 @@ impl AdversarialState {
             let next_gs_idx = gs_idx + 1;
             if next_gs_idx < self.config.grid_sizes.len() {
                 // More grid sizes to run GA on
-                self.start_ga_phase(round, next_gs_idx, rows);
+                self.start_ga_phase(round, next_gs_idx, model_server, rows);
             } else {
                 // All grid sizes done for this round, start next training round
                 // Write archive.json for augmentation
@@ -550,7 +525,7 @@ impl AdversarialState {
                         .push(format!("Failed to write archive.json: {e}"));
                 }
                 self.round_archive_levels.clear();
-                self.start_training_phase(round + 1, maze_dir, rows);
+                self.start_training_phase(round + 1, model_server, rows);
             }
         }
 
@@ -561,7 +536,6 @@ impl AdversarialState {
     fn write_archive_json(&self, round_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(round_dir)?;
         let path = round_dir.join("archive.json");
-        // Serialize levels using Level::to_edges() etc.
         let mut entries = Vec::new();
         for level in &self.round_archive_levels {
             entries.push(level_to_json(level));
@@ -572,10 +546,10 @@ impl AdversarialState {
     }
 
     /// Stop the running loop.
-    pub fn stop(&mut self) {
-        if let Some(ref mut proc) = self.training_process {
-            proc.send_stop();
-        }
+    pub fn stop(&mut self, model_server: &Arc<ModelServer>) {
+        // Stop training if in training phase
+        let _ = model_server.send_stop_train();
+        // Stop GA if in GA phase
         if let Some(ref flag) = self.ga_stop_flag {
             flag.store(true, Ordering::Relaxed);
         }

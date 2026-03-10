@@ -2,7 +2,8 @@ use crate::data::{DataStore, EpochRecord, TrainingPhase, TrainingStatus};
 use eframe::egui;
 use egui::Ui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
-use std::path::Path;
+use mummymaze::model_server::ModelServer;
+use std::sync::Arc;
 
 /// Precomputed point data for the scatter plot.
 struct ScatterPoint {
@@ -13,9 +14,13 @@ struct ScatterPoint {
 }
 
 /// Draw the training tab content. Returns Some(row_idx) if a point was clicked.
-pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) -> Option<usize> {
+pub fn draw_training_panel(
+    ui: &mut Ui,
+    store: &mut DataStore,
+    model_server: Option<&Arc<ModelServer>>,
+) -> Option<usize> {
     // Training controls section
-    draw_training_controls(ui, store, maze_dir);
+    draw_training_controls(ui, store, model_server);
     ui.separator();
 
     // Epoch history curves with draggable divider
@@ -221,15 +226,18 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
 }
 
 /// Draw training controls: config form when idle, status + stop when running.
-fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
+fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, model_server: Option<&Arc<ModelServer>>) {
     match &store.training_status {
         TrainingStatus::Idle => {
             ui.horizontal(|ui: &mut Ui| {
                 if ui.button("Configure").clicked() {
                     store.show_training_config = !store.show_training_config;
                 }
-                if ui.button("Start").clicked() {
-                    store.start_training(maze_dir);
+                let can_start = model_server.is_some();
+                if ui.add_enabled(can_start, egui::Button::new("Start")).clicked() {
+                    if let Some(ms) = model_server {
+                        store.start_training(ms);
+                    }
                 }
             });
 
@@ -358,7 +366,9 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
                 // Right-align Stop button so it doesn't shift when content changes
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Stop").clicked() {
-                        store.stop_training();
+                        if let Some(ms) = model_server {
+                            store.stop_training(ms);
+                        }
                     }
                 });
             });

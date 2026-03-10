@@ -4,8 +4,8 @@ use eframe::egui;
 use mummymaze::ga::fitness::{FitnessExpr, PRESETS};
 use mummymaze::ga::{CrossoverMode, GaConfig, GaMessage, Individual};
 use mummymaze::game::State;
+use mummymaze::model_server::ModelServer;
 use mummymaze::parse::Level;
-use mummymaze::policy_client::PolicyClient;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -61,50 +61,45 @@ impl LevelGenState {
         }
     }
 
-    pub fn start(&mut self, seed_levels: Vec<Level>) {
+    pub fn start(&mut self, seed_levels: Vec<Level>, model_server: Option<&Arc<ModelServer>>) {
         let (tx, rx) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let config = self.config.clone();
         let flag = stop_flag.clone();
         let use_policy = self.use_policy;
-        let checkpoint_path = self.policy_checkpoint.clone();
 
         self.history.clear();
         self.best = None;
-        self.status = if use_policy && !checkpoint_path.is_empty() {
-            GaStatus::Starting("Starting policy server...".to_string())
+        self.status = if use_policy && model_server.is_some() {
+            GaStatus::Starting("Evaluating seeds with policy...".to_string())
         } else {
             GaStatus::Starting("Evaluating seeds...".to_string())
         };
         self.rx = Some(rx);
         self.stop_flag = Some(stop_flag);
 
-        std::thread::spawn(move || {
-            if use_policy && !checkpoint_path.is_empty() {
-                let path = PathBuf::from(&checkpoint_path);
-                let _ = tx.send(GaMessage::Status(
-                    "Starting policy server...".to_string(),
-                ));
-                match PolicyClient::spawn(&path) {
-                    Ok(policy_client) => {
-                        mummymaze::ga::run_ga_with_policy(
-                            &config,
-                            seed_levels,
-                            tx,
-                            flag,
-                            policy_client,
-                        );
-                    }
-                    Err(e) => {
-                        let _ = tx.send(GaMessage::Error(format!(
-                            "Failed to start policy server: {e}"
-                        )));
-                    }
-                }
+        if use_policy {
+            if let Some(server) = model_server {
+                let server = server.clone();
+                std::thread::spawn(move || {
+                    mummymaze::ga::run_ga_with_model_server(
+                        &config,
+                        seed_levels,
+                        tx,
+                        flag,
+                        &server,
+                    );
+                });
             } else {
-                mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+                let _ = tx.send(GaMessage::Error(
+                    "No model server available for policy evaluation".to_string(),
+                ));
             }
-        });
+        } else {
+            std::thread::spawn(move || {
+                mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+            });
+        }
     }
 
     pub fn stop(&mut self) {
@@ -173,6 +168,7 @@ pub fn draw_level_gen_panel(
     ui: &mut egui::Ui,
     state: &mut LevelGenState,
     rows: &[LevelRow],
+    model_server: Option<&Arc<ModelServer>>,
 ) -> Option<Level> {
     let mut load_level = None;
 
@@ -192,7 +188,7 @@ pub fn draw_level_gen_panel(
                     .filter(|r| r.level.grid_size == state.config.grid_size)
                     .map(|r| r.level.clone())
                     .collect();
-                state.start(seeds);
+                state.start(seeds, model_server);
             }
         }
 
@@ -360,6 +356,13 @@ pub fn draw_level_gen_panel(
                             .range(0.0..=1.0)
                             .speed(0.01)
                             .max_decimals(2),
+                    );
+                    ui.end_row();
+
+                    ui.label("Eval batch size:");
+                    ui.add(
+                        egui::DragValue::new(&mut state.config.eval_batch_size)
+                            .range(0..=65536),
                     );
                     ui.end_row();
                 });

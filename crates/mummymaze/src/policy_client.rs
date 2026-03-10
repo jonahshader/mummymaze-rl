@@ -26,17 +26,17 @@ pub struct PolicyClient {
 }
 
 /// Level observation data needed by the policy server to build CNN inputs.
-struct LevelObsData {
-    h_walls: Vec<u8>,
-    v_walls: Vec<u8>,
-    is_red: bool,
-    has_key_gate: bool,
-    gate_row: i32,
-    gate_col: i32,
-    trap_pos: [i32; 4], // r0,c0,r1,c1
-    trap_active: [bool; 2],
-    key_pos: [i32; 2],
-    exit_cell: [i32; 2],
+pub(crate) struct LevelObsData {
+    pub(crate) h_walls: Vec<u8>,
+    pub(crate) v_walls: Vec<u8>,
+    pub(crate) is_red: bool,
+    pub(crate) has_key_gate: bool,
+    pub(crate) gate_row: i32,
+    pub(crate) gate_col: i32,
+    pub(crate) trap_pos: [i32; 4], // r0,c0,r1,c1
+    pub(crate) trap_active: [bool; 2],
+    pub(crate) key_pos: [i32; 2],
+    pub(crate) exit_cell: [i32; 2],
 }
 
 impl PolicyClient {
@@ -259,7 +259,7 @@ impl Drop for PolicyClient {
 }
 
 /// Extract the observation data from a Level that the policy server needs.
-fn extract_level_obs_data(level: &Level) -> LevelObsData {
+pub(crate) fn extract_level_obs_data(level: &Level) -> LevelObsData {
     let (h_bools, v_bools) = level.to_edges();
     let h_walls: Vec<u8> = h_bools.into_iter().map(|b| b as u8).collect();
     let v_walls: Vec<u8> = v_bools.into_iter().map(|b| b as u8).collect();

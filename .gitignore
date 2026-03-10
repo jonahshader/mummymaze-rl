@@ -20,7 +20,7 @@ crates/*/target/
 
 # Training artifacts
 checkpoints/
-level_metrics.json
+level_metrics*.json
 wandb/
 
 # Game data (private repo only)

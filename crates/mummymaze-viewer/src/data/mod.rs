@@ -5,7 +5,6 @@ pub use training::{EpochRecord, TrainingConfig, TrainingPhase, TrainingStatus};
 pub use types::{FilterState, LevelRow, SortColumn, SortDir};
 
 use crate::training_metrics::TrainingMetrics;
-use crate::training_process::TrainingProcess;
 use mummymaze::batch::{self, LevelAnalysis};
 use mummymaze::parse::Level;
 use mummymaze::solver;
@@ -69,7 +68,6 @@ pub struct DataStore {
     pub selected: Option<usize>,
     analysis_received: usize,
     pub training_metrics: Option<TrainingMetrics>,
-    pub training_process: Option<TrainingProcess>,
     pub training_status: TrainingStatus,
     pub training_config: TrainingConfig,
     pub show_training_config: bool,
@@ -146,7 +144,6 @@ impl DataStore {
             selected: None,
             analysis_received: 0,
             training_metrics,
-            training_process: None,
             training_status: TrainingStatus::default(),
             training_config: TrainingConfig::default(),
             show_training_config: false,

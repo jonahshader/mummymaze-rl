@@ -1,6 +1,6 @@
 use crate::training_metrics::TrainingMetrics;
-use crate::training_process::{TrainingEvent, TrainingProcess};
-use std::path::Path;
+use mummymaze::model_server::{ModelServer, TrainingEvent};
+use std::sync::Arc;
 
 use super::DataStore;
 
@@ -61,14 +61,20 @@ pub struct EpochRecord {
 }
 
 impl DataStore {
-    /// Start a training subprocess.
-    pub fn start_training(&mut self, maze_dir: &Path) {
+    /// Start training via the model server.
+    pub fn start_training(&mut self, model_server: &Arc<ModelServer>) {
         let config = &self.training_config;
         self.epoch_history.clear();
         self.batch_loss_history.clear();
-        match TrainingProcess::spawn(maze_dir, config) {
-            Ok(proc) => {
-                self.training_process = Some(proc);
+
+        let train_config = serde_json::json!({
+            "epochs": config.epochs,
+            "batch_size": config.batch_size,
+            "lr": config.lr,
+            "seed": config.seed,
+        });
+        match model_server.send_train(&train_config) {
+            Ok(()) => {
                 self.training_status = TrainingStatus::Running {
                     epoch: 0,
                     total_epochs: config.epochs,
@@ -86,39 +92,19 @@ impl DataStore {
         }
     }
 
-    /// Send stop command to training process.
-    pub fn stop_training(&mut self) {
-        if let Some(ref proc) = self.training_process {
-            proc.send_stop();
-        }
+    /// Send stop command to training via model server.
+    pub fn stop_training(&mut self, model_server: &Arc<ModelServer>) {
+        let _ = model_server.send_stop_train();
     }
 
-    /// Kill and clean up training process.
-    #[allow(dead_code)]
-    pub fn kill_training(&mut self) {
-        if let Some(ref mut proc) = self.training_process {
-            proc.kill();
-        }
-        self.training_process = None;
-        self.training_status = TrainingStatus::Idle;
-    }
-
-    /// Poll training process for events. Returns true if any received.
-    pub fn poll_training(&mut self) -> bool {
-        let Some(ref mut proc) = self.training_process else {
+    /// Poll model server for training events. Returns true if any received.
+    pub fn poll_training(&mut self, model_server: &Arc<ModelServer>) -> bool {
+        if !matches!(self.training_status, TrainingStatus::Running { .. }) {
             return false;
-        };
+        }
 
-        let events = proc.poll();
+        let events = model_server.poll_events();
         if events.is_empty() {
-            // Check if process died
-            if !proc.is_running() {
-                if matches!(self.training_status, TrainingStatus::Running { .. }) {
-                    self.training_status =
-                        TrainingStatus::Error("Training process exited unexpectedly".into());
-                }
-                self.training_process = None;
-            }
             return false;
         }
 
@@ -211,11 +197,9 @@ impl DataStore {
                 }
                 TrainingEvent::Done => {
                     self.training_status = TrainingStatus::Done;
-                    self.training_process = None;
                 }
                 TrainingEvent::Error(msg) => {
                     self.training_status = TrainingStatus::Error(msg);
-                    self.training_process = None;
                 }
             }
         }
@@ -229,6 +213,6 @@ impl DataStore {
 
     /// Check if training is actively running.
     pub fn is_training(&self) -> bool {
-        self.training_process.is_some()
+        matches!(self.training_status, TrainingStatus::Running { .. })
     }
 }

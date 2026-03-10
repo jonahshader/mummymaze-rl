@@ -5,6 +5,7 @@ pub mod game;
 pub mod graph;
 pub mod markov;
 pub mod metrics;
+pub mod model_server;
 pub mod parse;
 pub mod policy_client;
 #[cfg(feature = "python")]

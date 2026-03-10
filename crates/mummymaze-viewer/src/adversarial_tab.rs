@@ -6,10 +6,17 @@ use crate::training_tab::draw_epoch_curves;
 use eframe::egui;
 use egui::Ui;
 use mummymaze::ga::archive::ArchiveSnapshot;
+use mummymaze::model_server::ModelServer;
+use std::sync::Arc;
 
 /// Draw the adversarial loop panel.
-pub fn draw_panel(ui: &mut Ui, state: &mut AdversarialState, rows: &[LevelRow], maze_dir: &std::path::Path) {
-    draw_controls(ui, state, rows, maze_dir);
+pub fn draw_panel(
+    ui: &mut Ui,
+    state: &mut AdversarialState,
+    rows: &[LevelRow],
+    model_server: Option<&Arc<ModelServer>>,
+) {
+    draw_controls(ui, state, rows, model_server);
     ui.separator();
 
     // Training curves (cumulative across rounds)
@@ -78,7 +85,12 @@ struct RunningSnapshot {
 }
 
 /// Draw controls: status bar + config button + start/stop.
-fn draw_controls(ui: &mut Ui, state: &mut AdversarialState, rows: &[LevelRow], maze_dir: &std::path::Path) {
+fn draw_controls(
+    ui: &mut Ui,
+    state: &mut AdversarialState,
+    rows: &[LevelRow],
+    model_server: Option<&Arc<ModelServer>>,
+) {
     // Snapshot status to avoid borrow conflicts
     enum StatusKind {
         Idle,
@@ -131,8 +143,11 @@ fn draw_controls(ui: &mut Ui, state: &mut AdversarialState, rows: &[LevelRow], m
                 if ui.button("Configure").clicked() {
                     state.show_config = !state.show_config;
                 }
-                if ui.button("Start").clicked() {
-                    state.start(maze_dir, rows);
+                let can_start = model_server.is_some();
+                if ui.add_enabled(can_start, egui::Button::new("Start")).clicked() {
+                    if let Some(ms) = model_server {
+                        state.start(ms, rows);
+                    }
                 }
             });
 
@@ -219,7 +234,9 @@ fn draw_controls(ui: &mut Ui, state: &mut AdversarialState, rows: &[LevelRow], m
                 // Right-align Stop button
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Stop").clicked() {
-                        state.stop();
+                        if let Some(ms) = model_server {
+                            state.stop(ms);
+                        }
                     }
                 });
             });

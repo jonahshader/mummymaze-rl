@@ -8,7 +8,6 @@ mod graph_view;
 mod render;
 mod table;
 mod training_metrics;
-mod training_process;
 mod training_tab;
 
 use agent_probs::AgentProbs;
@@ -18,7 +17,9 @@ use gameplay::GameplayState;
 use graph_view::GraphView;
 use mummymaze::game::{Action, State};
 use mummymaze::graph::StateGraph;
+use mummymaze::model_server::ModelServer;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab {
@@ -42,10 +43,11 @@ struct App {
     agent_probs: AgentProbs,
     level_gen: level_gen_tab::LevelGenState,
     adversarial: adversarial::AdversarialState,
+    /// Shared model server for inference + training.
+    model_server: Option<Arc<ModelServer>>,
     show_bfs_overlay: bool,
     show_agent_overlay: bool,
     right_tab: RightTab,
-    maze_dir: std::path::PathBuf,
 }
 
 impl App {
@@ -60,6 +62,20 @@ impl App {
 
         let agent_probs = AgentProbs::new(std::path::PathBuf::from("checkpoints/agent_probs.bin"));
 
+        // Spawn model server eagerly — will do JAX warm-up in background
+        let checkpoint = level_gen_tab::latest_checkpoint().map(std::path::PathBuf::from);
+        let model_server =
+            match ModelServer::spawn(maze_dir, checkpoint.as_deref()) {
+                Ok(ms) => {
+                    eprintln!("Model server spawned");
+                    Some(Arc::new(ms))
+                }
+                Err(e) => {
+                    eprintln!("Failed to spawn model server: {e}");
+                    None
+                }
+            };
+
         App {
             store,
             gameplay: None,
@@ -70,10 +86,10 @@ impl App {
             agent_probs,
             level_gen: level_gen_tab::LevelGenState::new(),
             adversarial: adversarial::AdversarialState::new(),
+            model_server,
             show_bfs_overlay: false,
             show_agent_overlay: false,
             right_tab: RightTab::Graph,
-            maze_dir: maze_dir.to_path_buf(),
         }
     }
 
@@ -272,9 +288,11 @@ impl eframe::App for App {
         if self.store.is_analyzing() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        // Poll training process events
-        if self.store.poll_training() {
-            ctx.request_repaint();
+        // Poll model server for training events
+        if let Some(ref ms) = self.model_server {
+            if self.store.poll_training(ms) {
+                ctx.request_repaint();
+            }
         }
         // Fast repaint while training is running for responsive batch updates
         if self.store.is_training() {
@@ -296,7 +314,12 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Poll adversarial loop
-        if self.adversarial.poll(&self.maze_dir, &self.store.rows) {
+        let adv_changed = if let Some(ref ms) = self.model_server {
+            self.adversarial.poll(ms, &self.store.rows)
+        } else {
+            false
+        };
+        if adv_changed {
             ctx.request_repaint();
         }
         if self.adversarial.is_running() {
@@ -427,14 +450,14 @@ impl eframe::App for App {
                 RightTab::Graph => self.draw_graph_panel(ui),
                 RightTab::Training => {
                     if let Some(clicked) =
-                        training_tab::draw_training_panel(ui, &mut self.store, &self.maze_dir)
+                        training_tab::draw_training_panel(ui, &mut self.store, self.model_server.as_ref())
                     {
                         self.select_level(clicked);
                     }
                 }
                 RightTab::LevelGen => {
                     if let Some(level) =
-                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows)
+                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows, self.model_server.as_ref())
                     {
                         // Load GA-generated level into maze panel
                         self.gameplay = Some(GameplayState::new(level.clone()));
@@ -455,7 +478,7 @@ impl eframe::App for App {
                         ui,
                         &mut self.adversarial,
                         &self.store.rows,
-                        &self.maze_dir,
+                        self.model_server.as_ref(),
                     );
                 }
                 RightTab::Logs => {

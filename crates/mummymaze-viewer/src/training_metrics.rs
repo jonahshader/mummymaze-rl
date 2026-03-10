@@ -4,22 +4,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+pub use mummymaze::model_server::LevelMetric;
+
 #[derive(Deserialize)]
 struct MetricsFile {
     run_id: String,
     step: u64,
     levels: HashMap<String, LevelMetric>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LevelMetric {
-    #[allow(dead_code)]
-    pub grid_size: i32,
-    #[allow(dead_code)]
-    pub n_states: usize,
-    pub accuracy: f64,
-    pub mean_loss: f64,
-    pub agent_win_prob: Option<f64>,
 }
 
 pub struct TrainingMetrics {

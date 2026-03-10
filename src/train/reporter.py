@@ -2,11 +2,13 @@
 
 import json
 import select
+import struct
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 
 def build_levels_dict(
@@ -131,18 +133,32 @@ class FileReporter:
 
 _BATCH_THROTTLE_INTERVAL = 0.1  # seconds
 
+# --- Frame protocol constants ---
+FRAME_TYPE_TRAINING_EVENT = 0x82
+FRAME_TYPE_ERROR = 0x83
 
-class StdioReporter:
-  """Reporter that writes JSON lines to stdout for subprocess mode."""
+
+def write_frame(stream: BinaryIO, frame_type: int, payload: bytes) -> None:
+  """Write a length-prefixed frame: [u32 length][u8 type][payload]."""
+  length = 1 + len(payload)
+  stream.write(struct.pack("<I", length))
+  stream.write(struct.pack("B", frame_type))
+  stream.write(payload)
+  stream.flush()
+
+
+class _BaseStreamReporter:
+  """Shared logic for reporters that emit JSON event dicts.
+
+  Subclasses must implement `_emit(msg)` and `check_command()`.
+  """
 
   def __init__(self) -> None:
     self._last_batch_time: float = 0.0
-    self._last_cmd_check: float = 0.0
     self._pending_batch: dict | None = None
 
   def _emit(self, msg: dict) -> None:
-    sys.stdout.write(json.dumps(msg, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    raise NotImplementedError
 
   def report_init(self, config: dict) -> None:
     self._emit({"type": "init", **config})
@@ -150,7 +166,6 @@ class StdioReporter:
   def report_epoch_start(
     self, epoch: int, total_epochs: int, steps_in_epoch: int
   ) -> None:
-    # Flush any pending batch before epoch boundary
     self._flush_batch()
     self._emit(
       {
@@ -235,6 +250,21 @@ class StdioReporter:
     self._emit({"type": "done"})
 
   def check_command(self) -> str | None:
+    raise NotImplementedError
+
+
+class StdioReporter(_BaseStreamReporter):
+  """Reporter that writes JSON lines to stdout for subprocess mode."""
+
+  def __init__(self) -> None:
+    super().__init__()
+    self._last_cmd_check: float = 0.0
+
+  def _emit(self, msg: dict) -> None:
+    sys.stdout.write(json.dumps(msg, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+  def check_command(self) -> str | None:
     """Non-blocking stdin read, throttled to avoid per-step syscalls."""
     now = time.monotonic()
     if now - self._last_cmd_check < _BATCH_THROTTLE_INTERVAL:
@@ -248,4 +278,27 @@ class StdioReporter:
           return msg.get("cmd")
         except json.JSONDecodeError:
           return None
+    return None
+
+
+class FrameReporter(_BaseStreamReporter):
+  """Reporter that writes binary-framed JSON events for model_server.
+
+  Uses a threading.Event for stop signalling instead of reading stdin directly
+  (stdin is owned by the model_server's serve loop).
+  """
+
+  def __init__(self, stdout: BinaryIO, stop_event: threading.Event) -> None:
+    super().__init__()
+    self._stdout = stdout
+    self._stop_event = stop_event
+
+  def _emit(self, msg: dict) -> None:
+    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    write_frame(self._stdout, FRAME_TYPE_TRAINING_EVENT, payload)
+
+  def check_command(self) -> str | None:
+    """Check if stop has been requested via the threading event."""
+    if self._stop_event.is_set():
+      return "stop"
     return None

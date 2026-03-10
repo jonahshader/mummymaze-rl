@@ -24,7 +24,7 @@ from jaxtyping import Array, Float, Int
 
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
 from src.train.model import MazeCNN
-from src.train.reporter import FileReporter, StdioReporter
+from src.train.reporter import FileReporter, FrameReporter, StdioReporter
 
 
 def cross_entropy_loss(
@@ -255,7 +255,7 @@ def train_epochs(
   epochs: int,
   batch_size: int,
   checkpoint_dir: Path,
-  reporter: FileReporter | StdioReporter,
+  reporter: FileReporter | StdioReporter | FrameReporter,
   maze_dir: Path,
   key: jax.Array,
   epoch_offset: int = 0,
@@ -548,7 +548,7 @@ def train(
   wandb_project: str | None = None,
   metrics_path: Path = Path("level_metrics.json"),
   checkpoint_dir: Path = Path("checkpoints"),
-  reporter: FileReporter | StdioReporter | None = None,
+  reporter: FileReporter | StdioReporter | FrameReporter | None = None,
   checkpoint: Path | None = None,
   augment_levels: Path | None = None,
   epoch_offset: int = 0,

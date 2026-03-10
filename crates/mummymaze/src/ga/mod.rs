@@ -10,6 +10,7 @@ pub mod mutation;
 
 use crate::graph::{build_graph, StateGraph};
 use crate::markov::MarkovChain;
+use crate::model_server::ModelServer;
 use crate::parse::Level;
 use crate::policy_client::PolicyClient;
 use crate::solver;
@@ -24,6 +25,53 @@ use std::sync::Arc;
 
 pub use crossover::crossover;
 pub use mutation::mutate_with_config;
+
+/// Trait for querying a policy server for action probabilities.
+/// Abstracts over `PolicyClient` (mutable) and `ModelServer` (shared ref with interior mutability).
+pub trait PolicyQuery {
+    fn query_policy(
+        &self,
+        levels_and_graphs: &[(&Level, &StateGraph)],
+    ) -> Result<Vec<Vec<(crate::game::State, [f32; 5])>>, String>;
+    fn needs_jit(&self) -> bool;
+}
+
+impl PolicyQuery for ModelServer {
+    fn query_policy(
+        &self,
+        levels_and_graphs: &[(&Level, &StateGraph)],
+    ) -> Result<Vec<Vec<(crate::game::State, [f32; 5])>>, String> {
+        self.query(levels_and_graphs)
+    }
+    fn needs_jit(&self) -> bool {
+        ModelServer::needs_jit(self)
+    }
+}
+
+/// Wrapper to make mutable PolicyClient work with the PolicyQuery trait via RefCell.
+pub struct PolicyClientWrapper {
+    inner: std::cell::RefCell<PolicyClient>,
+}
+
+impl PolicyClientWrapper {
+    pub fn new(client: PolicyClient) -> Self {
+        Self {
+            inner: std::cell::RefCell::new(client),
+        }
+    }
+}
+
+impl PolicyQuery for PolicyClientWrapper {
+    fn query_policy(
+        &self,
+        levels_and_graphs: &[(&Level, &StateGraph)],
+    ) -> Result<Vec<Vec<(crate::game::State, [f32; 5])>>, String> {
+        self.inner.borrow_mut().query(levels_and_graphs)
+    }
+    fn needs_jit(&self) -> bool {
+        self.inner.borrow().needs_jit()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Individual {
@@ -86,6 +134,8 @@ pub struct GaConfig {
     pub extra_wall_prob: f64,
     /// Fitness expression (math formula over metric variables).
     pub fitness_expr: String,
+    /// Max batch size for policy evaluation chunking (0 = no cap).
+    pub eval_batch_size: u32,
 }
 
 impl Default for GaConfig {
@@ -106,6 +156,7 @@ impl Default for GaConfig {
             w_move_exit: 1.0,
             extra_wall_prob: 0.3,
             fitness_expr: fitness::PRESET_DEFAULT.to_string(),
+            eval_batch_size: 4096,
         }
     }
 }
@@ -203,7 +254,7 @@ pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual>
 fn evaluate_batch(
     levels: &[Level],
     fitness_expr: &FitnessExpr,
-    policy_client: Option<&mut PolicyClient>,
+    policy: Option<&dyn PolicyQuery>,
     progress: Option<&AtomicUsize>,
     tx: Option<&Sender<GaMessage>>,
 ) -> Vec<Individual> {
@@ -221,7 +272,7 @@ fn evaluate_batch(
 
     // Phase 2: if policy needed, batch-query the policy server
     if fitness_expr.needs_policy {
-        if let Some(client) = policy_client {
+        if let Some(client) = policy {
             if let Some(ref tx) = tx {
                 let n = results.len();
                 let total_states: usize = results.iter().map(|r| r.graph.n_transient).sum();
@@ -239,7 +290,7 @@ fn evaluate_batch(
                 .map(|r| (&r.level, &r.graph))
                 .collect();
 
-            match client.query(&pairs) {
+            match client.query_policy(&pairs) {
                 Ok(policy_results) => {
                     for (result, state_probs) in results.iter_mut().zip(policy_results.iter()) {
                         // Build policy map and solve Markov chain under policy
@@ -295,7 +346,8 @@ pub fn run_ga(
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
 ) {
-    run_ga_inner(config, seed_levels, tx, stop_flag, None, None);
+    let no_policy: Option<&dyn PolicyQuery> = None;
+    run_ga_inner(config, seed_levels, tx, stop_flag, no_policy, None);
 }
 
 /// Run the GA with a policy server for policy_win_prob evaluation.
@@ -306,7 +358,8 @@ pub fn run_ga_with_policy(
     stop_flag: Arc<AtomicBool>,
     policy_client: PolicyClient,
 ) {
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(policy_client), None);
+    let wrapper = PolicyClientWrapper::new(policy_client);
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(&wrapper), None);
 }
 
 /// Run the GA with a policy server and MAP-Elites archive.
@@ -319,7 +372,33 @@ pub fn run_ga_with_archive(
     policy_client: PolicyClient,
     archive: archive::MapElitesArchive,
 ) -> archive::MapElitesArchive {
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(policy_client), Some(archive)).unwrap()
+    let wrapper = PolicyClientWrapper::new(policy_client);
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(&wrapper), Some(archive)).unwrap()
+}
+
+/// Run the GA with a `ModelServer` (shared ref) for policy evaluation.
+pub fn run_ga_with_model_server(
+    config: &GaConfig,
+    seed_levels: Vec<Level>,
+    tx: Sender<GaMessage>,
+    stop_flag: Arc<AtomicBool>,
+    server: &ModelServer,
+) {
+    server.set_max_batch_size(config.eval_batch_size);
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(server), None);
+}
+
+/// Run the GA with a `ModelServer` and MAP-Elites archive.
+pub fn run_ga_with_model_server_archive(
+    config: &GaConfig,
+    seed_levels: Vec<Level>,
+    tx: Sender<GaMessage>,
+    stop_flag: Arc<AtomicBool>,
+    server: &ModelServer,
+    archive: archive::MapElitesArchive,
+) -> archive::MapElitesArchive {
+    server.set_max_batch_size(config.eval_batch_size);
+    run_ga_inner(config, seed_levels, tx, stop_flag, Some(server), Some(archive)).unwrap()
 }
 
 /// Insert individuals into archive (if present) and send update message.
@@ -346,7 +425,7 @@ fn run_ga_inner(
     seed_levels: Vec<Level>,
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
-    mut policy_client: Option<PolicyClient>,
+    policy: Option<&dyn PolicyQuery>,
     mut archive: Option<archive::MapElitesArchive>,
 ) -> Option<archive::MapElitesArchive> {
     let fitness_expr = match FitnessExpr::parse(&config.fitness_expr) {
@@ -357,7 +436,7 @@ fn run_ga_inner(
         }
     };
 
-    if fitness_expr.needs_policy && policy_client.is_none() {
+    if fitness_expr.needs_policy && policy.is_none() {
         let _ = tx.send(GaMessage::Error(
             "Fitness expression uses policy_win_prob but no policy checkpoint is configured"
                 .to_string(),
@@ -391,7 +470,7 @@ fn run_ga_inner(
         });
     }
     let mut population: Vec<Individual> =
-        evaluate_batch(&seed_levels, &fitness_expr, policy_client.as_mut(), Some(&progress), Some(&tx));
+        evaluate_batch(&seed_levels, &fitness_expr, policy, Some(&progress), Some(&tx));
     // Ensure progress reaches total so reporter thread exits
     progress.store(total_seeds, Ordering::Relaxed);
 
@@ -465,7 +544,7 @@ fn run_ga_inner(
         let non_elite = &offspring_levels[n_elite..];
         let n_evaluated = non_elite.len();
         let evaluated =
-            evaluate_batch(non_elite, &fitness_expr, policy_client.as_mut(), None, Some(&tx));
+            evaluate_batch(non_elite, &fitness_expr, policy, None, Some(&tx));
         let n_solvable_gen = evaluated.len();
 
         let mut new_pop: Vec<Individual> = Vec::with_capacity(config.pop_size);

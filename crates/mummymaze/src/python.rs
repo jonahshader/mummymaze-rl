@@ -610,6 +610,7 @@ fn run_ga_round(
         w_move_exit: get_f64("w_move_exit", 1.0),
         extra_wall_prob: get_f64("extra_wall_prob", 0.3),
         fitness_expr: get_str("fitness_expr", crate::ga::fitness::PRESET_POLICY),
+        eval_batch_size: get_usize("eval_batch_size", 4096) as u32,
     };
 
     let levels: Vec<Level> = seed_levels.iter().map(|l| l.inner.clone()).collect();
