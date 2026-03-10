@@ -6,6 +6,26 @@
 use super::Individual;
 use crate::parse::Level;
 
+/// Lightweight snapshot of a single archive cell for visualization.
+#[derive(Debug, Clone)]
+pub struct ArchiveCell {
+    pub log_policy_wp: f64,
+    pub bfs_moves: u32,
+    pub n_states: usize,
+}
+
+/// Snapshot of the full archive grid for the viewer heatmap.
+#[derive(Debug, Clone)]
+pub struct ArchiveSnapshot {
+    pub bfs_bins: usize,
+    pub states_bins: usize,
+    pub bfs_range: (usize, usize),
+    pub states_range: (usize, usize),
+    pub target_log_wp: f64,
+    /// Flat row-major [bfs_bin][states_bin] grid.
+    pub cells: Vec<Option<ArchiveCell>>,
+}
+
 /// MAP-Elites archive: 2D grid of (bfs_moves, n_states) bins.
 pub struct MapElitesArchive {
     bins: Vec<Vec<Option<Individual>>>,
@@ -97,6 +117,28 @@ impl MapElitesArchive {
             .filter_map(|c| c.as_ref())
             .map(|ind| &ind.level)
             .collect()
+    }
+
+    /// Create a lightweight snapshot for visualization.
+    pub fn snapshot(&self) -> ArchiveSnapshot {
+        let mut cells = Vec::with_capacity(self.bfs_bins * self.states_bins);
+        for row in &self.bins {
+            for cell in row {
+                cells.push(cell.as_ref().map(|ind| ArchiveCell {
+                    log_policy_wp: ind.log_policy_win_prob,
+                    bfs_moves: ind.bfs_moves,
+                    n_states: ind.n_states,
+                }));
+            }
+        }
+        ArchiveSnapshot {
+            bfs_bins: self.bfs_bins,
+            states_bins: self.states_bins,
+            bfs_range: self.bfs_range,
+            states_range: self.states_range,
+            target_log_wp: self.target_log_wp,
+            cells,
+        }
     }
 
     /// Collect all individuals from occupied cells.

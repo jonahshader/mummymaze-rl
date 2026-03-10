@@ -1,489 +1,436 @@
+//! UI for the adversarial training loop tab.
+
+use crate::adversarial::{AdversarialConfig, AdversarialPhase, AdversarialState, AdversarialStatus};
 use crate::data::LevelRow;
-use crate::render;
+use crate::training_tab::draw_epoch_curves;
 use eframe::egui;
-use mummymaze::ga::fitness::{FitnessExpr, PRESETS};
-use mummymaze::ga::{CrossoverMode, GaConfig, GaMessage, Individual};
-use mummymaze::game::State;
-use mummymaze::parse::Level;
-use mummymaze::policy_client::PolicyClient;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use egui::Ui;
+use mummymaze::ga::archive::ArchiveSnapshot;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum GaStatus {
-    Idle,
-    Starting(String),
-    Running {
-        generation: usize,
-        total_generations: usize,
-    },
-    Done,
-    Error(String),
-}
+/// Draw the adversarial loop panel.
+pub fn draw_panel(ui: &mut Ui, state: &mut AdversarialState, rows: &[LevelRow], maze_dir: &std::path::Path) {
+    draw_controls(ui, state, rows, maze_dir);
+    ui.separator();
 
-pub struct AdversarialState {
-    pub config: GaConfig,
-    pub show_config: bool,
-    pub status: GaStatus,
-    pub best: Option<Individual>,
-    pub history: Vec<(usize, f64, f64)>, // (generation, best_fitness, avg_fitness)
-    rx: Option<Receiver<GaMessage>>,
-    stop_flag: Option<Arc<AtomicBool>>,
-    /// Validation error for the fitness expression (empty = valid).
-    fitness_error: String,
-    /// Optional policy checkpoint path for policy_win_prob evaluation.
-    pub policy_checkpoint: String,
-    /// Whether to use the policy net for fitness evaluation.
-    pub use_policy: bool,
-}
+    // Training curves (cumulative across rounds)
+    let has_curves = !state.epoch_history.is_empty() || !state.batch_loss_history.is_empty();
+    if has_curves {
+        draw_epoch_curves(
+            ui,
+            &state.epoch_history,
+            &state.batch_loss_history,
+            state.curve_plot_height,
+            &state.round_boundaries,
+        );
 
-impl AdversarialState {
-    pub fn new() -> Self {
-        AdversarialState {
-            config: GaConfig {
-                seed: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                ..GaConfig::default()
-            },
-            show_config: false,
-            status: GaStatus::Idle,
-            best: None,
-            history: Vec::new(),
-            rx: None,
-            stop_flag: None,
-            fitness_error: String::new(),
-            policy_checkpoint: latest_checkpoint().unwrap_or_default(),
-            use_policy: false,
-        }
-    }
-
-    pub fn start(&mut self, seed_levels: Vec<Level>) {
-        let (tx, rx) = mpsc::channel();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let config = self.config.clone();
-        let flag = stop_flag.clone();
-        let use_policy = self.use_policy;
-        let checkpoint_path = self.policy_checkpoint.clone();
-
-        self.history.clear();
-        self.best = None;
-        self.status = if use_policy && !checkpoint_path.is_empty() {
-            GaStatus::Starting("Starting policy server...".to_string())
-        } else {
-            GaStatus::Starting("Evaluating seeds...".to_string())
-        };
-        self.rx = Some(rx);
-        self.stop_flag = Some(stop_flag);
-
-        std::thread::spawn(move || {
-            if use_policy && !checkpoint_path.is_empty() {
-                let path = PathBuf::from(&checkpoint_path);
-                let _ = tx.send(GaMessage::Status(
-                    "Starting policy server...".to_string(),
-                ));
-                match PolicyClient::spawn(&path) {
-                    Ok(policy_client) => {
-                        mummymaze::ga::run_ga_with_policy(
-                            &config,
-                            seed_levels,
-                            tx,
-                            flag,
-                            policy_client,
-                        );
-                    }
-                    Err(e) => {
-                        let _ = tx.send(GaMessage::Error(format!(
-                            "Failed to start policy server: {e}"
-                        )));
-                    }
-                }
-            } else {
-                mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
-            }
-        });
-    }
-
-    pub fn stop(&mut self) {
-        if let Some(ref flag) = self.stop_flag {
-            flag.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Drain channel messages. Returns true if anything changed.
-    pub fn poll(&mut self) -> bool {
-        if self.rx.is_none() {
-            return false;
-        }
-        let mut changed = false;
-        let mut finished = false;
-        // Drain messages while receiver exists
-        while let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            changed = true;
-            match msg {
-                GaMessage::Status(s) => {
-                    self.status = GaStatus::Starting(s);
-                }
-                GaMessage::SeedsDone { .. } => {}
-                GaMessage::ArchiveUpdate { .. } => {}
-                GaMessage::Generation(result) => {
-                    self.history
-                        .push((result.generation, result.best.fitness, result.avg_fitness));
-                    self.best = Some(result.best);
-                    self.status = GaStatus::Running {
-                        generation: result.generation,
-                        total_generations: self.config.generations,
-                    };
-                }
-                GaMessage::Done => {
-                    self.status = GaStatus::Done;
-                    finished = true;
-                }
-                GaMessage::Error(e) => {
-                    self.status = GaStatus::Error(e);
-                    finished = true;
-                }
-            }
-        }
-        if finished {
-            self.rx = None;
-            self.stop_flag = None;
-        }
-        changed
-    }
-
-    pub fn is_running(&self) -> bool {
-        matches!(
-            self.status,
-            GaStatus::Starting(_) | GaStatus::Running { .. }
-        )
-    }
-}
-
-/// Draw the adversarial GA panel. Returns Some(level) when "Load into Maze" is clicked.
-pub fn draw_adversarial_panel(
-    ui: &mut egui::Ui,
-    state: &mut AdversarialState,
-    rows: &[LevelRow],
-) -> Option<Level> {
-    let mut load_level = None;
-
-    // Controls
-    ui.horizontal(|ui: &mut egui::Ui| {
-        if state.is_running() {
-            if ui.button("Stop").clicked() {
-                state.stop();
-            }
-        } else {
-            if ui.button("Configure").clicked() {
-                state.show_config = !state.show_config;
-            }
-            if ui.button("Start").clicked() {
-                let seeds: Vec<Level> = rows
-                    .iter()
-                    .filter(|r| r.level.grid_size == state.config.grid_size)
-                    .map(|r| r.level.clone())
-                    .collect();
-                state.start(seeds);
-            }
-        }
-
-        // Status line
-        match &state.status {
-            GaStatus::Idle => {
-                ui.label("Idle");
-            }
-            GaStatus::Starting(msg) => {
-                // Try to parse "Evaluating seeds: 123/456" for a progress bar
-                if let Some(frac) = parse_progress_frac(msg) {
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .text(msg.as_str())
-                            .desired_width(200.0),
-                    );
+        // Draggable separator
+        let sep_id = ui.id().with("adv_curve_sep");
+        let sep_rect = ui.allocate_space(egui::vec2(ui.available_width(), 6.0)).1;
+        let sep_response = ui.interact(sep_rect, sep_id, egui::Sense::drag());
+        let active = sep_response.hovered() || sep_response.dragged();
+        ui.painter().hline(
+            sep_rect.x_range(),
+            sep_rect.center().y,
+            egui::Stroke::new(
+                if active { 2.0 } else { 1.0 },
+                if active {
+                    ui.visuals().widgets.active.fg_stroke.color
                 } else {
-                    ui.spinner();
-                    ui.label(msg);
-                }
-            }
-            GaStatus::Running {
-                generation,
-                total_generations,
-            } => {
-                ui.label(format!("Gen {generation}/{total_generations}"));
-            }
-            GaStatus::Done => {
-                ui.colored_label(egui::Color32::GREEN, "Done");
-            }
-            GaStatus::Error(e) => {
-                ui.colored_label(egui::Color32::RED, format!("Error: {e}"));
-            }
+                    ui.visuals().widgets.noninteractive.bg_stroke.color
+                },
+            ),
+        );
+        if active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
-    });
+        if sep_response.dragged() {
+            state.curve_plot_height = (state.curve_plot_height + sep_response.drag_delta().y)
+                .clamp(60.0, 500.0);
+        }
+    }
 
-    // Config window
-    egui::Window::new("GA Config")
-        .open(&mut state.show_config)
+    // Bottom section: heatmap (left) + GA fitness chart (right)
+    ui.columns(2, |cols| {
+        // Left: Archive heatmap
+        draw_archive_heatmap(&mut cols[0], state.archive_snapshot.as_ref(), state.config.target_log_wp);
+
+        // Right: GA fitness chart + archive occupancy
+        draw_ga_charts(&mut cols[1], &state.ga_history, &state.archive_occupancy_history);
+    });
+}
+
+/// Snapshot of running status fields for UI rendering (avoids borrow issues).
+struct RunningSnapshot {
+    round: usize,
+    n_rounds: usize,
+    phase: AdversarialPhase,
+    training_epoch: u32,
+    training_total_epochs: u32,
+    training_step: u32,
+    training_steps_in_epoch: u32,
+    training_loss: f64,
+    training_acc: f64,
+    training_gs: i32,
+    training_phase: crate::data::TrainingPhase,
+    ga_generation: usize,
+    ga_total_generations: usize,
+    archive_occ: Option<(usize, usize)>,
+}
+
+/// Draw controls: status bar + config button + start/stop.
+fn draw_controls(ui: &mut Ui, state: &mut AdversarialState, rows: &[LevelRow], maze_dir: &std::path::Path) {
+    // Snapshot status to avoid borrow conflicts
+    enum StatusKind {
+        Idle,
+        Running(RunningSnapshot),
+        Done,
+        Error(String),
+    }
+
+    let kind = match &state.status {
+        AdversarialStatus::Idle => StatusKind::Idle,
+        AdversarialStatus::Running {
+            round,
+            phase,
+            training_epoch,
+            training_total_epochs,
+            training_step,
+            training_steps_in_epoch,
+            training_loss,
+            training_acc,
+            training_gs,
+            training_phase,
+            ga_generation,
+            ga_total_generations,
+        } => StatusKind::Running(RunningSnapshot {
+            round: *round,
+            n_rounds: state.config.n_rounds,
+            phase: phase.clone(),
+            training_epoch: *training_epoch,
+            training_total_epochs: *training_total_epochs,
+            training_step: *training_step,
+            training_steps_in_epoch: *training_steps_in_epoch,
+            training_loss: *training_loss,
+            training_acc: *training_acc,
+            training_gs: *training_gs,
+            training_phase: training_phase.clone(),
+            ga_generation: *ga_generation,
+            ga_total_generations: *ga_total_generations,
+            archive_occ: state.archive_snapshot.as_ref().map(|snap| {
+                let occupied = snap.cells.iter().filter(|c| c.is_some()).count();
+                (occupied, snap.cells.len())
+            }),
+        }),
+        AdversarialStatus::Done => StatusKind::Done,
+        AdversarialStatus::Error(msg) => StatusKind::Error(msg.clone()),
+    };
+
+    match kind {
+        StatusKind::Idle => {
+            ui.horizontal(|ui: &mut Ui| {
+                if ui.button("Configure").clicked() {
+                    state.show_config = !state.show_config;
+                }
+                if ui.button("Start").clicked() {
+                    state.start(maze_dir, rows);
+                }
+            });
+
+            draw_config_window(ui, &mut state.config, &mut state.show_config);
+        }
+        StatusKind::Running(snap) => {
+            ui.horizontal(|ui: &mut Ui| {
+                ui.strong(format!("Round {}/{}", snap.round + 1, snap.n_rounds));
+                ui.separator();
+
+                match &snap.phase {
+                    AdversarialPhase::Training => {
+                        let progress = if snap.training_total_epochs > 0 {
+                            snap.training_epoch as f32 / snap.training_total_epochs as f32
+                        } else {
+                            0.0
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(progress)
+                                .text(format!(
+                                    "Epoch {}/{}",
+                                    snap.training_epoch, snap.training_total_epochs
+                                ))
+                                .desired_width(120.0),
+                        );
+
+                        match &snap.training_phase {
+                            crate::data::TrainingPhase::Training => {
+                                let step_progress = if snap.training_steps_in_epoch > 0 {
+                                    snap.training_step as f32
+                                        / snap.training_steps_in_epoch as f32
+                                } else {
+                                    0.0
+                                };
+                                ui.separator();
+                                ui.add(
+                                    egui::ProgressBar::new(step_progress)
+                                        .text(format!(
+                                            "Step {}/{}",
+                                            snap.training_step, snap.training_steps_in_epoch
+                                        ))
+                                        .desired_width(120.0),
+                                );
+                                ui.separator();
+                                ui.label(format!("Loss: {:.3}", snap.training_loss));
+                                ui.separator();
+                                ui.label(format!("Acc: {:.3}", snap.training_acc));
+                                if snap.training_gs > 0 {
+                                    ui.separator();
+                                    ui.label(format!("GS: {}", snap.training_gs));
+                                }
+                            }
+                            crate::data::TrainingPhase::Status(text) => {
+                                ui.separator();
+                                ui.spinner();
+                                ui.label(text);
+                            }
+                        }
+                    }
+                    AdversarialPhase::GA { grid_size, .. } => {
+                        let progress = if snap.ga_total_generations > 0 {
+                            snap.ga_generation as f32 / snap.ga_total_generations as f32
+                        } else {
+                            0.0
+                        };
+                        ui.label(format!("GA gs={grid_size}"));
+                        ui.separator();
+                        ui.add(
+                            egui::ProgressBar::new(progress)
+                                .text(format!(
+                                    "Gen {}/{}",
+                                    snap.ga_generation, snap.ga_total_generations
+                                ))
+                                .desired_width(150.0),
+                        );
+
+                        if let Some((occupied, total)) = snap.archive_occ {
+                            ui.separator();
+                            ui.label(format!("Archive: {occupied}/{total}"));
+                        }
+                    }
+                }
+
+                // Right-align Stop button
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Stop").clicked() {
+                        state.stop();
+                    }
+                });
+            });
+        }
+        StatusKind::Done => {
+            ui.horizontal(|ui: &mut Ui| {
+                ui.colored_label(egui::Color32::GREEN, "Adversarial loop complete");
+                if ui.button("Reset").clicked() {
+                    state.status = AdversarialStatus::Idle;
+                }
+            });
+        }
+        StatusKind::Error(msg) => {
+            ui.horizontal(|ui: &mut Ui| {
+                ui.colored_label(egui::Color32::RED, format!("Error: {msg}"));
+                if ui.button("Dismiss").clicked() {
+                    state.status = AdversarialStatus::Idle;
+                }
+            });
+        }
+    }
+}
+
+/// Draw the configuration window.
+fn draw_config_window(ui: &mut Ui, config: &mut AdversarialConfig, show: &mut bool) {
+    egui::Window::new("Adversarial Loop Config")
+        .open(show)
         .resizable(false)
-        .default_width(250.0)
+        .default_width(280.0)
         .show(ui.ctx(), |ui| {
-            egui::Grid::new("ga_config_grid")
+            egui::Grid::new("adv_config_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("Grid size:");
-                    egui::ComboBox::from_id_salt("ga_grid_size")
-                        .selected_text(format!("{}", state.config.grid_size))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut state.config.grid_size, 6, "6");
-                            ui.selectable_value(&mut state.config.grid_size, 8, "8");
-                            ui.selectable_value(&mut state.config.grid_size, 10, "10");
-                        });
+                    ui.label("Rounds:");
+                    ui.add(egui::DragValue::new(&mut config.n_rounds).range(1..=20));
                     ui.end_row();
 
-                    ui.label("Population:");
-                    ui.add(egui::DragValue::new(&mut state.config.pop_size).range(4..=512));
+                    ui.label("Epochs/round:");
+                    ui.add(egui::DragValue::new(&mut config.epochs_per_round).range(1..=100));
                     ui.end_row();
 
-                    ui.label("Generations:");
-                    ui.add(egui::DragValue::new(&mut state.config.generations).range(1..=1000));
+                    ui.label("Batch size:");
+                    ui.add(egui::DragValue::new(&mut config.batch_size).range(64..=8192));
                     ui.end_row();
 
-                    ui.label("Elite fraction:");
+                    ui.label("Learning rate:");
                     ui.add(
-                        egui::DragValue::new(&mut state.config.elite_frac)
-                            .range(0.0..=0.5)
-                            .speed(0.01)
-                            .max_decimals(2),
+                        egui::DragValue::new(&mut config.lr)
+                            .range(1e-6..=1e-1)
+                            .speed(1e-5)
+                            .max_decimals(6),
                     );
-                    ui.end_row();
-
-                    ui.label("Crossover rate:");
-                    ui.add(
-                        egui::DragValue::new(&mut state.config.crossover_rate)
-                            .range(0.0..=1.0)
-                            .speed(0.01)
-                            .max_decimals(2),
-                    );
-                    ui.end_row();
-
-                    ui.label("Crossover mode:");
-                    egui::ComboBox::from_id_salt("ga_crossover_mode")
-                        .selected_text(state.config.crossover_mode.label())
-                        .show_ui(ui, |ui| {
-                            for mode in CrossoverMode::ALL {
-                                ui.selectable_value(
-                                    &mut state.config.crossover_mode,
-                                    mode,
-                                    mode.label(),
-                                );
-                            }
-                        });
                     ui.end_row();
 
                     ui.label("Seed:");
-                    ui.add(egui::DragValue::new(&mut state.config.seed));
+                    ui.add(egui::DragValue::new(&mut config.seed).range(0..=9999));
                     ui.end_row();
                 });
 
             ui.separator();
-            ui.label("Mutation weights:");
-            egui::Grid::new("ga_mutation_grid")
+            ui.label("GA settings:");
+            egui::Grid::new("adv_ga_config_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("Toggle wall:");
+                    ui.label("Population:");
+                    ui.add(egui::DragValue::new(&mut config.ga_config.pop_size).range(4..=512));
+                    ui.end_row();
+
+                    ui.label("Generations:");
                     ui.add(
-                        egui::DragValue::new(&mut state.config.w_wall)
-                            .range(0.0..=20.0)
+                        egui::DragValue::new(&mut config.ga_config.generations).range(1..=1000),
+                    );
+                    ui.end_row();
+
+                    ui.label("Target log WP:");
+                    ui.add(
+                        egui::DragValue::new(&mut config.target_log_wp)
+                            .range(-10.0..=0.0)
                             .speed(0.1)
                             .max_decimals(1),
                     );
                     ui.end_row();
 
-                    ui.label("Move entity:");
+                    ui.label("BFS bins:");
                     ui.add(
-                        egui::DragValue::new(&mut state.config.w_move_entity)
-                            .range(0.0..=20.0)
-                            .speed(0.1)
-                            .max_decimals(1),
+                        egui::DragValue::new(&mut config.archive_bfs_bins).range(5..=50),
                     );
                     ui.end_row();
 
-                    ui.label("Move player:");
+                    ui.label("States bins:");
                     ui.add(
-                        egui::DragValue::new(&mut state.config.w_move_player)
-                            .range(0.0..=20.0)
-                            .speed(0.1)
-                            .max_decimals(1),
+                        egui::DragValue::new(&mut config.archive_states_bins).range(5..=50),
                     );
                     ui.end_row();
-
-                    ui.label("Add entity:");
-                    ui.add(
-                        egui::DragValue::new(&mut state.config.w_add_entity)
-                            .range(0.0..=20.0)
-                            .speed(0.1)
-                            .max_decimals(1),
-                    );
-                    ui.end_row();
-
-                    ui.label("Remove entity:");
-                    ui.add(
-                        egui::DragValue::new(&mut state.config.w_remove_entity)
-                            .range(0.0..=20.0)
-                            .speed(0.1)
-                            .max_decimals(1),
-                    );
-                    ui.end_row();
-
-                    ui.label("Move exit:");
-                    ui.add(
-                        egui::DragValue::new(&mut state.config.w_move_exit)
-                            .range(0.0..=20.0)
-                            .speed(0.1)
-                            .max_decimals(1),
-                    );
-                    ui.end_row();
-
-                    ui.label("Extra wall prob:");
-                    ui.add(
-                        egui::DragValue::new(&mut state.config.extra_wall_prob)
-                            .range(0.0..=1.0)
-                            .speed(0.01)
-                            .max_decimals(2),
-                    );
-                    ui.end_row();
-                });
-
-            ui.separator();
-
-            // Policy net section
-            ui.checkbox(&mut state.use_policy, "Use policy net");
-            if state.use_policy {
-                ui.horizontal(|ui| {
-                    ui.label("Checkpoint:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.policy_checkpoint)
-                            .desired_width(ui.available_width() - 4.0)
-                            .hint_text("path/to/model.eqx")
-                            .font(egui::TextStyle::Monospace),
-                    );
-                });
-                if state.policy_checkpoint.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Set checkpoint path to use policy_win_prob",
-                    );
-                }
-            }
-
-            ui.separator();
-            ui.label("Fitness expression:");
-
-            // Preset dropdown
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("fitness_preset")
-                    .selected_text("Presets")
-                    .show_ui(ui, |ui| {
-                        for (name, expr) in PRESETS {
-                            if ui
-                                .selectable_label(
-                                    state.config.fitness_expr == *expr,
-                                    format!("{name}: {expr}"),
-                                )
-                                .clicked()
-                            {
-                                state.config.fitness_expr = expr.to_string();
-                                state.fitness_error.clear();
-                            }
-                        }
-                    });
-            });
-
-            // Expression text field
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.config.fitness_expr)
-                    .desired_width(ui.available_width())
-                    .font(egui::TextStyle::Monospace),
-            );
-            if response.changed() {
-                // Revalidate on every change
-                match FitnessExpr::parse(&state.config.fitness_expr) {
-                    Ok(_) => state.fitness_error.clear(),
-                    Err(e) => state.fitness_error = e,
-                }
-            }
-            if !state.fitness_error.is_empty() {
-                ui.colored_label(egui::Color32::RED, &state.fitness_error);
-            }
-
-            // Variable reference
-            egui::CollapsingHeader::new("Available variables")
-                .default_open(false)
-                .show(ui, |ui| {
-                    for (name, desc) in mummymaze::ga::fitness::VARIABLES {
-                        ui.horizontal(|ui| {
-                            ui.monospace(*name);
-                            ui.label("—");
-                            ui.label(*desc);
-                        });
-                    }
                 });
         });
+}
 
-    ui.separator();
+/// Draw the MAP-Elites archive heatmap.
+fn draw_archive_heatmap(ui: &mut Ui, snapshot: Option<&ArchiveSnapshot>, target_log_wp: f64) {
+    ui.label("MAP-Elites Archive");
 
-    // Mini maze preview + stats
-    if let Some(ref best) = state.best {
-        let best_state = State::from_level(&best.level);
+    let Some(snap) = snapshot else {
+        ui.colored_label(egui::Color32::GRAY, "No archive data yet");
+        return;
+    };
 
-        // Maze preview
-        let available = ui.available_width();
-        let side = available.min(300.0);
-        let size = egui::Vec2::new(side, side);
-        let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
-        render::draw_maze_state(&painter, response.rect, &best.level, &best_state);
+    let occupied = snap.cells.iter().filter(|c| c.is_some()).count();
+    let total = snap.cells.len();
+    ui.label(format!("{occupied}/{total} cells occupied"));
 
-        // Stats below maze
-        ui.horizontal(|ui: &mut egui::Ui| {
-            let wp = if best.win_prob != 0.0 && best.win_prob.abs() < 0.0001 {
-                format!("{:.2e}", best.win_prob)
-            } else {
-                format!("{:.4}", best.win_prob)
+    let available = ui.available_size();
+    let side = available.x.min(available.y).min(300.0);
+    let size = egui::Vec2::new(side, side);
+    let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
+    let rect = response.rect;
+
+    let cell_w = rect.width() / snap.bfs_bins as f32;
+    let cell_h = rect.height() / snap.states_bins as f32;
+
+    for bi in 0..snap.bfs_bins {
+        for si in 0..snap.states_bins {
+            let idx = bi * snap.states_bins + si;
+            let x = rect.left() + bi as f32 * cell_w;
+            // Invert Y so states_bins increases upward
+            let y = rect.bottom() - (si + 1) as f32 * cell_h;
+            let cell_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h));
+
+            let color = match &snap.cells[idx] {
+                None => egui::Color32::from_gray(40),
+                Some(cell) => {
+                    let dist = (cell.log_policy_wp - target_log_wp).abs();
+                    // Map distance to color: 0 = green, >2 = red
+                    let t = (dist / 2.0).min(1.0) as f32;
+                    let r = (t * 220.0) as u8 + 30;
+                    let g = ((1.0 - t) * 200.0) as u8 + 30;
+                    egui::Color32::from_rgb(r, g, 50)
+                }
             };
-            ui.label(format!(
-                "BFS: {}  States: {}  Win%: {}  Fitness: {:.4}",
-                best.bfs_moves, best.n_states, wp, best.fitness
-            ));
-        });
 
-        if ui.button("Load into Maze").clicked() {
-            load_level = Some(best.level.clone());
+            painter.rect_filled(cell_rect, 0.0, color);
         }
-
-        ui.separator();
     }
 
-    // Fitness chart
-    if !state.history.is_empty() {
-        ui.label("Fitness over generations");
-        let best_line: egui_plot::PlotPoints = state
-            .history
+    // Grid lines
+    let grid_color = egui::Color32::from_gray(60);
+    for i in 0..=snap.bfs_bins {
+        let x = rect.left() + i as f32 * cell_w;
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(0.5, grid_color),
+        );
+    }
+    for i in 0..=snap.states_bins {
+        let y = rect.top() + i as f32 * cell_h;
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(0.5, grid_color),
+        );
+    }
+
+    // Tooltip on hover
+    if let Some(hover_pos) = response.hover_pos() {
+        let bi = ((hover_pos.x - rect.left()) / cell_w) as usize;
+        let si = snap.states_bins.saturating_sub(1)
+            - ((hover_pos.y - rect.top()) / cell_h).min(snap.states_bins as f32 - 1.0) as usize;
+        if bi < snap.bfs_bins && si < snap.states_bins {
+            let idx = bi * snap.states_bins + si;
+            if let Some(ref cell) = snap.cells[idx] {
+                response.clone().on_hover_ui_at_pointer(|ui: &mut Ui| {
+                    ui.label(format!("BFS moves: {}", cell.bfs_moves));
+                    ui.label(format!("States: {}", cell.n_states));
+                    ui.label(format!("log(policy WP): {:.2}", cell.log_policy_wp));
+                    ui.label(format!(
+                        "|dist to target|: {:.2}",
+                        (cell.log_policy_wp - target_log_wp).abs()
+                    ));
+                });
+            }
+        }
+    }
+
+    // Axis labels
+    ui.horizontal(|ui| {
+        ui.label(format!("BFS: {}..{}", snap.bfs_range.0, snap.bfs_range.1));
+        ui.separator();
+        ui.label(format!("States: {}..{}", snap.states_range.0, snap.states_range.1));
+    });
+}
+
+/// Draw GA fitness history and archive occupancy.
+fn draw_ga_charts(
+    ui: &mut Ui,
+    ga_history: &[(usize, f64, f64)],
+    occupancy_history: &[(usize, usize)],
+) {
+    if !ga_history.is_empty() {
+        ui.label("GA Fitness");
+        let best_line: egui_plot::PlotPoints = ga_history
             .iter()
-            .map(|(g, best, _avg)| [*g as f64, *best])
+            .map(|(g, best, _)| [*g as f64, *best])
             .collect();
-        let avg_line: egui_plot::PlotPoints = state
-            .history
+        let avg_line: egui_plot::PlotPoints = ga_history
             .iter()
-            .map(|(g, _best, avg)| [*g as f64, *avg])
+            .map(|(g, _, avg)| [*g as f64, *avg])
             .collect();
 
-        let plot = egui_plot::Plot::new("fitness_chart")
-            .height(200.0)
+        let plot = egui_plot::Plot::new("adv_ga_fitness")
+            .height(180.0)
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
@@ -505,36 +452,32 @@ pub fn draw_adversarial_panel(
         });
     }
 
-    load_level
-}
+    if !occupancy_history.is_empty() {
+        ui.add_space(8.0);
+        ui.label("Archive Occupancy");
+        let occ_points: egui_plot::PlotPoints = occupancy_history
+            .iter()
+            .enumerate()
+            .map(|(i, (_, occ))| [i as f64, *occ as f64])
+            .collect();
 
-/// Try to extract a progress fraction from "... N/M" strings.
-fn parse_progress_frac(msg: &str) -> Option<f32> {
-    let slash_part = msg.rsplit_once(' ')?.1;
-    let (done_s, total_s) = slash_part.split_once('/')?;
-    let done: f32 = done_s.parse().ok()?;
-    let total: f32 = total_s.parse().ok()?;
-    if total > 0.0 {
-        Some(done / total)
-    } else {
-        None
-    }
-}
+        let plot = egui_plot::Plot::new("adv_archive_occ")
+            .height(100.0)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .x_axis_label("Update")
+            .y_axis_label("Occupied");
 
-/// Find the newest .eqx checkpoint in `checkpoints/`.
-fn latest_checkpoint() -> Option<String> {
-    let dir = PathBuf::from("checkpoints");
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(&dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if path.extension().map_or(true, |e| e != "eqx") {
-            continue;
-        }
-        let mtime = entry.metadata().ok()?.modified().ok()?;
-        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
-            best = Some((mtime, path));
-        }
+        plot.show(ui, |plot_ui| {
+            plot_ui.line(
+                egui_plot::Line::new(occ_points)
+                    .color(egui::Color32::from_rgb(100, 200, 100)),
+            );
+        });
     }
-    best.map(|(_, p)| p.to_string_lossy().into_owned())
+
+    if ga_history.is_empty() && occupancy_history.is_empty() {
+        ui.colored_label(egui::Color32::GRAY, "No GA data yet");
+    }
 }

@@ -1,4 +1,6 @@
+mod adversarial;
 mod adversarial_tab;
+mod level_gen_tab;
 mod agent_probs;
 mod data;
 mod gameplay;
@@ -22,6 +24,7 @@ use rustc_hash::FxHashMap;
 enum RightTab {
     Graph,
     Training,
+    LevelGen,
     Adversarial,
     Logs,
 }
@@ -37,7 +40,8 @@ struct App {
     /// Analysis for GA-generated levels (not in the dataset).
     generated_analysis: Option<mummymaze::batch::LevelAnalysis>,
     agent_probs: AgentProbs,
-    adversarial: adversarial_tab::AdversarialState,
+    level_gen: level_gen_tab::LevelGenState,
+    adversarial: adversarial::AdversarialState,
     show_bfs_overlay: bool,
     show_agent_overlay: bool,
     right_tab: RightTab,
@@ -64,7 +68,8 @@ impl App {
             bfs_optimal: FxHashMap::default(),
             generated_analysis: None,
             agent_probs,
-            adversarial: adversarial_tab::AdversarialState::new(),
+            level_gen: level_gen_tab::LevelGenState::new(),
+            adversarial: adversarial::AdversarialState::new(),
             show_bfs_overlay: false,
             show_agent_overlay: false,
             right_tab: RightTab::Graph,
@@ -283,12 +288,19 @@ impl eframe::App for App {
         if self.agent_probs.poll() {
             ctx.request_repaint();
         }
-        // Poll adversarial GA progress
-        if self.adversarial.poll() {
+        // Poll level gen GA progress
+        if self.level_gen.poll() {
+            ctx.request_repaint();
+        }
+        if self.level_gen.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // Poll adversarial loop
+        if self.adversarial.poll(&self.maze_dir, &self.store.rows) {
             ctx.request_repaint();
         }
         if self.adversarial.is_running() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
         // Consume keyboard input for gameplay BEFORE panels process it
@@ -400,7 +412,8 @@ impl eframe::App for App {
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.selectable_value(&mut self.right_tab, RightTab::Graph, "Graph");
                 ui.selectable_value(&mut self.right_tab, RightTab::Training, "Training");
-                ui.selectable_value(&mut self.right_tab, RightTab::Adversarial, "Level Gen");
+                ui.selectable_value(&mut self.right_tab, RightTab::LevelGen, "Level Gen");
+                ui.selectable_value(&mut self.right_tab, RightTab::Adversarial, "Adversarial");
                 let log_label = if self.store.log_messages.is_empty() {
                     "Logs".to_string()
                 } else {
@@ -419,9 +432,9 @@ impl eframe::App for App {
                         self.select_level(clicked);
                     }
                 }
-                RightTab::Adversarial => {
+                RightTab::LevelGen => {
                     if let Some(level) =
-                        adversarial_tab::draw_adversarial_panel(ui, &mut self.adversarial, &self.store.rows)
+                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows)
                     {
                         // Load GA-generated level into maze panel
                         self.gameplay = Some(GameplayState::new(level.clone()));
@@ -436,6 +449,14 @@ impl eframe::App for App {
                         }
                         self.store.selected = None;
                     }
+                }
+                RightTab::Adversarial => {
+                    adversarial_tab::draw_panel(
+                        ui,
+                        &mut self.adversarial,
+                        &self.store.rows,
+                        &self.maze_dir,
+                    );
                 }
                 RightTab::Logs => {
                     ui.horizontal(|ui: &mut egui::Ui| {

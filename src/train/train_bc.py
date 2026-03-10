@@ -549,6 +549,10 @@ def train(
   metrics_path: Path = Path("level_metrics.json"),
   checkpoint_dir: Path = Path("checkpoints"),
   reporter: FileReporter | StdioReporter | None = None,
+  checkpoint: Path | None = None,
+  augment_levels: Path | None = None,
+  epoch_offset: int = 0,
+  step_offset: int = 0,
 ) -> MazeCNN:
   """Main training loop."""
   if reporter is None:
@@ -569,9 +573,40 @@ def train(
       n_val = int(ds.val_mask.sum())
       print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
 
+  # Augment dataset with additional levels if provided
+  if augment_levels is not None:
+    from src.train.augment import augment_dataset
+
+    with open(augment_levels) as f:
+      level_dicts = json.load(f)
+    # JSON arrays → Python lists, but PyO3 from_dict expects tuples for
+    # coordinate fields. Convert coordinate lists to tuples.
+    _COORD_KEYS = {"player", "mummy1", "mummy2", "scorpion", "gate", "key"}
+    for d in level_dicts:
+      for k in _COORD_KEYS:
+        v = d.get(k)
+        if isinstance(v, list):
+          d[k] = tuple(v)
+      if isinstance(d.get("traps"), list):
+        d["traps"] = [tuple(t) for t in d["traps"]]
+    levels = [mummymaze_rust.Level.from_dict(d) for d in level_dicts]
+    if use_tqdm:
+      print(f"Augmenting dataset with {len(levels)} levels...")
+    datasets = augment_dataset(datasets, levels)
+    if use_tqdm:
+      for gs, ds in sorted(datasets.items()):
+        n_train = int(ds.train_mask.sum())
+        print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
+
   # Initialize model
   key, model_key = jr.split(key)
   model = MazeCNN(model_key)
+
+  # Load checkpoint weights if provided
+  if checkpoint is not None:
+    if use_tqdm:
+      print(f"Loading checkpoint: {checkpoint}")
+    model = eqx.tree_deserialise_leaves(checkpoint, model)
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
   if use_tqdm:
     print(f"Model: {n_params:,} parameters")
@@ -641,6 +676,8 @@ def train(
     reporter=reporter,
     maze_dir=maze_dir,
     key=key,
+    epoch_offset=epoch_offset,
+    step_offset=step_offset,
     wandb_project=wandb_project,
     run_id=run_id,
   )
@@ -677,6 +714,20 @@ def main() -> None:
     default="standalone",
     help="standalone: tqdm + file output; subprocess: JSON lines to stdout",
   )
+  parser.add_argument(
+    "--checkpoint",
+    type=Path,
+    default=None,
+    help="Load model weights from .eqx file instead of random init",
+  )
+  parser.add_argument(
+    "--augment-levels",
+    type=Path,
+    default=None,
+    help="JSON file of serialized levels to augment the dataset",
+  )
+  parser.add_argument("--epoch-offset", type=int, default=0)
+  parser.add_argument("--step-offset", type=int, default=0)
   args = parser.parse_args()
 
   # Create reporter based on mode
@@ -696,6 +747,10 @@ def main() -> None:
       metrics_path=args.metrics_path,
       checkpoint_dir=args.checkpoint_dir,
       reporter=reporter,
+      checkpoint=args.checkpoint,
+      augment_levels=args.augment_levels,
+      epoch_offset=args.epoch_offset,
+      step_offset=args.step_offset,
     )
   except Exception as e:
     if args.mode == "subprocess":

@@ -42,15 +42,30 @@ struct LevelObsData {
 impl PolicyClient {
     /// Spawn the policy server subprocess.
     pub fn spawn(checkpoint: &Path) -> Result<Self, String> {
-        let child = Command::new("uv")
-            .args([
-                "run",
-                "python",
-                "-m",
-                "src.train.policy_server",
-                "--checkpoint",
-            ])
-            .arg(checkpoint.as_os_str())
+        Self::spawn_with_max_batch(checkpoint, 0)
+    }
+
+    /// Spawn the policy server with an optional max batch size cap.
+    ///
+    /// If `max_batch_size > 0`, levels with more states than this are processed
+    /// in chunks to avoid GPU OOM. Use the training batch size as a good default.
+    pub fn spawn_with_max_batch(
+        checkpoint: &Path,
+        max_batch_size: u32,
+    ) -> Result<Self, String> {
+        let mut cmd = Command::new("uv");
+        cmd.args([
+            "run",
+            "python",
+            "-m",
+            "src.train.policy_server",
+            "--checkpoint",
+        ])
+        .arg(checkpoint.as_os_str());
+        if max_batch_size > 0 {
+            cmd.args(["--max-batch-size", &max_batch_size.to_string()]);
+        }
+        let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

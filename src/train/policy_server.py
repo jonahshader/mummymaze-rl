@@ -183,8 +183,13 @@ def _next_power_of_2(n: int) -> int:
   return 1 << (n - 1).bit_length()
 
 
-def serve(checkpoint_path: Path) -> None:
-  """Main loop: read requests from stdin, write to stdout."""
+def serve(checkpoint_path: Path, max_batch_size: int = 0) -> None:
+  """Main loop: read requests from stdin, write to stdout.
+
+  Args:
+    max_batch_size: If >0, cap the padded batch size to this power-of-2 value
+      and process large levels in chunks. Prevents GPU OOM on huge state graphs.
+  """
   model = MazeCNN(jax.random.key(0))
   model = eqx.tree_deserialise_leaves(checkpoint_path, model)
 
@@ -265,27 +270,36 @@ def serve(checkpoint_path: Path) -> None:
       if n_st == 0:
         continue
 
-      padded_size = _next_power_of_2(n_st)
-      if padded_size not in jitted_sizes:
-        print(
-          f"policy_server: JIT compiling for batch_size={padded_size}",
-          file=stderr,
-          flush=True,
-        )
-        jitted_sizes.add(padded_size)
+      # Chunk large levels to stay within GPU memory.
+      chunk_size = max_batch_size if max_batch_size > 0 else n_st
+      all_probs = []
+      for chunk_start in range(0, n_st, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_st)
+        chunk_n = chunk_end - chunk_start
+        chunk_st = st[chunk_start:chunk_end]
 
-      # Pad state tuples to power-of-2 size
-      if padded_size > n_st:
-        padding = np.zeros((padded_size - n_st, 12), dtype=np.int32)
-        padded_st = np.concatenate([st, padding], axis=0)
-      else:
-        padded_st = st
+        padded_size = _next_power_of_2(chunk_n)
+        if padded_size not in jitted_sizes:
+          print(
+            f"policy_server: JIT compiling for batch_size={padded_size}",
+            file=stderr,
+            flush=True,
+          )
+          jitted_sizes.add(padded_size)
 
-      env_states = _state_tuples_to_env_states(padded_st)
-      logits = _obs_and_forward(grid_size, ld, env_states)
-      # Take only real states, apply softmax
+        # Pad state tuples to power-of-2 size
+        if padded_size > chunk_n:
+          padding = np.zeros((padded_size - chunk_n, 12), dtype=np.int32)
+          padded_st = np.concatenate([chunk_st, padding], axis=0)
+        else:
+          padded_st = chunk_st
+
+        env_states = _state_tuples_to_env_states(padded_st)
+        logits = _obs_and_forward(grid_size, ld, env_states)
+        all_probs.append(np.array(logits[:chunk_n]))
+
       probs = scipy_softmax(
-        np.array(logits[:n_st]),
+        np.concatenate(all_probs, axis=0) if len(all_probs) > 1 else all_probs[0],
         axis=-1,
       ).astype(np.float32)
       stdout.write(probs.tobytes())
@@ -314,6 +328,13 @@ def main() -> None:
     required=True,
     help="Path to .eqx checkpoint",
   )
+  parser.add_argument(
+    "--max-batch-size",
+    type=int,
+    default=0,
+    help="Cap padded batch size (power of 2). Levels with more states are "
+    "processed in chunks. 0 = no cap.",
+  )
   args = parser.parse_args()
 
   if not args.checkpoint.exists():
@@ -323,7 +344,7 @@ def main() -> None:
     )
     sys.exit(1)
 
-  serve(args.checkpoint)
+  serve(args.checkpoint, max_batch_size=args.max_batch_size)
 
 
 if __name__ == "__main__":

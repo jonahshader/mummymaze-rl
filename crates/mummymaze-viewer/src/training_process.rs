@@ -113,9 +113,27 @@ pub struct TrainingProcess {
     child: Option<Child>,
 }
 
+/// Optional extra args for adversarial loop training invocations.
+pub struct TrainingSpawnArgs {
+    pub checkpoint: Option<std::path::PathBuf>,
+    pub augment_levels: Option<std::path::PathBuf>,
+    pub checkpoint_dir: Option<std::path::PathBuf>,
+    pub epoch_offset: u32,
+    pub step_offset: u32,
+}
+
 impl TrainingProcess {
     /// Spawn the Python training subprocess.
     pub fn spawn(maze_dir: &Path, config: &TrainingConfig) -> Result<Self, String> {
+        Self::spawn_with_args(maze_dir, config, None)
+    }
+
+    /// Spawn with optional adversarial loop args (checkpoint continuation, augmentation).
+    pub fn spawn_with_args(
+        maze_dir: &Path,
+        config: &TrainingConfig,
+        extra: Option<&TrainingSpawnArgs>,
+    ) -> Result<Self, String> {
         let mut cmd = Command::new("uv");
         cmd.args([
             "run",
@@ -133,6 +151,23 @@ impl TrainingProcess {
         .args(["--seed", &config.seed.to_string()]);
         if config.wandb {
             cmd.args(["--wandb-project", &config.wandb_project]);
+        }
+        if let Some(extra) = extra {
+            if let Some(ref ckpt) = extra.checkpoint {
+                cmd.args(["--checkpoint", &ckpt.to_string_lossy()]);
+            }
+            if let Some(ref aug) = extra.augment_levels {
+                cmd.args(["--augment-levels", &aug.to_string_lossy()]);
+            }
+            if let Some(ref dir) = extra.checkpoint_dir {
+                cmd.args(["--checkpoint-dir", &dir.to_string_lossy()]);
+            }
+            if extra.epoch_offset > 0 {
+                cmd.args(["--epoch-offset", &extra.epoch_offset.to_string()]);
+            }
+            if extra.step_offset > 0 {
+                cmd.args(["--step-offset", &extra.step_offset.to_string()]);
+            }
         }
         let mut child = cmd
             .stdout(Stdio::piped())

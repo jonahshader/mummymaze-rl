@@ -21,7 +21,7 @@ pub fn draw_training_panel(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) 
     // Epoch history curves with draggable divider
     let has_curves = !store.epoch_history.is_empty() || !store.batch_loss_history.is_empty();
     if has_curves {
-        draw_epoch_curves(ui, &store.epoch_history, &store.batch_loss_history, store.curve_plot_height);
+        draw_epoch_curves(ui, &store.epoch_history, &store.batch_loss_history, store.curve_plot_height, &[]);
 
         // Draggable separator
         let sep_id = ui.id().with("curve_sep");
@@ -384,7 +384,14 @@ fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, maze_dir: &Path) {
 }
 
 /// Draw loss curves, accuracy curves, and batch loss over epochs.
-fn draw_epoch_curves(ui: &mut Ui, history: &[EpochRecord], batch_loss: &[[f64; 2]], height: f32) {
+/// `round_boundaries` contains epoch numbers where new rounds start (vertical lines).
+pub fn draw_epoch_curves(
+    ui: &mut Ui,
+    history: &[EpochRecord],
+    batch_loss: &[[f64; 2]],
+    height: f32,
+    round_boundaries: &[usize],
+) {
     let train_color = egui::Color32::from_rgb(70, 130, 230); // blue
     let val_color = egui::Color32::from_rgb(230, 150, 50); // orange
 
@@ -409,6 +416,7 @@ fn draw_epoch_curves(ui: &mut Ui, history: &[EpochRecord], batch_loss: &[[f64; 2
                 .collect();
             plot_ui.line(Line::new(train).color(train_color).name("Train"));
             plot_ui.line(Line::new(val).color(val_color).name("Val"));
+            draw_round_vlines(plot_ui, round_boundaries);
         });
 
         // Middle: Epoch Accuracy
@@ -431,6 +439,7 @@ fn draw_epoch_curves(ui: &mut Ui, history: &[EpochRecord], batch_loss: &[[f64; 2
                 .collect();
             plot_ui.line(Line::new(train).color(train_color).name("Train"));
             plot_ui.line(Line::new(val).color(val_color).name("Val"));
+            draw_round_vlines(plot_ui, round_boundaries);
         });
 
         // Right: Batch Loss
@@ -446,4 +455,17 @@ fn draw_epoch_curves(ui: &mut Ui, history: &[EpochRecord], batch_loss: &[[f64; 2
             plot_ui.line(Line::new(pts).color(train_color).name("Batch Loss"));
         });
     });
+}
+
+/// Draw dashed vertical lines at round boundaries on epoch-axis plots.
+fn draw_round_vlines(plot_ui: &mut egui_plot::PlotUi, boundaries: &[usize]) {
+    let boundary_color = egui::Color32::from_rgba_premultiplied(180, 180, 180, 120);
+    for &epoch in boundaries {
+        let x = epoch as f64;
+        let vline = egui_plot::VLine::new(x)
+            .color(boundary_color)
+            .width(1.0)
+            .style(egui_plot::LineStyle::dashed_dense());
+        plot_ui.vline(vline);
+    }
 }

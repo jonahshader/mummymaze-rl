@@ -130,7 +130,10 @@ pub enum GaMessage {
     ArchiveUpdate {
         occupancy: usize,
         total_cells: usize,
+        grid: archive::ArchiveSnapshot,
     },
+    /// Final archive levels when GA with archive completes.
+    ArchiveLevels(Vec<Level>),
     Done,
     Error(String),
 }
@@ -333,6 +336,7 @@ fn archive_insert_batch(
         let _ = tx.send(GaMessage::ArchiveUpdate {
             occupancy: occ,
             total_cells: total,
+            grid: arch.snapshot(),
         });
     }
 }
@@ -508,6 +512,11 @@ fn run_ga_inner(
         }
     }
 
+    // Send archive levels back before Done so the caller can collect them
+    if let Some(ref arch) = archive {
+        let levels: Vec<Level> = arch.levels().into_iter().cloned().collect();
+        let _ = tx.send(GaMessage::ArchiveLevels(levels));
+    }
     let _ = tx.send(GaMessage::Done);
     archive
 }
