@@ -41,7 +41,7 @@ from scipy.special import softmax as scipy_softmax
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
 from src.train.dataset import BCDataset, load_bc_dataset
-from src.train.model import MazeCNN
+from src.train.model import DEFAULT_ARCH, make_model
 from src.train.reporter import (
   FRAME_TYPE_ERROR,
   FRAME_TYPE_TRAINING_EVENT,
@@ -95,11 +95,13 @@ class ModelServer:
     self,
     maze_dir: Path,
     checkpoint: Path | None = None,
+    arch: str = DEFAULT_ARCH,
   ) -> None:
     self.maze_dir = maze_dir
+    self.arch = arch
 
     # Initialize model
-    self.model = MazeCNN(jax.random.key(0))
+    self.model = make_model(arch, jax.random.key(0))
     if checkpoint is not None and checkpoint.exists():
       _log(f"loading checkpoint: {checkpoint}")
       self.model = eqx.tree_deserialise_leaves(checkpoint, self.model)
@@ -251,7 +253,7 @@ class ModelServer:
     epoch_offset = config.get("epoch_offset", 0)
     step_offset = config.get("step_offset", 0)
     augment_levels_path = config.get("augment_levels")
-    run_id = f"bc-cnn-{seed}"
+    run_id = f"bc-{self.arch}-{seed}"
 
     key = jr.key(seed)
     datasets, sources = self._load_datasets()
@@ -363,9 +365,10 @@ class ModelServer:
 def serve(
   maze_dir: Path,
   checkpoint: Path | None = None,
+  arch: str = DEFAULT_ARCH,
 ) -> None:
   """Main serve loop: read framed requests from stdin, write responses to stdout."""
-  server = ModelServer(maze_dir, checkpoint)
+  server = ModelServer(maze_dir, checkpoint, arch=arch)
 
   stdin = sys.stdin.buffer
   stdout = sys.stdout.buffer
@@ -433,9 +436,15 @@ def main() -> None:
     default=None,
     help="Path to .eqx checkpoint (optional, uses random init if absent)",
   )
+  parser.add_argument(
+    "--arch",
+    type=str,
+    default=DEFAULT_ARCH,
+    help=f"Model architecture (default: {DEFAULT_ARCH})",
+  )
   args = parser.parse_args()
 
-  serve(args.mazes, checkpoint=args.checkpoint)
+  serve(args.mazes, checkpoint=args.checkpoint, arch=args.arch)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ from tqdm import tqdm
 from jaxtyping import Array, Float, Int
 
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
-from src.train.model import MazeCNN
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
 from src.train.reporter import FileReporter, FrameReporter, StdioReporter
 
 
@@ -49,13 +49,13 @@ def top1_accuracy(
 
 @eqx.filter_jit
 def train_step(
-  model: MazeCNN,
+  model: eqx.Module,
   opt_state: optax.OptState,
   optimizer: optax.GradientTransformation,
   obs: Float[Array, "B 10 H W"],
   targets: Float[Array, "B 5"],
 ) -> tuple[
-  MazeCNN,
+  eqx.Module,
   optax.OptState,
   Float[Array, ""],
   Float[Array, ""],
@@ -63,7 +63,7 @@ def train_step(
 ]:
   """Single training step: forward, loss, backward, update. Returns logits too."""
 
-  def loss_fn(m: MazeCNN) -> tuple[Float[Array, ""], Float[Array, "B 5"]]:
+  def loss_fn(m: eqx.Module) -> tuple[Float[Array, ""], Float[Array, "B 5"]]:
     logits = jax.vmap(m)(obs)
     loss = cross_entropy_loss(logits, targets)
     return loss, logits
@@ -77,7 +77,7 @@ def train_step(
 
 @eqx.filter_jit
 def eval_step(
-  model: MazeCNN,
+  model: eqx.Module,
   obs: Float[Array, "B 10 H W"],
   targets: Float[Array, "B 5"],
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
@@ -89,7 +89,7 @@ def eval_step(
 
 
 def compute_level_metrics(
-  model: MazeCNN,
+  model: eqx.Module,
   ds: BCDataset,
   batch_size: int,
   pbar: tqdm | None = None,
@@ -246,7 +246,7 @@ def _parse_rust_levels(
 
 
 def train_epochs(
-  model: MazeCNN,
+  model: eqx.Module,
   opt_state: optax.OptState,
   optimizer: optax.GradientTransformation,
   datasets: dict[int, BCDataset],
@@ -262,7 +262,7 @@ def train_epochs(
   step_offset: int = 0,
   wandb_project: str | None = None,
   run_id: str = "bc-cnn",
-) -> tuple[MazeCNN, optax.OptState, int, jax.Array]:
+) -> tuple[eqx.Module, optax.OptState, int, jax.Array]:
   """Run training epochs. Returns (model, opt_state, final_step, key)."""
   use_tqdm = isinstance(reporter, FileReporter)
 
@@ -553,7 +553,8 @@ def train(
   augment_levels: Path | None = None,
   epoch_offset: int = 0,
   step_offset: int = 0,
-) -> MazeCNN:
+  arch: str = DEFAULT_ARCH,
+) -> eqx.Module:
   """Main training loop."""
   if reporter is None:
     reporter = FileReporter(metrics_path)
@@ -600,7 +601,7 @@ def train(
 
   # Initialize model
   key, model_key = jr.split(key)
-  model = MazeCNN(model_key)
+  model = make_model(arch, model_key)
 
   # Load checkpoint weights if provided
   if checkpoint is not None:
@@ -632,7 +633,7 @@ def train(
   opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
   # wandb init
-  run_id = f"bc-cnn-{seed}"
+  run_id = f"bc-{arch}-{seed}"
   if wandb_project is not None:
     import wandb
 
@@ -728,6 +729,13 @@ def main() -> None:
   )
   parser.add_argument("--epoch-offset", type=int, default=0)
   parser.add_argument("--step-offset", type=int, default=0)
+  parser.add_argument(
+    "--arch",
+    type=str,
+    default=DEFAULT_ARCH,
+    choices=sorted(MODEL_REGISTRY),
+    help=f"Model architecture (default: {DEFAULT_ARCH})",
+  )
   args = parser.parse_args()
 
   # Create reporter based on mode
@@ -751,6 +759,7 @@ def main() -> None:
       augment_levels=args.augment_levels,
       epoch_offset=args.epoch_offset,
       step_offset=args.step_offset,
+      arch=args.arch,
     )
   except Exception as e:
     if args.mode == "subprocess":

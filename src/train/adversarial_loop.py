@@ -20,7 +20,7 @@ import optax
 
 from src.train.augment import augment_dataset
 from src.train.dataset import load_bc_dataset
-from src.train.model import MazeCNN
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
 from src.train.reporter import FileReporter
 from src.train.train_bc import train_epochs
 
@@ -41,6 +41,7 @@ def adversarial_loop(
   grid_sizes: list[int] | None = None,
   checkpoint_dir: Path = Path("checkpoints/adversarial"),
   metrics_path: Path = Path("level_metrics_adversarial.json"),
+  arch: str = DEFAULT_ARCH,
 ) -> None:
   """Run the adversarial training loop."""
   if grid_sizes is None:
@@ -61,7 +62,7 @@ def adversarial_loop(
 
   # Initialize model
   key, model_key = jr.split(key)
-  model = MazeCNN(model_key)
+  model = make_model(arch, model_key)
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
   print(f"Model: {n_params:,} parameters")
 
@@ -129,7 +130,7 @@ def adversarial_loop(
       key=key,
       epoch_offset=global_epoch,
       step_offset=global_step,
-      run_id=f"adversarial-r{round_idx}",
+      run_id=f"adversarial-{arch}-r{round_idx}",
     )
     global_epoch += epochs_per_round
 
@@ -276,6 +277,13 @@ def main() -> None:
     type=Path,
     default=Path("level_metrics_adversarial.json"),
   )
+  parser.add_argument(
+    "--arch",
+    type=str,
+    default=DEFAULT_ARCH,
+    choices=sorted(MODEL_REGISTRY),
+    help=f"Model architecture (default: {DEFAULT_ARCH})",
+  )
   args = parser.parse_args()
 
   adversarial_loop(
@@ -293,6 +301,7 @@ def main() -> None:
     grid_sizes=args.grid_sizes,
     checkpoint_dir=args.checkpoint_dir,
     metrics_path=args.metrics_path,
+    arch=args.arch,
   )
 
 

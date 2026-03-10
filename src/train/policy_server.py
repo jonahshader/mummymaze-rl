@@ -48,7 +48,7 @@ from scipy.special import softmax as scipy_softmax
 
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
-from src.train.model import MazeCNN
+from src.train.model import DEFAULT_ARCH, make_model
 from src.train.wire import (
   next_power_of_2,
   read_exact,
@@ -58,14 +58,17 @@ from src.train.wire import (
 )
 
 
-def serve(checkpoint_path: Path, max_batch_size: int = 0) -> None:
+def serve(
+  checkpoint_path: Path, max_batch_size: int = 0, arch: str = DEFAULT_ARCH
+) -> None:
   """Main loop: read requests from stdin, write to stdout.
 
   Args:
     max_batch_size: If >0, cap the padded batch size to this power-of-2 value
       and process large levels in chunks. Prevents GPU OOM on huge state graphs.
+    arch: Model architecture name from MODEL_REGISTRY.
   """
-  model = MazeCNN(jax.random.key(0))
+  model = make_model(arch, jax.random.key(0))
   model = eqx.tree_deserialise_leaves(checkpoint_path, model)
 
   @functools.partial(jax.jit, static_argnums=(0,))
@@ -210,6 +213,12 @@ def main() -> None:
     help="Cap padded batch size (power of 2). Levels with more states are "
     "processed in chunks. 0 = no cap.",
   )
+  parser.add_argument(
+    "--arch",
+    type=str,
+    default=DEFAULT_ARCH,
+    help=f"Model architecture (default: {DEFAULT_ARCH})",
+  )
   args = parser.parse_args()
 
   if not args.checkpoint.exists():
@@ -219,7 +228,7 @@ def main() -> None:
     )
     sys.exit(1)
 
-  serve(args.checkpoint, max_batch_size=args.max_batch_size)
+  serve(args.checkpoint, max_batch_size=args.max_batch_size, arch=args.arch)
 
 
 if __name__ == "__main__":
