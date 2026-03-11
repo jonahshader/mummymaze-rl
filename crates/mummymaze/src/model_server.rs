@@ -20,17 +20,19 @@
 //! - `0x82` TrainingEvent — UTF-8 JSON line
 //! - `0x83` Error — UTF-8 error message
 
+use crate::event_types::{self, RawTrainingEvent};
 use crate::game::State;
 use crate::graph::StateGraph;
 use crate::parse::Level;
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+
+// Re-export shared types for backwards compatibility
+pub use crate::event_types::{DatasetInfo, LevelMetric, TrainingEvent};
 
 // Request types
 const REQ_EVALUATE: u8 = 0x01;
@@ -43,118 +45,6 @@ const REQ_SHUTDOWN: u8 = 0x05;
 const RESP_EVALUATE_RESULT: u8 = 0x81;
 const RESP_TRAINING_EVENT: u8 = 0x82;
 const RESP_ERROR: u8 = 0x83;
-
-/// Training event from the Python model server (same format as old TrainingProcess).
-#[derive(Debug)]
-pub enum TrainingEvent {
-    Init {
-        n_params: u64,
-        epochs: u32,
-        batch_size: u32,
-        lr: f64,
-        datasets: HashMap<String, DatasetInfo>,
-    },
-    EpochStart {
-        epoch: u32,
-        total_epochs: u32,
-        steps_in_epoch: u32,
-    },
-    Batch {
-        step: u64,
-        epoch_step: u32,
-        loss: f64,
-        acc: f64,
-        gs: i32,
-    },
-    EpochEnd {
-        epoch: u32,
-        train_loss: f64,
-        train_acc: f64,
-        val_loss: f64,
-        val_acc: f64,
-        time: f64,
-    },
-    LevelMetrics {
-        step: u64,
-        run_id: String,
-        levels: HashMap<String, LevelMetric>,
-    },
-    Status(String),
-    Log(String),
-    Done,
-    Error(String),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct DatasetInfo {
-    pub n_states: u64,
-    pub n_levels: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LevelMetric {
-    #[allow(dead_code)]
-    pub grid_size: i32,
-    #[allow(dead_code)]
-    pub n_states: usize,
-    pub accuracy: f64,
-    pub mean_loss: f64,
-    pub agent_win_prob: Option<f64>,
-}
-
-/// Raw JSON event for serde deserialization.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-enum RawEvent {
-    Init {
-        n_params: u64,
-        epochs: u32,
-        batch_size: u32,
-        lr: f64,
-        #[allow(dead_code)]
-        seed: u32,
-        datasets: HashMap<String, DatasetInfo>,
-    },
-    EpochStart {
-        epoch: u32,
-        total_epochs: u32,
-        steps_in_epoch: u32,
-    },
-    Batch {
-        step: u64,
-        epoch_step: u32,
-        loss: f64,
-        acc: f64,
-        gs: i32,
-    },
-    EpochEnd {
-        epoch: u32,
-        train_loss: f64,
-        train_acc: f64,
-        val_loss: f64,
-        val_acc: f64,
-        time: f64,
-    },
-    LevelMetrics {
-        step: u64,
-        run_id: String,
-        #[allow(dead_code)]
-        timestamp: String,
-        levels: HashMap<String, LevelMetric>,
-    },
-    Status {
-        status: String,
-    },
-    Log {
-        message: String,
-    },
-    Done,
-    Error {
-        message: String,
-    },
-}
 
 /// Unified model server client.
 ///
@@ -532,9 +422,9 @@ fn reader_loop(
                         continue;
                     }
                 };
-                match serde_json::from_str::<RawEvent>(json_str) {
+                match serde_json::from_str::<RawTrainingEvent>(json_str) {
                     Ok(raw) => {
-                        let event = raw_to_event(raw);
+                        let event = event_types::raw_to_training_event(raw);
                         if training_tx.send(event).is_err() {
                             return;
                         }
@@ -567,77 +457,6 @@ fn reader_loop(
                 pending_eval = Some(tx);
             }
         }
-    }
-}
-
-/// Convert a deserialized RawEvent to a TrainingEvent.
-fn raw_to_event(raw: RawEvent) -> TrainingEvent {
-    match raw {
-        RawEvent::Init {
-            n_params,
-            epochs,
-            batch_size,
-            lr,
-            seed: _,
-            datasets,
-        } => TrainingEvent::Init {
-            n_params,
-            epochs,
-            batch_size,
-            lr,
-            datasets,
-        },
-        RawEvent::EpochStart {
-            epoch,
-            total_epochs,
-            steps_in_epoch,
-        } => TrainingEvent::EpochStart {
-            epoch,
-            total_epochs,
-            steps_in_epoch,
-        },
-        RawEvent::Batch {
-            step,
-            epoch_step,
-            loss,
-            acc,
-            gs,
-        } => TrainingEvent::Batch {
-            step,
-            epoch_step,
-            loss,
-            acc,
-            gs,
-        },
-        RawEvent::EpochEnd {
-            epoch,
-            train_loss,
-            train_acc,
-            val_loss,
-            val_acc,
-            time,
-        } => TrainingEvent::EpochEnd {
-            epoch,
-            train_loss,
-            train_acc,
-            val_loss,
-            val_acc,
-            time,
-        },
-        RawEvent::LevelMetrics {
-            step,
-            run_id,
-            timestamp: _,
-            levels,
-        } => TrainingEvent::LevelMetrics {
-            step,
-            run_id,
-            levels,
-        },
-        RawEvent::Status { status } => TrainingEvent::Status(status),
-        RawEvent::Log { message } => TrainingEvent::Log(message),
-        RawEvent::Done => TrainingEvent::Done,
-        RawEvent::Error { message } => TrainingEvent::Error(message),
     }
 }
 

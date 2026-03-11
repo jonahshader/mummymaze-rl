@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod error;
+pub mod event_types;
 pub mod ga;
 pub mod game;
 pub mod graph;
