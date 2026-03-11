@@ -120,17 +120,7 @@ impl DataStore {
 
         let sorted_indices: Vec<usize> = (0..rows.len()).collect();
 
-        // Look for level_metrics.json next to the maze directory or in CWD
-        let training_metrics = {
-            let candidates = [
-                maze_dir.join("level_metrics.json"),
-                std::path::PathBuf::from("level_metrics.json"),
-            ];
-            candidates
-                .into_iter()
-                .find(|p| p.exists())
-                .map(TrainingMetrics::new)
-        };
+        let training_metrics = None;
 
         let mut store = DataStore {
             rows,
@@ -187,13 +177,6 @@ impl DataStore {
     /// Drains up to 200 results per call to stay responsive.
     pub fn poll_analysis(&mut self) -> bool {
         let mut needs_resort = false;
-
-        // Poll training metrics file
-        if let Some(ref mut tm) = self.training_metrics
-            && tm.poll()
-        {
-            needs_resort = true;
-        }
 
         let rx = match &self.analysis_rx {
             Some(rx) => rx,

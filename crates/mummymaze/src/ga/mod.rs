@@ -8,44 +8,20 @@ pub mod crossover;
 pub mod fitness;
 pub mod mutation;
 
-use crate::graph::{build_graph, StateGraph};
+use crate::graph::build_graph;
 use crate::markov::MarkovChain;
-use crate::model_server::ModelServer;
 use crate::parse::Level;
 use crate::solver;
 use fitness::{FitnessExpr, FitnessVars};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 pub use crossover::crossover;
 pub use mutation::mutate_with_config;
-
-/// Trait for querying a policy server for action probabilities.
-/// Abstracts over `PolicyClient` (mutable) and `ModelServer` (shared ref with interior mutability).
-pub trait PolicyQuery {
-    fn query_policy(
-        &self,
-        levels_and_graphs: &[(&Level, &StateGraph)],
-    ) -> Result<Vec<Vec<(crate::game::State, [f32; 5])>>, String>;
-    fn needs_jit(&self) -> bool;
-}
-
-impl PolicyQuery for ModelServer {
-    fn query_policy(
-        &self,
-        levels_and_graphs: &[(&Level, &StateGraph)],
-    ) -> Result<Vec<Vec<(crate::game::State, [f32; 5])>>, String> {
-        self.query(levels_and_graphs)
-    }
-    fn needs_jit(&self) -> bool {
-        ModelServer::needs_jit(self)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Individual {
@@ -164,15 +140,12 @@ pub enum GaMessage {
 }
 
 /// Intermediate evaluation result before fitness scoring.
-/// Holds everything needed to compute fitness, including the state graph
-/// (retained for policy evaluation).
 struct EvalResult {
     level: Level,
     bfs_moves: u32,
     n_states: usize,
     win_prob: f64,
     vars: FitnessVars,
-    graph: StateGraph,
 }
 
 /// Evaluate a level: solve + Markov analysis. Returns None if unsolvable.
@@ -200,7 +173,6 @@ fn evaluate_base(level: &Level, fitness_expr: &FitnessExpr) -> Option<EvalResult
         n_states,
         win_prob,
         vars,
-        graph,
     })
 }
 
@@ -222,81 +194,22 @@ pub fn evaluate(level: &Level, fitness_expr: &FitnessExpr) -> Option<Individual>
     evaluate_base(level, fitness_expr).map(|r| finalize(r, fitness_expr))
 }
 
-/// Batch-evaluate levels, optionally querying a policy server for policy_win_prob.
+/// Batch-evaluate levels with parallel BFS + Markov analysis.
 /// If `progress` is provided, increments it atomically as levels are evaluated.
-/// If `tx` is provided, sends status messages for policy evaluation phase.
 fn evaluate_batch(
     levels: &[Level],
     fitness_expr: &FitnessExpr,
-    policy: Option<&dyn PolicyQuery>,
     progress: Option<&AtomicUsize>,
-    tx: Option<&Sender<GaMessage>>,
 ) -> Vec<Individual> {
-    // Phase 1: parallel BFS + uniform Markov evaluation
-    let mut results: Vec<EvalResult> = levels
+    levels
         .par_iter()
         .filter_map(|level| {
             let r = evaluate_base(level, fitness_expr);
             if let Some(ctr) = progress {
                 ctr.fetch_add(1, Ordering::Relaxed);
             }
-            r
+            r.map(|r| finalize(r, fitness_expr))
         })
-        .collect();
-
-    // Phase 2: if policy needed, batch-query the policy server
-    if fitness_expr.needs_policy {
-        if let Some(client) = policy {
-            if let Some(ref tx) = tx {
-                let n = results.len();
-                let total_states: usize = results.iter().map(|r| r.graph.n_transient).sum();
-                let jit_note = if client.needs_jit() {
-                    " (JIT compiling…)"
-                } else {
-                    ""
-                };
-                let _ = tx.send(GaMessage::Status(format!(
-                    "Policy inference: {n} levels, {total_states} states{jit_note}"
-                )));
-            }
-            let pairs: Vec<(&Level, &StateGraph)> = results
-                .iter()
-                .map(|r| (&r.level, &r.graph))
-                .collect();
-
-            match client.query_policy(&pairs) {
-                Ok(policy_results) => {
-                    for (result, state_probs) in results.iter_mut().zip(policy_results.iter()) {
-                        // Build policy map and solve Markov chain under policy
-                        let mut policy: FxHashMap<crate::game::State, [f64; 5]> =
-                            FxHashMap::with_capacity_and_hasher(
-                                state_probs.len(),
-                                Default::default(),
-                            );
-                        for &(state, probs) in state_probs {
-                            policy.insert(state, probs.map(|p| p as f64));
-                        }
-
-                        let chain =
-                            MarkovChain::from_graph_with_policy(&result.graph, &policy);
-                        let (policy_wp, log_policy_wp) = chain
-                            .start_log_win_prob()
-                            .unwrap_or((0.0, f64::NEG_INFINITY));
-                        result.vars.set_policy_win_prob(policy_wp, log_policy_wp);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("WARNING: policy server query failed: {e}");
-                    // Leave policy_win_prob at 0.0
-                }
-            }
-        }
-    }
-
-    // Phase 3: compute fitness
-    results
-        .into_iter()
-        .map(|r| finalize(r, fitness_expr))
         .collect()
 }
 
@@ -320,33 +233,7 @@ pub fn run_ga(
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
 ) {
-    let no_policy: Option<&dyn PolicyQuery> = None;
-    run_ga_inner(config, seed_levels, tx, stop_flag, no_policy, None);
-}
-
-/// Run the GA with a `ModelServer` (shared ref) for policy evaluation.
-pub fn run_ga_with_model_server(
-    config: &GaConfig,
-    seed_levels: Vec<Level>,
-    tx: Sender<GaMessage>,
-    stop_flag: Arc<AtomicBool>,
-    server: &ModelServer,
-) {
-    server.set_max_batch_size(config.eval_batch_size);
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(server), None);
-}
-
-/// Run the GA with a `ModelServer` and MAP-Elites archive.
-pub fn run_ga_with_model_server_archive(
-    config: &GaConfig,
-    seed_levels: Vec<Level>,
-    tx: Sender<GaMessage>,
-    stop_flag: Arc<AtomicBool>,
-    server: &ModelServer,
-    archive: archive::MapElitesArchive,
-) -> archive::MapElitesArchive {
-    server.set_max_batch_size(config.eval_batch_size);
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(server), Some(archive)).unwrap()
+    run_ga_inner(config, seed_levels, tx, stop_flag, None);
 }
 
 /// Insert individuals into archive (if present) and send update message.
@@ -373,7 +260,6 @@ fn run_ga_inner(
     seed_levels: Vec<Level>,
     tx: Sender<GaMessage>,
     stop_flag: Arc<AtomicBool>,
-    policy: Option<&dyn PolicyQuery>,
     mut archive: Option<archive::MapElitesArchive>,
 ) -> Option<archive::MapElitesArchive> {
     let fitness_expr = match FitnessExpr::parse(&config.fitness_expr) {
@@ -383,14 +269,6 @@ fn run_ga_inner(
             return archive;
         }
     };
-
-    if fitness_expr.needs_policy && policy.is_none() {
-        let _ = tx.send(GaMessage::Error(
-            "Fitness expression uses policy_win_prob but no policy checkpoint is configured"
-                .to_string(),
-        ));
-        return archive;
-    }
 
     let mut rng = StdRng::seed_from_u64(config.seed);
 
@@ -418,7 +296,7 @@ fn run_ga_inner(
         });
     }
     let mut population: Vec<Individual> =
-        evaluate_batch(&seed_levels, &fitness_expr, policy, Some(&progress), Some(&tx));
+        evaluate_batch(&seed_levels, &fitness_expr, Some(&progress));
     // Ensure progress reaches total so reporter thread exits
     progress.store(total_seeds, Ordering::Relaxed);
 
@@ -492,7 +370,7 @@ fn run_ga_inner(
         let non_elite = &offspring_levels[n_elite..];
         let n_evaluated = non_elite.len();
         let evaluated =
-            evaluate_batch(non_elite, &fitness_expr, policy, None, Some(&tx));
+            evaluate_batch(non_elite, &fitness_expr, None);
         let n_solvable_gen = evaluated.len();
 
         let mut new_pop: Vec<Individual> = Vec::with_capacity(config.pop_size);

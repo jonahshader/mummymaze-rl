@@ -1628,7 +1628,6 @@ dependencies = [
  "egui_extras",
  "egui_plot",
  "glam",
- "memmap2",
  "mummymaze",
  "rayon",
  "rustc-hash 2.1.1",

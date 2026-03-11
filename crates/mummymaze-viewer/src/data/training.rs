@@ -186,7 +186,7 @@ impl DataStore {
                 } => {
                     let tm = self
                         .training_metrics
-                        .get_or_insert_with(|| TrainingMetrics::new(std::path::PathBuf::new()));
+                        .get_or_insert_with(TrainingMetrics::new);
                     tm.update_from_event(run_id.clone(), *step, levels.clone());
                     needs_resort = true;
                 }

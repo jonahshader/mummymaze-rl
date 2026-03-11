@@ -37,11 +37,10 @@ impl AdversarialConfig {
             "batch_size": self.batch_size,
             "lr": self.lr,
             "seed": self.seed,
-            "target_log_wp": self.target_log_wp,
+            "target_log_policy_wp": self.target_log_wp,
             "ga_pop_size": self.ga_config.pop_size,
             "ga_generations": self.ga_config.generations,
             "grid_sizes": self.grid_sizes,
-            "fitness_expr": self.fitness_expr(),
             "archive_bfs_bins": self.archive_bfs_bins,
             "archive_states_bins": self.archive_states_bins,
         })

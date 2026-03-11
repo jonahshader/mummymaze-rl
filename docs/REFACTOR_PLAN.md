@@ -74,7 +74,7 @@ No way to select an architecture — every component assumes `MazeCNN`.
 
 ## Task 4 — Python-Owned Loops + WebSocket API
 
-**Status:** In progress (4a-4c done, 4d in progress)
+**Status:** Done
 **Depends on:** Tasks 1-3
 
 ### Motivation
@@ -137,13 +137,13 @@ Remaining Rust-side cleanup (model_server.rs deletion) deferred to Task 4d.
 
 ### 4d — Viewer as WebSocket client
 
-**Status:** In progress
+**Status:** Done
 **Depends on:** 4c
 
 Refactor the viewer to connect to the Python WebSocket server instead of
 spawning and managing a subprocess.
 
-What's done:
+What was done:
 - `ws_client.rs` — tungstenite WebSocket client with single IO thread
   (non-blocking reads + channel-based writes)
 - `event_types.rs` — shared types made public for cross-crate use
@@ -152,13 +152,11 @@ What's done:
 - Level gen tab: removed policy-guided GA (adversarial tab handles that now)
 - `ModelServer::spawn()` replaced with `WsClient::connect(url)`
   (reads `MODEL_SERVER_URL` env var, defaults to `ws://localhost:8765`)
-
-Remaining:
-- Replace `agent_probs.rs` mmap with on-demand `ws_client.evaluate()` + cache
-- Delete `training_metrics.rs` file watcher (metrics come via WS events)
-- Delete `crates/mummymaze/src/model_server.rs` and related dead code
-  (`run_ga_with_model_server*`, `PolicyQuery` in `ga/mod.rs`)
-- Clean up Cargo.toml deps (remove `memmap2` after agent_probs deletion)
+- Replaced `agent_probs.rs` mmap with on-demand `ws_client.evaluate()` + cache
+- Removed `training_metrics.rs` file watcher (metrics come via WS events only)
+- Deleted `crates/mummymaze/src/model_server.rs` (binary frame protocol)
+- Deleted `PolicyQuery` trait, `run_ga_with_model_server*` from `ga/mod.rs`
+- Removed `memmap2` dependency from viewer Cargo.toml
 
 ---
 

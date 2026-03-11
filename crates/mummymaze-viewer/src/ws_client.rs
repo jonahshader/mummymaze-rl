@@ -27,6 +27,7 @@ type WsStream = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 pub enum ServerEvent {
     Training(TrainingEvent),
     Adversarial(AdversarialEvent),
+    Evaluate(EvalResult),
     Error(String),
 }
 
@@ -69,6 +70,7 @@ pub enum AdversarialEvent {
 }
 
 /// Result from an evaluate request: per-state action probabilities.
+#[derive(Debug)]
 pub struct EvalResult {
     pub probs_by_state: HashMap<State, [f32; 5]>,
 }
@@ -176,6 +178,15 @@ impl WsClient {
         self.write_tx
             .send(text)
             .map_err(|_| "io thread gone".to_string())
+    }
+
+    /// Send an evaluate request without blocking. The result will arrive
+    /// as a `ServerEvent::Evaluate` via `poll_events()`.
+    pub fn send_evaluate(&self, level_key: &str) -> Result<(), String> {
+        self.send(&serde_json::json!({
+            "type": "evaluate",
+            "level_key": level_key
+        }))
     }
 
     /// Evaluate a level by key, blocking until result arrives.
@@ -368,8 +379,11 @@ fn dispatch_message(
     match raw {
         RawServerMessage::EvaluateResult { states, .. } => {
             let result = parse_eval_result(states);
+            // Route to blocking oneshot if registered, otherwise to event stream
             if let Ok(tx) = eval_register_rx.try_recv() {
                 let _ = tx.send(Ok(result));
+            } else {
+                let _ = event_tx.send(ServerEvent::Evaluate(result));
             }
         }
 

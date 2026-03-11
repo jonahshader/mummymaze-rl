@@ -71,12 +71,18 @@ pub struct LevelMetric {
 #[serde(rename_all = "snake_case")]
 pub enum RawTrainingEvent {
     Init {
+        #[serde(default)]
         n_params: u64,
+        #[serde(default)]
         epochs: u32,
+        #[serde(default)]
         batch_size: u32,
+        #[serde(default)]
         lr: f64,
         #[allow(dead_code)]
+        #[serde(default)]
         seed: u32,
+        #[serde(default)]
         datasets: HashMap<String, DatasetInfo>,
     },
     EpochStart {

@@ -1,7 +1,6 @@
 mod adversarial;
 mod adversarial_tab;
 mod level_gen_tab;
-mod agent_probs;
 mod data;
 mod gameplay;
 mod graph_view;
@@ -11,7 +10,6 @@ mod training_metrics;
 mod training_tab;
 mod ws_client;
 
-use agent_probs::AgentProbs;
 use data::DataStore;
 use eframe::egui;
 use gameplay::GameplayState;
@@ -40,7 +38,10 @@ struct App {
     bfs_optimal: FxHashMap<State, u8>,
     /// Analysis for GA-generated levels (not in the dataset).
     generated_analysis: Option<mummymaze::batch::LevelAnalysis>,
-    agent_probs: AgentProbs,
+    /// Cached agent action probabilities from WS evaluate.
+    /// `None` = no request in flight, `Some((key, None))` = pending,
+    /// `Some((key, Some(map)))` = ready.
+    cached_agent_probs: Option<(String, Option<FxHashMap<State, [f32; 5]>>)>,
     level_gen: level_gen_tab::LevelGenState,
     adversarial: adversarial::AdversarialState,
     /// WebSocket client for the Python model server.
@@ -59,8 +60,6 @@ impl App {
             .wgpu_render_state
             .as_ref()
             .map(|rs| GraphView::new(rs.clone()));
-
-        let agent_probs = AgentProbs::new(std::path::PathBuf::from("checkpoints/agent_probs.bin"));
 
         // Connect to WebSocket model server
         let ws_url = std::env::var("MODEL_SERVER_URL")
@@ -83,7 +82,7 @@ impl App {
             graph: None,
             bfs_optimal: FxHashMap::default(),
             generated_analysis: None,
-            agent_probs,
+            cached_agent_probs: None,
             level_gen: level_gen_tab::LevelGenState::new(),
             adversarial: adversarial::AdversarialState::new(),
             ws_client,
@@ -199,7 +198,31 @@ impl App {
                 selected.and_then(|sel| {
                     let row = &self.store.rows[sel];
                     let level_key = format!("{}:{}", row.file_stem, row.sublevel);
-                    self.agent_probs.get_state_probs(&level_key, &gs.current_state)
+                    // Fire off a non-blocking evaluate if not cached/pending
+                    let needs_fetch = match &self.cached_agent_probs {
+                        Some((k, _)) => k != &level_key,
+                        None => true,
+                    };
+                    if needs_fetch {
+                        if let Some(ref ws) = self.ws_client {
+                            if let Err(e) = ws.send_evaluate(&level_key) {
+                                self.store.log_messages.push(
+                                    format!("Evaluate request failed: {e}"),
+                                );
+                            }
+                        }
+                        // Mark as pending (result arrives via poll_events)
+                        self.cached_agent_probs = Some((level_key.clone(), None));
+                    }
+                    self.cached_agent_probs
+                        .as_ref()
+                        .and_then(|(k, data)| {
+                            if k == &level_key {
+                                data.as_ref()?.get(&gs.current_state).copied()
+                            } else {
+                                None
+                            }
+                        })
                 })
             } else {
                 None
@@ -298,6 +321,19 @@ impl eframe::App for App {
                     match event {
                         ServerEvent::Training(te) => training_events.push(te),
                         ServerEvent::Adversarial(ae) => adversarial_events.push(ae),
+                        ServerEvent::Evaluate(result) => {
+                            // Populate cache if still pending
+                            if let Some((_, ref mut data)) = self.cached_agent_probs {
+                                if data.is_none() {
+                                    *data = Some(
+                                        result
+                                            .probs_by_state
+                                            .into_iter()
+                                            .collect(),
+                                    );
+                                }
+                            }
+                        }
                         ServerEvent::Error(msg) => {
                             self.store.log_messages.push(format!("Server error: {msg}"));
                         }
@@ -314,14 +350,6 @@ impl eframe::App for App {
         // Fast repaint while training or adversarial is active
         if self.store.is_training() || self.adversarial.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-        // Poll training metrics file periodically
-        if self.store.training_metrics.is_some() && !self.store.is_training() {
-            ctx.request_repaint_after(std::time::Duration::from_secs(2));
-        }
-        // Poll agent_probs.bin for action probability overlay
-        if self.agent_probs.poll() {
-            ctx.request_repaint();
         }
         // Poll level gen GA progress
         if self.level_gen.poll() {
