@@ -12,7 +12,6 @@ use crate::graph::{build_graph, StateGraph};
 use crate::markov::MarkovChain;
 use crate::model_server::ModelServer;
 use crate::parse::Level;
-use crate::policy_client::PolicyClient;
 use crate::solver;
 use fitness::{FitnessExpr, FitnessVars};
 use rand::rngs::StdRng;
@@ -45,31 +44,6 @@ impl PolicyQuery for ModelServer {
     }
     fn needs_jit(&self) -> bool {
         ModelServer::needs_jit(self)
-    }
-}
-
-/// Wrapper to make mutable PolicyClient work with the PolicyQuery trait via RefCell.
-pub struct PolicyClientWrapper {
-    inner: std::cell::RefCell<PolicyClient>,
-}
-
-impl PolicyClientWrapper {
-    pub fn new(client: PolicyClient) -> Self {
-        Self {
-            inner: std::cell::RefCell::new(client),
-        }
-    }
-}
-
-impl PolicyQuery for PolicyClientWrapper {
-    fn query_policy(
-        &self,
-        levels_and_graphs: &[(&Level, &StateGraph)],
-    ) -> Result<Vec<Vec<(crate::game::State, [f32; 5])>>, String> {
-        self.inner.borrow_mut().query(levels_and_graphs)
-    }
-    fn needs_jit(&self) -> bool {
-        self.inner.borrow().needs_jit()
     }
 }
 
@@ -348,32 +322,6 @@ pub fn run_ga(
 ) {
     let no_policy: Option<&dyn PolicyQuery> = None;
     run_ga_inner(config, seed_levels, tx, stop_flag, no_policy, None);
-}
-
-/// Run the GA with a policy server for policy_win_prob evaluation.
-pub fn run_ga_with_policy(
-    config: &GaConfig,
-    seed_levels: Vec<Level>,
-    tx: Sender<GaMessage>,
-    stop_flag: Arc<AtomicBool>,
-    policy_client: PolicyClient,
-) {
-    let wrapper = PolicyClientWrapper::new(policy_client);
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(&wrapper), None);
-}
-
-/// Run the GA with a policy server and MAP-Elites archive.
-/// Returns the final archive.
-pub fn run_ga_with_archive(
-    config: &GaConfig,
-    seed_levels: Vec<Level>,
-    tx: Sender<GaMessage>,
-    stop_flag: Arc<AtomicBool>,
-    policy_client: PolicyClient,
-    archive: archive::MapElitesArchive,
-) -> archive::MapElitesArchive {
-    let wrapper = PolicyClientWrapper::new(policy_client);
-    run_ga_inner(config, seed_levels, tx, stop_flag, Some(&wrapper), Some(archive)).unwrap()
 }
 
 /// Run the GA with a `ModelServer` (shared ref) for policy evaluation.

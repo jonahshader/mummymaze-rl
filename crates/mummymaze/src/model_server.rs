@@ -23,7 +23,6 @@
 use crate::game::State;
 use crate::graph::StateGraph;
 use crate::parse::Level;
-use crate::policy_client::extract_level_obs_data;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Write};
@@ -642,3 +641,54 @@ fn raw_to_event(raw: RawEvent) -> TrainingEvent {
     }
 }
 
+/// Level observation data needed by the model server to build CNN inputs.
+pub(crate) struct LevelObsData {
+    pub(crate) h_walls: Vec<u8>,
+    pub(crate) v_walls: Vec<u8>,
+    pub(crate) is_red: bool,
+    pub(crate) has_key_gate: bool,
+    pub(crate) gate_row: i32,
+    pub(crate) gate_col: i32,
+    pub(crate) trap_pos: [i32; 4],
+    pub(crate) trap_active: [bool; 2],
+    pub(crate) key_pos: [i32; 2],
+    pub(crate) exit_cell: [i32; 2],
+}
+
+/// Extract the observation data from a Level for the model server protocol.
+pub(crate) fn extract_level_obs_data(level: &Level) -> LevelObsData {
+    let (h_bools, v_bools) = level.to_edges();
+    let h_walls: Vec<u8> = h_bools.into_iter().map(|b| b as u8).collect();
+    let v_walls: Vec<u8> = v_bools.into_iter().map(|b| b as u8).collect();
+
+    let has_key_gate = level.has_gate;
+
+    let trap_pos = [
+        level.trap1_row,
+        level.trap1_col,
+        level.trap2_row,
+        level.trap2_col,
+    ];
+    let trap_active = [level.trap_count >= 1, level.trap_count >= 2];
+
+    let gate_row = if has_key_gate { level.gate_row } else { 0 };
+    let gate_col = if has_key_gate { level.gate_col } else { 0 };
+    let key_pos = if has_key_gate {
+        [level.key_row, level.key_col]
+    } else {
+        [0, 0]
+    };
+
+    LevelObsData {
+        h_walls,
+        v_walls,
+        is_red: level.flip,
+        has_key_gate,
+        gate_row,
+        gate_col,
+        trap_pos,
+        trap_active,
+        key_pos,
+        exit_cell: [level.exit_row, level.exit_col],
+    }
+}

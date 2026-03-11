@@ -1,14 +1,13 @@
 """Unified model server: inference + training over a binary frame protocol.
 
-Replaces separate policy_server.py (inference) and train_bc.py subprocess
-(training) with a single long-lived process. Avoids JAX VRAM competition
-and eliminates re-JIT compilation across GA phases and rounds.
+Single long-lived process for both inference and training. Avoids JAX VRAM
+competition and eliminates re-JIT compilation across GA phases and rounds.
 
 Frame protocol (little-endian):
   [u32 length][u8 type][payload]  where length includes the type byte.
 
 Request types (Rust -> Python):
-  0x01  Evaluate       — binary level data + state tuples (same as old policy_server)
+  0x01  Evaluate       — binary level data + state tuples
   0x02  Train          — UTF-8 JSON config
   0x03  StopTrain      — empty
   0x04  ReloadCheckpoint — UTF-8 path to .eqx file

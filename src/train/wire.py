@@ -1,7 +1,6 @@
-"""Shared binary I/O helpers for policy_server and model_server.
+"""Binary I/O helpers for model_server.
 
-Both servers use the same level observation wire format. This module
-provides the common parsing functions.
+Provides level observation wire format parsing functions.
 """
 
 import struct

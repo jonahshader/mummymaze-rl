@@ -1,12 +1,9 @@
 """Checkpoint save/load with full training state.
 
-New format: a directory containing:
+Format: a directory containing:
   model.eqx           — model weights (equinox serialization)
   opt_state.eqx        — optimizer state (Adam moments, gradient clip state)
   training_state.json  — epoch, global_step, arch, hyperparams, rng key
-
-Legacy format: a bare .eqx file (model weights only, no optimizer state).
-load_checkpoint() auto-detects the format.
 """
 
 import json
@@ -16,7 +13,7 @@ import equinox as eqx
 import jax
 import optax
 
-from src.train.model import DEFAULT_ARCH, make_model
+from src.train.model import make_model
 
 
 def save_checkpoint(
@@ -91,39 +88,21 @@ def load_checkpoint(
   arch: str | None = None,
   optimizer: optax.GradientTransformation | None = None,
 ) -> CheckpointData:
-  """Load a checkpoint (directory or legacy .eqx file).
+  """Load a checkpoint directory.
 
   Args:
-    path: Path to checkpoint directory or bare .eqx file.
-    arch: Architecture override. Required for legacy .eqx files, optional
-      for directory checkpoints (where it's read from training_state.json).
+    path: Path to checkpoint directory containing model.eqx and
+      training_state.json.
+    arch: Architecture override. If None, read from training_state.json.
     optimizer: If provided and the checkpoint has opt_state.eqx, the
       optimizer state is deserialized using this as the reference structure.
       If None, optimizer state is skipped.
   """
-  if path.is_dir():
-    return _load_dir_checkpoint(path, arch_override=arch, optimizer=optimizer)
-  else:
-    return _load_legacy_checkpoint(path, arch=arch or DEFAULT_ARCH)
-
-
-def load_model_weights(path: Path, arch: str = DEFAULT_ARCH) -> eqx.Module:
-  """Load just model weights from any checkpoint format. Convenience wrapper."""
-  ckpt = load_checkpoint(path, arch=arch)
-  return ckpt.model
-
-
-def _load_dir_checkpoint(
-  path: Path,
-  arch_override: str | None,
-  optimizer: optax.GradientTransformation | None,
-) -> CheckpointData:
-  """Load a directory-format checkpoint."""
   state_path = path / "training_state.json"
   state = json.loads(state_path.read_text())
 
-  arch = arch_override or state["arch"]
-  model = make_model(arch, jax.random.key(0))
+  resolved_arch = arch or state["arch"]
+  model = make_model(resolved_arch, jax.random.key(0))
   model = eqx.tree_deserialise_leaves(path / "model.eqx", model)
 
   opt_state = None
@@ -144,24 +123,14 @@ def _load_dir_checkpoint(
     opt_state=opt_state,
     epoch=state.get("epoch", 0),
     global_step=state.get("global_step", 0),
-    arch=arch,
+    arch=resolved_arch,
     key=key,
     lr=state.get("lr", 3e-4),
     batch_size=state.get("batch_size", 1024),
   )
 
 
-def _load_legacy_checkpoint(path: Path, arch: str) -> CheckpointData:
-  """Load a bare .eqx file (weights only)."""
-  model = make_model(arch, jax.random.key(0))
-  model = eqx.tree_deserialise_leaves(path, model)
-  return CheckpointData(
-    model=model,
-    opt_state=None,
-    epoch=0,
-    global_step=0,
-    arch=arch,
-    key=None,
-    lr=3e-4,
-    batch_size=1024,
-  )
+def load_model_weights(path: Path, arch: str | None = None) -> eqx.Module:
+  """Load just model weights from a checkpoint directory."""
+  ckpt = load_checkpoint(path, arch=arch)
+  return ckpt.model

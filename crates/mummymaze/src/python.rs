@@ -576,7 +576,7 @@ fn run_ga_round(
     archive_states_bins: usize,
 ) -> PyResult<Vec<PyObject>> {
     use crate::ga::{self, archive::MapElitesArchive, GaConfig};
-    use crate::policy_client::PolicyClient;
+    use crate::model_server::ModelServer;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -626,20 +626,24 @@ fn run_ga_round(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let checkpoint = checkpoint_path.to_string();
 
-    // Run GA synchronously, releasing the GIL
+    // Run GA synchronously, releasing the GIL.
+    // Spawn a ModelServer subprocess for policy evaluation.
     let final_archive = py.allow_threads(move || {
         let (tx, rx) = mpsc::channel();
 
-        let policy_client = PolicyClient::spawn(
-            std::path::Path::new(&checkpoint),
-        ).expect("Failed to start policy server");
+        // ModelServer needs a maze_dir, but for GA we only need inference.
+        // Pass "mazes" as default — it won't load the dataset unless training is requested.
+        let server = ModelServer::spawn(
+            std::path::Path::new("mazes"),
+            Some(std::path::Path::new(&checkpoint)),
+        ).expect("Failed to start model server");
 
-        let archive = ga::run_ga_with_archive(
+        let archive = ga::run_ga_with_model_server_archive(
             &ga_config,
             levels,
             tx,
             stop_flag,
-            policy_client,
+            &server,
             archive,
         );
 
