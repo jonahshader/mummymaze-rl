@@ -1,8 +1,10 @@
 """Metrics reporter protocol and implementations for training."""
 
 import json
+import queue
 import select
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -263,4 +265,36 @@ class StdioReporter(_BaseStreamReporter):
           return msg.get("cmd")
         except json.JSONDecodeError:
           return None
+    return None
+
+
+class WebSocketReporter(_BaseStreamReporter):
+  """Reporter that queues JSON events for async WebSocket delivery.
+
+  Training runs on a sync thread; WebSocket send is async. This reporter
+  bridges the two via a thread-safe queue. The WebSocket server drains
+  the queue and sends events to the client.
+
+  Stop signalling uses a threading.Event set by the WebSocket server
+  when a stop_train message arrives.
+  """
+
+  def __init__(
+    self,
+    event_queue: queue.Queue[dict],
+    stop_event: threading.Event,
+    *,
+    event_type: str = "training_event",
+  ) -> None:
+    super().__init__()
+    self._queue = event_queue
+    self._stop_event = stop_event
+    self._event_type = event_type
+
+  def _emit(self, msg: dict) -> None:
+    self._queue.put({"type": self._event_type, "event": msg})
+
+  def check_command(self) -> str | None:
+    if self._stop_event.is_set():
+      return "stop"
     return None
