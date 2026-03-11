@@ -23,7 +23,7 @@ from jaxtyping import Array, Float, Int
 from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
-from src.train.reporter import FileReporter, StdioReporter
+from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
 
 
 def cross_entropy_loss(
@@ -203,7 +203,7 @@ def train_epochs(
   epochs: int,
   batch_size: int,
   checkpoint_dir: Path,
-  reporter: FileReporter | StdioReporter,
+  reporter: MetricsReporter,
   maze_dir: Path,
   key: jax.Array,
   epoch_offset: int = 0,
