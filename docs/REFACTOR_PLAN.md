@@ -91,56 +91,30 @@ enabling both the Rust viewer and a future web frontend to connect.
 
 ### 4a — PyO3 bindings for GA primitives
 
-**Status:** Not started
+**Status:** Done
 
-Expose the CPU-intensive GA building blocks so Python can orchestrate the
-GA loop while Rust handles the hot paths (BFS, Markov, mutation).
-
-New PyO3 functions:
-- `mutate(level, config) → Level` — single mutation
-- `mutate_batch(levels, config, seed) → list[Level]` — batch mutation
-- `crossover(a, b, mode, seed) → Level` — single crossover
-- `evaluate_batch(levels) → list[dict]` — parallel BFS + graph + Markov
-  (no policy). Returns `{level, bfs_moves, n_states, win_prob, ...}` per
-  solvable level. Releases GIL, uses rayon.
-
-Existing bindings already cover the rest:
-- `policy_win_prob_batch()` — Markov under policy
-- `analyze()` / `solve()` — single-level analysis
+Exposed CPU-intensive GA building blocks via PyO3:
+- `mutate(level, seed, w_wall=5.0, ...)` — single weighted mutation
+- `mutate_batch(levels, base_seed, ...)` — batch mutation (GIL-released)
+- `ga_crossover(a, b, mode, seed)` — 4 crossover modes
+- `ga_evaluate_batch(levels, fitness_expr)` — parallel BFS + graph + Markov (rayon, GIL-released)
+- `eval_fitness(expr, metrics)` — evaluate fitness expression
 
 ### 4b — Rewrite GA loop in Python
 
-**Status:** Not started
-**Depends on:** 4a
+**Status:** Done
 
-Rewrite `run_ga_round` as a Python function using the new PyO3 primitives
-plus in-process JAX inference:
+- `src/train/ga.py`: Python GA loop with in-process JAX inference
+  - `run_ga()` — full GA loop (tournament selection, elitism, mutation/crossover)
+  - `compute_policy_win_probs()` — batched inference + Markov under policy
+  - `MapElitesArchive` — 2D grid indexed by (bfs_moves, n_states)
+  - `level_to_level_data()` — Rust Level → JAX LevelData conversion
+- `adversarial_loop.py` updated to use `run_ga()` instead of `mummymaze_rust.run_ga_round()`
+- Model stays in-process — no subprocess spawn, no re-JIT per GA round
 
-```python
-for generation in range(n_generations):
-    # Rust (release GIL): mutate/crossover offspring
-    offspring = mummymaze_rust.mutate_batch(parents, config)
-    # Rust (release GIL): parallel BFS + Markov
-    evals = mummymaze_rust.evaluate_batch(offspring)
-    # Python (JAX): neural net inference on solvable levels
-    probs = model(observations)
-    # Rust (release GIL): Markov under policy
-    policy_wps = mummymaze_rust.policy_win_prob_batch(...)
-    # Python: fitness scoring, tournament selection, archive
-    population = select(evals, policy_wps, ...)
-```
-
-Benefits:
-- No ModelServer subprocess spawn per GA round (currently re-JITs every time)
-- Model stays in Python process memory — zero serialization overhead
-- Per-generation progress available to any caller
-- Single implementation for both CLI and viewer
-
-Delete from Rust:
-- `run_ga_round` PyO3 function (replaced by Python loop)
-- `PolicyQuery` trait and `ModelServer` impl in `ga/mod.rs`
-- `run_ga_inner`, `run_ga_with_model_server*` entry points
-- Keep: `mutation.rs`, `crossover.rs`, `fitness.rs`, `archive.rs` (used via PyO3)
+Still to clean up (separate commit):
+- Delete `run_ga_round` PyO3 function from `python.rs`
+- Delete `PolicyQuery` trait and `ModelServer` impl from `ga/mod.rs`
 
 ### 4c — WebSocket API
 
@@ -206,3 +180,15 @@ simplifies to:
 - Define a coherent project directory layout
 - All components discover paths from a single config/root
 - Cleanup policy for ephemeral files
+
+---
+
+## Backlog
+
+Small improvements not blocking any task, to be addressed opportunistically.
+
+- **Redundant graph rebuilds in policy evaluation**: `compute_policy_win_probs()`
+  calls `build_graph()` per level to extract state tuples, then
+  `policy_win_prob_batch()` rebuilds the graph internally. Could expose a
+  `policy_win_prob_from_graph()` variant or return graphs from
+  `ga_evaluate_batch()` to avoid the double build.

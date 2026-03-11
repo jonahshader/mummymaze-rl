@@ -462,11 +462,12 @@ fn eval_fitness(expr: &str, metrics: &Bound<'_, PyDict>) -> PyResult<f64> {
     };
 
     let wp = get("win_prob");
+    let pwp = get("policy_win_prob");
     let vars = FitnessVars {
         win_prob: wp,
-        log_win_prob: if wp > 0.0 { wp.log10() } else { f64::NEG_INFINITY },
-        policy_win_prob: 0.0,
-        log_policy_win_prob: f64::NEG_INFINITY,
+        log_win_prob: get("log_win_prob"),
+        policy_win_prob: pwp,
+        log_policy_win_prob: get("log_policy_win_prob"),
         bfs_moves: get("bfs_moves"),
         n_states: get("n_states"),
         dead_end_ratio: get("dead_end_ratio"),

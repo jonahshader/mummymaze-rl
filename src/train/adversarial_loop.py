@@ -8,8 +8,10 @@ Usage:
 """
 
 import argparse
+import functools
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import equinox as eqx
@@ -18,11 +20,33 @@ import jax.random as jr
 import mummymaze_rust
 import optax
 
+from src.env.obs import observe
+from src.env.types import EnvState, LevelData
 from src.train.augment import augment_dataset
 from src.train.dataset import load_bc_dataset
+from src.train.ga import MapElitesArchive, run_ga
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
 from src.train.reporter import FileReporter
 from src.train.train_bc import train_epochs
+
+
+def _make_obs_and_forward(
+  model: eqx.Module,
+) -> Callable:
+  """Build a JIT'd function: (grid_size, LevelData, EnvState) → logits."""
+
+  @functools.partial(jax.jit, static_argnums=(0,))
+  def obs_and_forward(
+    grid_size: int,
+    level_data: LevelData,
+    env_states: EnvState,
+  ) -> jax.Array:
+    obs = jax.vmap(lambda es: observe(grid_size, level_data, es))(
+      env_states,
+    )
+    return jax.vmap(model)(obs)
+
+  return obs_and_forward
 
 
 def adversarial_loop(
@@ -136,23 +160,6 @@ def adversarial_loop(
     )
     global_epoch += epochs_per_round
 
-    # Save latest checkpoint for GA to reference — find model.eqx inside
-    # the checkpoint directory for the last epoch of this round
-    latest_ckpt_dir = round_ckpt_dir / f"epoch{global_epoch:03d}"
-    if latest_ckpt_dir.exists():
-      latest_ckpt = latest_ckpt_dir / "model.eqx"
-    else:
-      # Find the most recent checkpoint directory
-      ckpt_dirs = sorted(round_ckpt_dir.glob("epoch*"))
-      if ckpt_dirs:
-        latest_ckpt = ckpt_dirs[-1] / "model.eqx"
-      else:
-        print("WARNING: No checkpoint found, skipping GA phase")
-        continue
-    if not latest_ckpt.exists():
-      print("WARNING: No model.eqx in checkpoint dir, skipping GA phase")
-      continue
-
     # Skip GA on the last round (no point generating levels we won't train on)
     if round_idx == n_rounds - 1:
       print("\nLast round — skipping GA phase.")
@@ -161,16 +168,8 @@ def adversarial_loop(
     # --- GA Phase ---
     print(f"\n--- GA Phase (grid_sizes={grid_sizes}) ---")
 
-    # Collect seed levels for each grid_size from the maze directory
-    ga_config = {
-      "pop_size": ga_pop_size,
-      "generations": ga_generations,
-      "elite_frac": 0.1,
-      "crossover_rate": 0.2,
-      "extra_wall_prob": 0.3,
-      "fitness_expr": f"-abs(log_policy_win_prob - ({target_log_policy_wp}))",
-      "seed": seed + round_idx + 1,
-    }
+    fitness_expr = f"-abs(log_policy_win_prob - ({target_log_policy_wp}))"
+    obs_and_forward = _make_obs_and_forward(model)
 
     round_ga_levels: list[mummymaze_rust.Level] = []
 
@@ -185,10 +184,12 @@ def adversarial_loop(
       by_stem: dict[str, list[int]] = {}
       for stem, sub in gs_sources:
         by_stem.setdefault(stem, []).append(sub)
-      seed_levels = []
+      seed_levels: list[mummymaze_rust.Level] = []
       for stem, subs in by_stem.items():
         try:
-          all_in_file = mummymaze_rust.parse_file(str(maze_dir / f"{stem}.dat"))
+          all_in_file = mummymaze_rust.parse_file(
+            str(maze_dir / f"{stem}.dat"),
+          )
           for sub in subs:
             if sub < len(all_in_file):
               seed_levels.append(all_in_file[sub])
@@ -200,30 +201,42 @@ def adversarial_loop(
         continue
 
       print(f"    Seeds: {len(seed_levels)} levels")
-      gs_config = dict(ga_config, grid_size=gs)
+
+      archive = MapElitesArchive(
+        bfs_range=(1, 50),
+        states_range=(1, 500),
+        bfs_bins=archive_bfs_bins,
+        states_bins=archive_states_bins,
+        target_log_wp=target_log_policy_wp,
+      )
 
       ga_t0 = time.time()
-      archive_results = mummymaze_rust.run_ga_round(
+      _population, archive = run_ga(
         seed_levels,
-        gs_config,
-        str(latest_ckpt),
-        target_log_policy_wp,
-        archive_bfs_range=(1, 50),
-        archive_states_range=(1, 500),
-        archive_bfs_bins=archive_bfs_bins,
-        archive_states_bins=archive_states_bins,
+        obs_and_forward=obs_and_forward,
+        pop_size=ga_pop_size,
+        generations=ga_generations,
+        fitness_expr=fitness_expr,
+        seed=seed + round_idx + 1,
+        archive=archive,
+        on_generation=lambda r: print(
+          f"    Gen {r.generation}: best={r.best.fitness:.3f} "
+          f"avg={r.avg_fitness:.3f} pop={r.pop_size}"
+        ),
       )
       ga_time = time.time() - ga_t0
 
-      n_archive = len(archive_results)
+      assert archive is not None
+      archive_individuals = archive.all_individuals()
+      n_archive = len(archive_individuals)
       print(f"    Archive: {n_archive} levels ({ga_time:.1f}s)")
 
-      for entry in archive_results:
-        round_ga_levels.append(entry["level"])
+      for ind in archive_individuals:
+        round_ga_levels.append(ind.level)
         if n_archive <= 5:
           print(
-            f"      bfs={entry['bfs_moves']} states={entry['n_states']} "
-            f"log_pwp={entry['log_policy_win_prob']:.2f}"
+            f"      bfs={ind.bfs_moves} states={ind.n_states} "
+            f"log_pwp={ind.log_policy_win_prob:.2f}"
           )
 
     if not round_ga_levels:
