@@ -542,7 +542,228 @@ fn best_actions_for_levels(py: Python<'_>, levels: Vec<PyRef<'_, PyLevel>>) -> P
 }
 
 // ---------------------------------------------------------------------------
-// GA round (synchronous, for adversarial loop)
+// GA primitives (for Python-orchestrated GA loop)
+// ---------------------------------------------------------------------------
+
+/// Mutate a level using weighted random mutation operators.
+///
+/// Args:
+///     level: Level to mutate
+///     seed: RNG seed
+///     w_wall, w_move_entity, w_move_player, w_add_entity, w_remove_entity,
+///     w_move_exit: relative mutation weights
+///     extra_wall_prob: probability of an extra wall flip after the primary mutation
+///
+/// Returns a new mutated Level.
+#[pyfunction]
+#[pyo3(signature = (level, seed, w_wall=5.0, w_move_entity=3.0, w_move_player=2.0,
+                    w_add_entity=1.0, w_remove_entity=1.0, w_move_exit=1.0,
+                    extra_wall_prob=0.3))]
+fn mutate(
+    level: &PyLevel,
+    seed: u64,
+    w_wall: f64,
+    w_move_entity: f64,
+    w_move_player: f64,
+    w_add_entity: f64,
+    w_remove_entity: f64,
+    w_move_exit: f64,
+    extra_wall_prob: f64,
+) -> PyLevel {
+    use crate::ga::GaConfig;
+    use rand::SeedableRng;
+
+    let config = GaConfig {
+        w_wall,
+        w_move_entity,
+        w_move_player,
+        w_add_entity,
+        w_remove_entity,
+        w_move_exit,
+        extra_wall_prob,
+        ..GaConfig::default()
+    };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    PyLevel {
+        inner: crate::ga::mutate_with_config(&level.inner, &mut rng, &config),
+    }
+}
+
+/// Mutate a batch of levels. Each level gets a deterministic RNG derived from
+/// `base_seed + index`.
+///
+/// Returns a list of mutated Levels (same length as input).
+#[pyfunction]
+#[pyo3(signature = (levels, base_seed, w_wall=5.0, w_move_entity=3.0, w_move_player=2.0,
+                    w_add_entity=1.0, w_remove_entity=1.0, w_move_exit=1.0,
+                    extra_wall_prob=0.3))]
+fn mutate_batch(
+    py: Python<'_>,
+    levels: Vec<PyRef<'_, PyLevel>>,
+    base_seed: u64,
+    w_wall: f64,
+    w_move_entity: f64,
+    w_move_player: f64,
+    w_add_entity: f64,
+    w_remove_entity: f64,
+    w_move_exit: f64,
+    extra_wall_prob: f64,
+) -> Vec<PyLevel> {
+    use crate::ga::GaConfig;
+    use rand::SeedableRng;
+
+    let config = GaConfig {
+        w_wall,
+        w_move_entity,
+        w_move_player,
+        w_add_entity,
+        w_remove_entity,
+        w_move_exit,
+        extra_wall_prob,
+        ..GaConfig::default()
+    };
+    let inner_levels: Vec<&Level> = levels.iter().map(|l| &l.inner).collect();
+
+    py.allow_threads(|| {
+        inner_levels
+            .iter()
+            .enumerate()
+            .map(|(i, lev)| {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(base_seed.wrapping_add(i as u64));
+                PyLevel {
+                    inner: crate::ga::mutate_with_config(lev, &mut rng, &config),
+                }
+            })
+            .collect()
+    })
+}
+
+/// Crossover two levels to produce an offspring.
+///
+/// Args:
+///     a, b: parent levels (must have the same grid_size)
+///     mode: "swap_entities", "region", "wall_patch", or "feature_level"
+///     seed: RNG seed
+#[pyfunction]
+#[pyo3(signature = (a, b, mode="swap_entities", seed=0))]
+fn ga_crossover(
+    a: &PyLevel,
+    b: &PyLevel,
+    mode: &str,
+    seed: u64,
+) -> PyResult<PyLevel> {
+    use crate::ga::{crossover as cx, CrossoverMode};
+    use rand::SeedableRng;
+
+    let cx_mode = match mode {
+        "swap_entities" => CrossoverMode::SwapEntities,
+        "region" => CrossoverMode::Region,
+        "wall_patch" => CrossoverMode::WallPatch,
+        "feature_level" => CrossoverMode::FeatureLevel,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown crossover mode: {mode:?}. Use: swap_entities, region, wall_patch, feature_level"
+            )));
+        }
+    };
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    Ok(PyLevel {
+        inner: cx(&a.inner, &b.inner, &mut rng, cx_mode),
+    })
+}
+
+/// Evaluate a batch of levels: parallel BFS + state graph + Markov chain.
+///
+/// Returns a list of dicts for solvable levels:
+///     {"level_idx": int, "level": Level, "bfs_moves": int, "n_states": int,
+///      "win_prob": float, "log_win_prob": float}
+///
+/// If `fitness_expr` is provided, also includes "fitness": float and any
+/// difficulty metrics the expression requires.
+///
+/// Unsolvable levels are omitted from the output.
+/// Releases the GIL, uses rayon for parallelism.
+#[pyfunction]
+#[pyo3(signature = (levels, fitness_expr=None))]
+fn ga_evaluate_batch(
+    py: Python<'_>,
+    levels: Vec<PyRef<'_, PyLevel>>,
+    fitness_expr: Option<&str>,
+) -> PyResult<Vec<PyObject>> {
+    use crate::ga::fitness::FitnessExpr;
+    use crate::graph::build_graph;
+    use crate::markov::MarkovChain;
+    use rayon::prelude::*;
+
+    let expr = match fitness_expr {
+        Some(e) => FitnessExpr::parse(e)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?,
+        None => FitnessExpr::default(),
+    };
+
+    let inner_levels: Vec<(usize, &Level)> = levels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (i, &l.inner))
+        .collect();
+
+    struct EvalResult {
+        level_idx: usize,
+        level: Level,
+        bfs_moves: u32,
+        n_states: usize,
+        win_prob: f64,
+        log_win_prob: f64,
+        fitness: f64,
+    }
+
+    let results: Vec<EvalResult> = py.allow_threads(|| {
+        inner_levels
+            .par_iter()
+            .filter_map(|&(idx, lev)| {
+                let solve = crate::solver::solve(lev);
+                let moves = solve.moves?;
+                let graph = build_graph(lev);
+                let chain = MarkovChain::from_graph(&graph);
+                let start_idx = chain.start_idx?;
+                let log_win_prob = chain.solve_log_win_probs().ok()?;
+                let lwp = log_win_prob[start_idx];
+                let wp = 10.0f64.powf(lwp).max(0.0);
+
+                let vars = expr.compute_vars(&graph, lev, &solve, wp, lwp);
+                let fitness = expr.eval(&vars);
+
+                Some(EvalResult {
+                    level_idx: idx,
+                    level: lev.clone(),
+                    bfs_moves: moves,
+                    n_states: graph.n_transient,
+                    win_prob: wp,
+                    log_win_prob: lwp,
+                    fitness,
+                })
+            })
+            .collect()
+    });
+
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        let dict = PyDict::new(py);
+        dict.set_item("level_idx", r.level_idx)?;
+        dict.set_item("level", Py::new(py, PyLevel { inner: r.level })?)?;
+        dict.set_item("bfs_moves", r.bfs_moves)?;
+        dict.set_item("n_states", r.n_states)?;
+        dict.set_item("win_prob", r.win_prob)?;
+        dict.set_item("log_win_prob", r.log_win_prob)?;
+        dict.set_item("fitness", r.fitness)?;
+        out.push(dict.into());
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// GA round (synchronous, for adversarial loop) — LEGACY, will be removed in 4b
 // ---------------------------------------------------------------------------
 
 /// Run one GA round with policy evaluation and MAP-Elites archive.
@@ -689,6 +910,10 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fitness_variables, m)?)?;
     m.add_function(wrap_pyfunction!(fitness_presets, m)?)?;
     m.add_function(wrap_pyfunction!(best_actions_for_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(mutate, m)?)?;
+    m.add_function(wrap_pyfunction!(mutate_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(ga_crossover, m)?)?;
+    m.add_function(wrap_pyfunction!(ga_evaluate_batch, m)?)?;
     m.add_function(wrap_pyfunction!(run_ga_round, m)?)?;
     Ok(())
 }
