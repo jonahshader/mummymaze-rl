@@ -69,7 +69,7 @@ pub struct LevelMetric {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RawTrainingEvent {
+pub enum RawTrainingEvent {
     Init {
         n_params: u64,
         epochs: u32,
@@ -119,7 +119,7 @@ pub(crate) enum RawTrainingEvent {
 }
 
 /// Convert a deserialized raw event to the public `TrainingEvent` enum.
-pub(crate) fn raw_to_training_event(raw: RawTrainingEvent) -> TrainingEvent {
+pub fn raw_to_training_event(raw: RawTrainingEvent) -> TrainingEvent {
     match raw {
         RawTrainingEvent::Init {
             n_params,

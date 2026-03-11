@@ -9,6 +9,7 @@ mod render;
 mod table;
 mod training_metrics;
 mod training_tab;
+mod ws_client;
 
 use agent_probs::AgentProbs;
 use data::DataStore;
