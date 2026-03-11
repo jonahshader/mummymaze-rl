@@ -24,9 +24,9 @@ from src.env.obs import observe
 from src.env.types import EnvState, LevelData
 from src.train.augment import augment_dataset
 from src.train.dataset import load_bc_dataset
-from src.train.ga import MapElitesArchive, run_ga
+from src.train.ga import GenerationResult, MapElitesArchive, run_ga
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
-from src.train.reporter import FileReporter
+from src.train.reporter import FileReporter, MetricsReporter
 from src.train.train_bc import train_epochs
 
 
@@ -66,12 +66,26 @@ def adversarial_loop(
   checkpoint_dir: Path = Path("checkpoints/adversarial"),
   metrics_path: Path = Path("level_metrics_adversarial.json"),
   arch: str = DEFAULT_ARCH,
+  reporter: MetricsReporter | None = None,
+  on_event: Callable[[dict], None] | None = None,
 ) -> None:
-  """Run the adversarial training loop."""
+  """Run the adversarial training loop.
+
+  Args:
+    reporter: Training metrics reporter. Defaults to FileReporter.
+    on_event: Callback for adversarial-specific events (round_start,
+      ga_generation, archive_update, round_end, done).
+  """
   if grid_sizes is None:
     grid_sizes = [6, 8, 10]
 
-  reporter = FileReporter(metrics_path)
+  if reporter is None:
+    reporter = FileReporter(metrics_path)
+
+  def _emit(event: dict) -> None:
+    if on_event is not None:
+      on_event(event)
+
   key = jr.key(seed)
 
   # Load base dataset
@@ -136,6 +150,13 @@ def adversarial_loop(
     print(f"\n{'=' * 60}")
     print(f"Round {round_idx}/{n_rounds - 1}")
     print(f"{'=' * 60}")
+    _emit(
+      {
+        "type": "round_start",
+        "round": round_idx,
+        "n_rounds": n_rounds,
+      }
+    )
 
     # --- Train Phase ---
     print(f"\n--- Training ({epochs_per_round} epochs) ---")
@@ -210,6 +231,24 @@ def adversarial_loop(
         target_log_wp=target_log_policy_wp,
       )
 
+      def _on_generation(r: GenerationResult) -> None:
+        print(
+          f"    Gen {r.generation}: best={r.best.fitness:.3f} "
+          f"avg={r.avg_fitness:.3f} pop={r.pop_size}"
+        )
+        _emit(
+          {
+            "type": "ga_generation",
+            "round": round_idx,
+            "grid_size": gs,
+            "generation": r.generation,
+            "best_fitness": r.best.fitness,
+            "avg_fitness": r.avg_fitness,
+            "solvable_rate": r.solvable_rate,
+            "pop_size": r.pop_size,
+          }
+        )
+
       ga_t0 = time.time()
       _population, archive = run_ga(
         seed_levels,
@@ -219,17 +258,26 @@ def adversarial_loop(
         fitness_expr=fitness_expr,
         seed=seed + round_idx + 1,
         archive=archive,
-        on_generation=lambda r: print(
-          f"    Gen {r.generation}: best={r.best.fitness:.3f} "
-          f"avg={r.avg_fitness:.3f} pop={r.pop_size}"
-        ),
+        on_generation=_on_generation,
       )
       ga_time = time.time() - ga_t0
 
       assert archive is not None
       archive_individuals = archive.all_individuals()
       n_archive = len(archive_individuals)
+      occupied, total = archive.occupancy()
       print(f"    Archive: {n_archive} levels ({ga_time:.1f}s)")
+      _emit(
+        {
+          "type": "archive_update",
+          "round": round_idx,
+          "grid_size": gs,
+          "n_levels": n_archive,
+          "occupancy": occupied,
+          "total_cells": total,
+          "time": ga_time,
+        }
+      )
 
       for ind in archive_individuals:
         round_ga_levels.append(ind.level)
@@ -264,9 +312,23 @@ def adversarial_loop(
 
     round_time = time.time() - round_t0
     print(f"\nRound {round_idx} complete ({round_time:.1f}s)")
+    _emit(
+      {
+        "type": "round_end",
+        "round": round_idx,
+        "time": round_time,
+        "ga_levels": len(round_ga_levels),
+      }
+    )
 
   reporter.report_done()
   print(f"\nAdversarial loop complete. Total GA levels: {total_ga_levels}")
+  _emit(
+    {
+      "type": "done",
+      "total_ga_levels": total_ga_levels,
+    }
+  )
 
 
 def main() -> None:
