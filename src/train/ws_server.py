@@ -36,7 +36,7 @@ async def _drain_queue(
   loop = asyncio.get_running_loop()
   while not done_event.is_set():
     try:
-      msg = await loop.run_in_executor(None, q.get, True, 0.1)
+      msg = await loop.run_in_executor(None, q.get, True, 0.5)
       await ws.send(json.dumps(msg))
     except queue.Empty:
       continue

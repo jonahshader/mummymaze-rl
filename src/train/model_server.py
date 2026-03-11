@@ -61,13 +61,14 @@ class ModelServer:
       self.model = make_model(arch, jax.random.key(0))
 
     self._obs_and_forward = self._make_forward(self.model)
-    self._jitted_sizes: set[int] = set()
 
     # Dataset cache (loaded lazily)
     self._datasets: dict[int, BCDataset] | None = None
     self._sources: dict[int, list[tuple[str, int]]] | None = None
     # Reverse lookup: "B-5:23" → (grid_size, bank_idx)
     self._level_index: dict[str, tuple[int, int]] | None = None
+    # Cached LevelData per (stem, sub) — avoids re-parsing .dat files
+    self._level_data_cache: dict[tuple[str, int], tuple[int, LevelData]] = {}
 
     # Training stop event
     self._stop_event = threading.Event()
@@ -115,13 +116,26 @@ class ModelServer:
           n_train,
           n_val,
         )
-      # Build reverse index
+      # Build reverse index and cache numpy level_idx arrays
       self._level_index = {}
+      self._level_idx_np: dict[int, np.ndarray] = {}
       for gs, src_list in self._sources.items():
+        self._level_idx_np[gs] = np.array(self._datasets[gs].level_idx)
         for bank_idx, (stem, sub) in enumerate(src_list):
           self._level_index[f"{stem}:{sub}"] = (gs, bank_idx)
     assert self._sources is not None
     return self._datasets, self._sources
+
+  def _get_level_data(self, stem: str, sub: int) -> tuple[int, LevelData]:
+    """Get LevelData for a level, caching parsed results."""
+    cache_key = (stem, sub)
+    if cache_key not in self._level_data_cache:
+      levels = mummymaze_rust.parse_file(str(self.maze_dir / f"{stem}.dat"))
+      # Cache all sublevels from this file at once
+      for i, lev in enumerate(levels):
+        if (stem, i) not in self._level_data_cache:
+          self._level_data_cache[(stem, i)] = level_to_level_data(lev)
+    return self._level_data_cache[cache_key]
 
   def evaluate_level(
     self,
@@ -148,9 +162,7 @@ class ModelServer:
     ds = datasets[gs]
 
     # Find state indices belonging to this level
-    level_idx_np = np.array(ds.level_idx)
-    mask = level_idx_np == bank_idx
-    state_indices = np.where(mask)[0]
+    state_indices = np.where(self._level_idx_np[gs] == bank_idx)[0]
     n_states = len(state_indices)
 
     if n_states == 0:
@@ -158,10 +170,9 @@ class ModelServer:
 
     state_tuples_np = np.asarray(ds.state_tuples[state_indices], dtype=np.int32)
 
-    # Look up level data — parse the Rust Level and convert to JAX LevelData
+    # Look up level data (cached)
     stem, sub = sources[gs][bank_idx]
-    levels = mummymaze_rust.parse_file(str(self.maze_dir / f"{stem}.dat"))
-    _, ld = level_to_level_data(levels[sub])
+    _, ld = self._get_level_data(stem, sub)
 
     # Run inference in chunks
     all_probs = []
