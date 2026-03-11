@@ -24,6 +24,7 @@ Usage:
 
 import functools
 import json
+import struct
 import sys
 import threading
 import time
@@ -32,6 +33,7 @@ from typing import BinaryIO
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import optax
@@ -42,20 +44,114 @@ from src.env.types import EnvState, LevelData
 from src.train.checkpoint import load_model_weights
 from src.train.dataset import BCDataset, load_bc_dataset
 from src.train.model import DEFAULT_ARCH, make_model
-from src.train.reporter import (
-  FRAME_TYPE_ERROR,
-  FRAME_TYPE_TRAINING_EVENT,
-  FrameReporter,
-  write_frame,
-)
+from src.train.reporter import _BaseStreamReporter
 from src.train.train_bc import train_epochs
-from src.train.wire import (
-  next_power_of_2,
-  read_exact,
-  read_level_data,
-  read_u32,
-  state_tuples_to_env_states,
-)
+from src.train.wire import next_power_of_2, state_tuples_to_env_states
+
+
+# --- Binary frame protocol helpers (local to model_server) ---
+
+FRAME_TYPE_TRAINING_EVENT = 0x82
+FRAME_TYPE_ERROR = 0x83
+
+
+def _write_frame(stream: BinaryIO, frame_type: int, payload: bytes) -> None:
+  """Write a length-prefixed frame: [u32 length][u8 type][payload]."""
+  length = 1 + len(payload)
+  stream.write(struct.pack("<I", length))
+  stream.write(struct.pack("B", frame_type))
+  stream.write(payload)
+  stream.flush()
+
+
+def _read_exact(stream: BinaryIO, n: int) -> bytes:
+  """Read exactly n bytes from stream."""
+  chunks: list[bytes] = []
+  remaining = n
+  while remaining > 0:
+    chunk = stream.read(remaining)
+    if not chunk:
+      raise EOFError
+    chunks.append(chunk)
+    remaining -= len(chunk)
+  return b"".join(chunks)
+
+
+def _read_u32(stream: BinaryIO) -> int:
+  return struct.unpack("<I", _read_exact(stream, 4))[0]
+
+
+def _read_i32(stream: BinaryIO) -> int:
+  return struct.unpack("<i", _read_exact(stream, 4))[0]
+
+
+def _read_level_data(stream: BinaryIO, gs: int) -> LevelData:
+  """Read level observation data from binary stream."""
+  n = gs
+  n1 = n + 1
+
+  h_bytes = _read_exact(stream, n1 * n)
+  h_walls = np.frombuffer(h_bytes, dtype=np.uint8).reshape(n1, n).astype(np.bool_)
+
+  v_bytes = _read_exact(stream, n * n1)
+  v_walls = np.frombuffer(v_bytes, dtype=np.uint8).reshape(n, n1).astype(np.bool_)
+
+  is_red = bool(_read_exact(stream, 1)[0])
+  has_key_gate = bool(_read_exact(stream, 1)[0])
+  gate_row = _read_i32(stream)
+  gate_col = _read_i32(stream)
+
+  td = struct.unpack("<4i", _read_exact(stream, 16))
+  trap_pos = np.array([[td[0], td[1]], [td[2], td[3]]], dtype=np.int32)
+  ta_bytes = _read_exact(stream, 2)
+  trap_active = np.array([bool(ta_bytes[0]), bool(ta_bytes[1])], dtype=np.bool_)
+
+  kd = struct.unpack("<2i", _read_exact(stream, 8))
+  key_pos = np.array(kd, dtype=np.int32)
+
+  ed = struct.unpack("<2i", _read_exact(stream, 8))
+  exit_cell = np.array(ed, dtype=np.int32)
+
+  return LevelData(
+    h_walls_base=jnp.array(h_walls),
+    v_walls_base=jnp.array(v_walls),
+    is_red=jnp.bool_(is_red),
+    has_key_gate=jnp.bool_(has_key_gate),
+    gate_row=jnp.int32(gate_row),
+    gate_col=jnp.int32(gate_col),
+    trap_pos=jnp.array(trap_pos),
+    trap_active=jnp.array(trap_active),
+    key_pos=jnp.array(key_pos),
+    exit_cell=jnp.array(exit_cell),
+    initial_player=jnp.zeros(2, dtype=jnp.int32),
+    initial_mummy_pos=jnp.zeros((2, 2), dtype=jnp.int32),
+    initial_mummy_alive=jnp.zeros(2, dtype=jnp.bool_),
+    initial_scorpion_pos=jnp.zeros((1, 2), dtype=jnp.int32),
+    initial_scorpion_alive=jnp.zeros(1, dtype=jnp.bool_),
+  )
+
+
+class _FrameReporter(_BaseStreamReporter):
+  """Reporter that writes binary-framed JSON events.
+
+  Uses a threading.Event for stop signalling instead of reading stdin directly
+  (stdin is owned by the serve loop).
+  """
+
+  def __init__(self, stdout: BinaryIO, stop_event: threading.Event) -> None:
+    super().__init__()
+    self._stdout = stdout
+    self._stop_event = stop_event
+
+  def _emit(self, msg: dict) -> None:
+    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    _write_frame(self._stdout, FRAME_TYPE_TRAINING_EVENT, payload)
+
+  def check_command(self) -> str | None:
+    if self._stop_event.is_set():
+      return "stop"
+    return None
+
 
 # --- Frame type constants ---
 REQ_EVALUATE = 0x01
@@ -76,12 +172,10 @@ def _log(msg: str) -> None:
 
 def _read_frame(stream: BinaryIO) -> tuple[int, bytes]:
   """Read a length-prefixed frame. Returns (type, payload)."""
-  import struct
-
-  length = struct.unpack("<I", read_exact(stream, 4))[0]
+  length = struct.unpack("<I", _read_exact(stream, 4))[0]
   if length < 1:
     raise ValueError(f"Invalid frame length: {length}")
-  data = read_exact(stream, length)
+  data = _read_exact(stream, length)
   return data[0], data[1:]
 
 
@@ -168,23 +262,23 @@ class ModelServer:
 
   def handle_evaluate(self, stdin: BinaryIO, stdout: BinaryIO) -> None:
     """Process an Evaluate request: read level data, run inference, write results."""
-    grid_size = read_u32(stdin)
-    n_levels = read_u32(stdin)
-    max_batch_size = read_u32(stdin)
+    grid_size = _read_u32(stdin)
+    n_levels = _read_u32(stdin)
+    max_batch_size = _read_u32(stdin)
 
     all_level_data: list[LevelData] = []
     all_state_tuples: list[np.ndarray] = []
     state_counts: list[int] = []
 
     for _ in range(n_levels):
-      ld = read_level_data(stdin, grid_size)
+      ld = _read_level_data(stdin, grid_size)
       all_level_data.append(ld)
 
-      n_states = read_u32(stdin)
+      n_states = _read_u32(stdin)
       state_counts.append(n_states)
 
       if n_states > 0:
-        raw = read_exact(stdin, n_states * 12 * 4)
+        raw = _read_exact(stdin, n_states * 12 * 4)
         tuples = np.frombuffer(raw, dtype=np.int32).reshape(n_states, 12).copy()
       else:
         tuples = np.zeros((0, 12), dtype=np.int32)
@@ -234,16 +328,16 @@ class ModelServer:
         _log(f"{states_done}/{total_states} states")
 
     payload = b"".join(result_parts)
-    write_frame(stdout, RESP_EVALUATE_RESULT, payload)
+    _write_frame(stdout, RESP_EVALUATE_RESULT, payload)
     _log("evaluate response sent")
 
   def handle_train(self, payload: bytes, stdout: BinaryIO) -> None:
-    """Process a Train request: run training loop with FrameReporter."""
+    """Process a Train request: run training loop with frame reporter."""
     config = json.loads(payload.decode("utf-8"))
     _log(f"train request: {config}")
 
     self._stop_event.clear()
-    reporter = FrameReporter(stdout, self._stop_event)
+    reporter = _FrameReporter(stdout, self._stop_event)
 
     epochs = config.get("epochs", 5)
     batch_size = config.get("batch_size", 1024)
@@ -345,13 +439,13 @@ class ModelServer:
     _log(f"reloading checkpoint: {path}")
     if not path.exists():
       msg = f"Checkpoint not found: {path}".encode("utf-8")
-      write_frame(stdout, FRAME_TYPE_ERROR, msg)
+      _write_frame(stdout, FRAME_TYPE_ERROR, msg)
       return
     self.model = load_model_weights(path, arch=self.arch)
     self._rebind_forward()
     # Acknowledge with a training event
     ack = {"type": "status", "status": f"Reloaded checkpoint: {path}"}
-    write_frame(
+    _write_frame(
       stdout,
       FRAME_TYPE_TRAINING_EVENT,
       json.dumps(ack).encode("utf-8"),
@@ -408,7 +502,7 @@ def serve(
 
       else:
         _log(f"unknown request type: {frame_type:#x}")
-        write_frame(
+        _write_frame(
           stdout,
           FRAME_TYPE_ERROR,
           f"Unknown request type: {frame_type:#x}".encode("utf-8"),
@@ -419,7 +513,7 @@ def serve(
       import traceback
 
       traceback.print_exc(file=_stderr)
-      write_frame(stdout, FRAME_TYPE_ERROR, str(e).encode("utf-8"))
+      _write_frame(stdout, FRAME_TYPE_ERROR, str(e).encode("utf-8"))
 
 
 def main() -> None:

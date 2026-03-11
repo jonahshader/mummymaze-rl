@@ -2,13 +2,11 @@
 
 import json
 import select
-import struct
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import Protocol
 
 
 def build_levels_dict(
@@ -132,19 +130,6 @@ class FileReporter:
 
 
 _BATCH_THROTTLE_INTERVAL = 0.1  # seconds
-
-# --- Frame protocol constants ---
-FRAME_TYPE_TRAINING_EVENT = 0x82
-FRAME_TYPE_ERROR = 0x83
-
-
-def write_frame(stream: BinaryIO, frame_type: int, payload: bytes) -> None:
-  """Write a length-prefixed frame: [u32 length][u8 type][payload]."""
-  length = 1 + len(payload)
-  stream.write(struct.pack("<I", length))
-  stream.write(struct.pack("B", frame_type))
-  stream.write(payload)
-  stream.flush()
 
 
 class _BaseStreamReporter:
@@ -278,27 +263,4 @@ class StdioReporter(_BaseStreamReporter):
           return msg.get("cmd")
         except json.JSONDecodeError:
           return None
-    return None
-
-
-class FrameReporter(_BaseStreamReporter):
-  """Reporter that writes binary-framed JSON events for model_server.
-
-  Uses a threading.Event for stop signalling instead of reading stdin directly
-  (stdin is owned by the model_server's serve loop).
-  """
-
-  def __init__(self, stdout: BinaryIO, stop_event: threading.Event) -> None:
-    super().__init__()
-    self._stdout = stdout
-    self._stop_event = stop_event
-
-  def _emit(self, msg: dict) -> None:
-    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
-    write_frame(self._stdout, FRAME_TYPE_TRAINING_EVENT, payload)
-
-  def check_command(self) -> str | None:
-    """Check if stop has been requested via the threading event."""
-    if self._stop_event.is_set():
-      return "stop"
     return None

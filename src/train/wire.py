@@ -1,82 +1,12 @@
-"""Binary I/O helpers for model_server.
+"""Shared helpers for state conversion and padding.
 
-Provides level observation wire format parsing functions.
+Used by model_server.py and ga.py for JAX inference batching.
 """
-
-import struct
-from typing import BinaryIO
 
 import jax.numpy as jnp
 import numpy as np
 
-from src.env.types import EnvState, LevelData
-
-
-def read_exact(stream: BinaryIO, n: int) -> bytes:
-  """Read exactly n bytes from stream."""
-  chunks: list[bytes] = []
-  remaining = n
-  while remaining > 0:
-    chunk = stream.read(remaining)
-    if not chunk:
-      raise EOFError
-    chunks.append(chunk)
-    remaining -= len(chunk)
-  return b"".join(chunks)
-
-
-def read_u32(stream: BinaryIO) -> int:
-  return struct.unpack("<I", read_exact(stream, 4))[0]
-
-
-def read_i32(stream: BinaryIO) -> int:
-  return struct.unpack("<i", read_exact(stream, 4))[0]
-
-
-def read_level_data(stream: BinaryIO, gs: int) -> LevelData:
-  """Read level observation data from binary stream."""
-  n = gs
-  n1 = n + 1
-
-  h_bytes = read_exact(stream, n1 * n)
-  h_walls = np.frombuffer(h_bytes, dtype=np.uint8).reshape(n1, n).astype(np.bool_)
-
-  v_bytes = read_exact(stream, n * n1)
-  v_walls = np.frombuffer(v_bytes, dtype=np.uint8).reshape(n, n1).astype(np.bool_)
-
-  is_red = bool(read_exact(stream, 1)[0])
-  has_key_gate = bool(read_exact(stream, 1)[0])
-  gate_row = read_i32(stream)
-  gate_col = read_i32(stream)
-
-  td = struct.unpack("<4i", read_exact(stream, 16))
-  trap_pos = np.array([[td[0], td[1]], [td[2], td[3]]], dtype=np.int32)
-  ta_bytes = read_exact(stream, 2)
-  trap_active = np.array([bool(ta_bytes[0]), bool(ta_bytes[1])], dtype=np.bool_)
-
-  kd = struct.unpack("<2i", read_exact(stream, 8))
-  key_pos = np.array(kd, dtype=np.int32)
-
-  ed = struct.unpack("<2i", read_exact(stream, 8))
-  exit_cell = np.array(ed, dtype=np.int32)
-
-  return LevelData(
-    h_walls_base=jnp.array(h_walls),
-    v_walls_base=jnp.array(v_walls),
-    is_red=jnp.bool_(is_red),
-    has_key_gate=jnp.bool_(has_key_gate),
-    gate_row=jnp.int32(gate_row),
-    gate_col=jnp.int32(gate_col),
-    trap_pos=jnp.array(trap_pos),
-    trap_active=jnp.array(trap_active),
-    key_pos=jnp.array(key_pos),
-    exit_cell=jnp.array(exit_cell),
-    initial_player=jnp.zeros(2, dtype=jnp.int32),
-    initial_mummy_pos=jnp.zeros((2, 2), dtype=jnp.int32),
-    initial_mummy_alive=jnp.zeros(2, dtype=jnp.bool_),
-    initial_scorpion_pos=jnp.zeros((1, 2), dtype=jnp.int32),
-    initial_scorpion_alive=jnp.zeros(1, dtype=jnp.bool_),
-  )
+from src.env.types import EnvState
 
 
 def state_tuples_to_env_states(tuples: np.ndarray) -> EnvState:

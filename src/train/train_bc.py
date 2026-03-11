@@ -2,9 +2,7 @@
 
 import argparse
 import json
-import struct
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -25,7 +23,7 @@ from jaxtyping import Array, Float, Int
 from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
-from src.train.reporter import FileReporter, FrameReporter, StdioReporter
+from src.train.reporter import FileReporter, StdioReporter
 
 
 def cross_entropy_loss(
@@ -174,57 +172,6 @@ def compute_level_metrics(
   return metrics
 
 
-def _write_agent_probs_bin(
-  path: Path,
-  level_entries: list[tuple[str, np.ndarray, np.ndarray]],
-) -> None:
-  """Write agent_probs.bin mmap file with per-state action probabilities.
-
-  Args:
-    path: Output file path.
-    level_entries: List of (key, state_tuples, probs) per level.
-      state_tuples: (n_states, 12) int32, probs: (n_states, 5) float32.
-  """
-  # Pre-compute data section layout
-  header_size = 16
-  data_offsets: list[tuple[str, int, int]] = []  # (key, byte_offset, n_states)
-  offset = header_size
-  for key, states, _probs in level_entries:
-    n = states.shape[0]
-    data_offsets.append((key, offset, n))
-    offset += n * 68  # 48B state + 20B probs per state
-
-  index_offset = offset
-
-  # Write to temp file, then atomic rename to avoid reader bus errors
-  fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-  try:
-    with open(fd, "wb") as f:
-      # Header
-      f.write(b"MMPR")
-      f.write(struct.pack("<III", 1, len(level_entries), index_offset))
-
-      # Data section — bulk write per level via structured numpy array
-      entry_dt = np.dtype([("state", np.int32, 12), ("probs", np.float32, 5)])
-      for _key, states, probs in level_entries:
-        buf = np.empty(states.shape[0], dtype=entry_dt)
-        buf["state"] = states
-        buf["probs"] = probs
-        f.write(buf.tobytes())
-
-      # Index section
-      for key, byte_off, n_states in data_offsets:
-        key_bytes = key.encode("utf-8")
-        f.write(struct.pack("<H", len(key_bytes)))
-        f.write(key_bytes)
-        f.write(struct.pack("<II", byte_off, n_states))
-
-    Path(tmp_path).replace(path)
-  except BaseException:
-    Path(tmp_path).unlink(missing_ok=True)
-    raise
-
-
 def _parse_rust_levels(
   maze_dir: Path,
   level_keys: list[tuple[str, int]],
@@ -256,7 +203,7 @@ def train_epochs(
   epochs: int,
   batch_size: int,
   checkpoint_dir: Path,
-  reporter: FileReporter | StdioReporter | FrameReporter,
+  reporter: FileReporter | StdioReporter,
   maze_dir: Path,
   key: jax.Array,
   epoch_offset: int = 0,
@@ -492,8 +439,6 @@ def train_epochs(
     reporter.report_status("Computing agent win%...")
     from scipy.special import softmax as scipy_softmax
 
-    all_level_entries: list[tuple[str, np.ndarray, np.ndarray]] = []
-
     for gs, ds in datasets.items():
       probs = scipy_softmax(logits_buffers[gs], axis=-1)  # (n_states, 5) f32
 
@@ -511,16 +456,6 @@ def train_epochs(
       win_probs = mummymaze_rust.policy_win_prob_batch(
         rust_levels, state_tuples_np, probs, offsets.tolist()
       )
-
-      # Collect per-level slices for agent_probs.bin
-      probs_f32 = probs.astype(np.float32)
-      for lvl_idx in range(ds.n_levels):
-        start, end = int(offsets[lvl_idx]), int(offsets[lvl_idx + 1])
-        if end > start:
-          stem, sub = level_keys[lvl_idx]
-          all_level_entries.append(
-            (f"{stem}:{sub}", state_tuples_np[start:end], probs_f32[start:end])
-          )
 
       failed_levels: list[str] = []
       for lvl_idx, wp in enumerate(win_probs):
@@ -540,12 +475,6 @@ def train_epochs(
         if use_tqdm:
           print(f"  {msg}")
 
-    # Write agent_probs.bin for viewer overlay
-    probs_path = checkpoint_dir / "agent_probs.bin"
-    _write_agent_probs_bin(probs_path, all_level_entries)
-    if use_tqdm:
-      print(f"  Wrote {probs_path}")
-
     reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
 
   return model, opt_state, global_step, key
@@ -560,7 +489,7 @@ def train(
   wandb_project: str | None = None,
   metrics_path: Path = Path("level_metrics.json"),
   checkpoint_dir: Path = Path("checkpoints"),
-  reporter: FileReporter | StdioReporter | FrameReporter | None = None,
+  reporter: FileReporter | StdioReporter | None = None,
   checkpoint: Path | None = None,
   augment_levels: Path | None = None,
   epoch_offset: int = 0,
