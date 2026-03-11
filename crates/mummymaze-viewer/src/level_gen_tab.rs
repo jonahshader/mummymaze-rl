@@ -4,9 +4,7 @@ use eframe::egui;
 use mummymaze::ga::fitness::{FitnessExpr, PRESETS};
 use mummymaze::ga::{CrossoverMode, GaConfig, GaMessage, Individual};
 use mummymaze::game::State;
-use mummymaze::model_server::ModelServer;
 use mummymaze::parse::Level;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -33,10 +31,6 @@ pub struct LevelGenState {
     stop_flag: Option<Arc<AtomicBool>>,
     /// Validation error for the fitness expression (empty = valid).
     fitness_error: String,
-    /// Optional policy checkpoint path for policy_win_prob evaluation.
-    pub policy_checkpoint: String,
-    /// Whether to use the policy net for fitness evaluation.
-    pub use_policy: bool,
 }
 
 impl LevelGenState {
@@ -56,50 +50,24 @@ impl LevelGenState {
             rx: None,
             stop_flag: None,
             fitness_error: String::new(),
-            policy_checkpoint: latest_checkpoint().unwrap_or_default(),
-            use_policy: false,
         }
     }
 
-    pub fn start(&mut self, seed_levels: Vec<Level>, model_server: Option<&Arc<ModelServer>>) {
+    pub fn start(&mut self, seed_levels: Vec<Level>) {
         let (tx, rx) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let config = self.config.clone();
         let flag = stop_flag.clone();
-        let use_policy = self.use_policy;
 
         self.history.clear();
         self.best = None;
-        self.status = if use_policy && model_server.is_some() {
-            GaStatus::Starting("Evaluating seeds with policy...".to_string())
-        } else {
-            GaStatus::Starting("Evaluating seeds...".to_string())
-        };
+        self.status = GaStatus::Starting("Evaluating seeds...".to_string());
         self.rx = Some(rx);
         self.stop_flag = Some(stop_flag);
 
-        if use_policy {
-            if let Some(server) = model_server {
-                let server = server.clone();
-                std::thread::spawn(move || {
-                    mummymaze::ga::run_ga_with_model_server(
-                        &config,
-                        seed_levels,
-                        tx,
-                        flag,
-                        &server,
-                    );
-                });
-            } else {
-                let _ = tx.send(GaMessage::Error(
-                    "No model server available for policy evaluation".to_string(),
-                ));
-            }
-        } else {
-            std::thread::spawn(move || {
-                mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
-            });
-        }
+        std::thread::spawn(move || {
+            mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+        });
     }
 
     pub fn stop(&mut self) {
@@ -168,7 +136,6 @@ pub fn draw_level_gen_panel(
     ui: &mut egui::Ui,
     state: &mut LevelGenState,
     rows: &[LevelRow],
-    model_server: Option<&Arc<ModelServer>>,
 ) -> Option<Level> {
     let mut load_level = None;
 
@@ -188,7 +155,7 @@ pub fn draw_level_gen_panel(
                     .filter(|r| r.level.grid_size == state.config.grid_size)
                     .map(|r| r.level.clone())
                     .collect();
-                state.start(seeds, model_server);
+                state.start(seeds);
             }
         }
 
@@ -368,28 +335,6 @@ pub fn draw_level_gen_panel(
                 });
 
             ui.separator();
-
-            // Policy net section
-            ui.checkbox(&mut state.use_policy, "Use policy net");
-            if state.use_policy {
-                ui.horizontal(|ui| {
-                    ui.label("Checkpoint:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.policy_checkpoint)
-                            .desired_width(ui.available_width() - 4.0)
-                            .hint_text("path/to/model.eqx")
-                            .font(egui::TextStyle::Monospace),
-                    );
-                });
-                if state.policy_checkpoint.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Set checkpoint path to use policy_win_prob",
-                    );
-                }
-            }
-
-            ui.separator();
             ui.label("Fitness expression:");
 
             // Preset dropdown
@@ -529,20 +474,3 @@ fn parse_progress_frac(msg: &str) -> Option<f32> {
     }
 }
 
-/// Find the newest .eqx checkpoint in `checkpoints/`.
-pub fn latest_checkpoint() -> Option<String> {
-    let dir = PathBuf::from("checkpoints");
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(&dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if path.extension().map_or(true, |e| e != "eqx") {
-            continue;
-        }
-        let mtime = entry.metadata().ok()?.modified().ok()?;
-        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
-            best = Some((mtime, path));
-        }
-    }
-    best.map(|(_, p)| p.to_string_lossy().into_owned())
-}

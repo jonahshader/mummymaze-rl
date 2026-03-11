@@ -74,7 +74,7 @@ No way to select an architecture — every component assumes `MazeCNN`.
 
 ## Task 4 — Python-Owned Loops + WebSocket API
 
-**Status:** Not started
+**Status:** In progress (4a-4c done, 4d in progress)
 **Depends on:** Tasks 1-3
 
 ### Motivation
@@ -137,22 +137,28 @@ Remaining Rust-side cleanup (model_server.rs deletion) deferred to Task 4d.
 
 ### 4d — Viewer as WebSocket client
 
-**Status:** Not started
+**Status:** In progress
 **Depends on:** 4c
 
 Refactor the viewer to connect to the Python WebSocket server instead of
 spawning and managing a subprocess.
 
-Delete from viewer:
-- `adversarial.rs` — state machine (Python owns the loop now)
-- `agent_probs.rs` — mmap reader (query WS on demand)
-- `data/training.rs` — ModelServer polling (receive WS events)
-- `training_metrics.rs` — JSON file watcher (receive WS events)
+What's done:
+- `ws_client.rs` — tungstenite WebSocket client with single IO thread
+  (non-blocking reads + channel-based writes)
+- `event_types.rs` — shared types made public for cross-crate use
+- Training path uses WsClient (`handle_training_events()` replaces `poll_training()`)
+- Adversarial tab rewritten as thin WS event display (server owns the loop)
+- Level gen tab: removed policy-guided GA (adversarial tab handles that now)
+- `ModelServer::spawn()` replaced with `WsClient::connect(url)`
+  (reads `MODEL_SERVER_URL` env var, defaults to `ws://localhost:8765`)
 
-Keep in viewer:
-- All rendering (`render.rs`, `graph_view/`)
-- UI widgets (`table.rs`, `training_tab.rs`, `adversarial_tab.rs`, `level_gen_tab.rs`)
-- Level loading + analysis (`data/mod.rs`) — still Rust, still fast
+Remaining:
+- Replace `agent_probs.rs` mmap with on-demand `ws_client.evaluate()` + cache
+- Delete `training_metrics.rs` file watcher (metrics come via WS events)
+- Delete `crates/mummymaze/src/model_server.rs` and related dead code
+  (`run_ga_with_model_server*`, `PolicyQuery` in `ga/mod.rs`)
+- Clean up Cargo.toml deps (remove `memmap2` after agent_probs deletion)
 
 ---
 

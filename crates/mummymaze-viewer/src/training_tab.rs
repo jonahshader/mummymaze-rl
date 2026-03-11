@@ -2,8 +2,7 @@ use crate::data::{DataStore, EpochRecord, TrainingPhase, TrainingStatus};
 use eframe::egui;
 use egui::Ui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
-use mummymaze::model_server::ModelServer;
-use std::sync::Arc;
+use crate::ws_client::WsClient;
 
 /// Precomputed point data for the scatter plot.
 struct ScatterPoint {
@@ -17,7 +16,7 @@ struct ScatterPoint {
 pub fn draw_training_panel(
     ui: &mut Ui,
     store: &mut DataStore,
-    model_server: Option<&Arc<ModelServer>>,
+    model_server: Option<&WsClient>,
 ) -> Option<usize> {
     // Training controls section
     draw_training_controls(ui, store, model_server);
@@ -226,7 +225,7 @@ pub fn draw_training_panel(
 }
 
 /// Draw training controls: config form when idle, status + stop when running.
-fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, model_server: Option<&Arc<ModelServer>>) {
+fn draw_training_controls(ui: &mut Ui, store: &mut DataStore, model_server: Option<&WsClient>) {
     match &store.training_status {
         TrainingStatus::Idle => {
             ui.horizontal(|ui: &mut Ui| {

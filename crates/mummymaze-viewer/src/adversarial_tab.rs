@@ -1,22 +1,18 @@
 //! UI for the adversarial training loop tab.
 
 use crate::adversarial::{AdversarialConfig, AdversarialPhase, AdversarialState, AdversarialStatus};
-use crate::data::LevelRow;
 use crate::training_tab::draw_epoch_curves;
+use crate::ws_client::WsClient;
 use eframe::egui;
 use egui::Ui;
-use mummymaze::ga::archive::ArchiveSnapshot;
-use mummymaze::model_server::ModelServer;
-use std::sync::Arc;
 
 /// Draw the adversarial loop panel.
 pub fn draw_panel(
     ui: &mut Ui,
     state: &mut AdversarialState,
-    rows: &[LevelRow],
-    model_server: Option<&Arc<ModelServer>>,
+    ws_client: Option<&WsClient>,
 ) {
-    draw_controls(ui, state, rows, model_server);
+    draw_controls(ui, state, ws_client);
     ui.separator();
 
     // Training curves (cumulative across rounds)
@@ -56,20 +52,14 @@ pub fn draw_panel(
         }
     }
 
-    // Bottom section: heatmap (left) + GA fitness chart (right)
-    ui.columns(2, |cols| {
-        // Left: Archive heatmap
-        draw_archive_heatmap(&mut cols[0], state.archive_snapshot.as_ref(), state.config.target_log_wp);
-
-        // Right: GA fitness chart + archive occupancy
-        draw_ga_charts(&mut cols[1], &state.ga_history, &state.archive_occupancy_history);
-    });
+    // Bottom section: GA fitness chart + archive stats
+    draw_ga_charts(ui, &state.ga_history);
 }
 
 /// Snapshot of running status fields for UI rendering (avoids borrow issues).
 struct RunningSnapshot {
-    round: usize,
-    n_rounds: usize,
+    round: u32,
+    n_rounds: u32,
     phase: AdversarialPhase,
     training_epoch: u32,
     training_total_epochs: u32,
@@ -79,17 +69,18 @@ struct RunningSnapshot {
     training_acc: f64,
     training_gs: i32,
     training_phase: crate::data::TrainingPhase,
-    ga_generation: usize,
-    ga_total_generations: usize,
-    archive_occ: Option<(usize, usize)>,
+    ga_generation: u32,
+    ga_best_fitness: f64,
+    ga_solvable_rate: f64,
+    archive_occupancy: u32,
+    archive_total_cells: u32,
 }
 
 /// Draw controls: status bar + config button + start/stop.
 fn draw_controls(
     ui: &mut Ui,
     state: &mut AdversarialState,
-    rows: &[LevelRow],
-    model_server: Option<&Arc<ModelServer>>,
+    ws_client: Option<&WsClient>,
 ) {
     // Snapshot status to avoid borrow conflicts
     enum StatusKind {
@@ -103,6 +94,7 @@ fn draw_controls(
         AdversarialStatus::Idle => StatusKind::Idle,
         AdversarialStatus::Running {
             round,
+            n_rounds,
             phase,
             training_epoch,
             training_total_epochs,
@@ -113,10 +105,14 @@ fn draw_controls(
             training_gs,
             training_phase,
             ga_generation,
-            ga_total_generations,
+            ga_best_fitness,
+            ga_solvable_rate,
+            archive_occupancy,
+            archive_total_cells,
+            ..
         } => StatusKind::Running(RunningSnapshot {
             round: *round,
-            n_rounds: state.config.n_rounds,
+            n_rounds: *n_rounds,
             phase: phase.clone(),
             training_epoch: *training_epoch,
             training_total_epochs: *training_total_epochs,
@@ -127,11 +123,10 @@ fn draw_controls(
             training_gs: *training_gs,
             training_phase: training_phase.clone(),
             ga_generation: *ga_generation,
-            ga_total_generations: *ga_total_generations,
-            archive_occ: state.archive_snapshot.as_ref().map(|snap| {
-                let occupied = snap.cells.iter().filter(|c| c.is_some()).count();
-                (occupied, snap.cells.len())
-            }),
+            ga_best_fitness: *ga_best_fitness,
+            ga_solvable_rate: *ga_solvable_rate,
+            archive_occupancy: *archive_occupancy,
+            archive_total_cells: *archive_total_cells,
         }),
         AdversarialStatus::Done => StatusKind::Done,
         AdversarialStatus::Error(msg) => StatusKind::Error(msg.clone()),
@@ -143,10 +138,10 @@ fn draw_controls(
                 if ui.button("Configure").clicked() {
                     state.show_config = !state.show_config;
                 }
-                let can_start = model_server.is_some();
+                let can_start = ws_client.is_some();
                 if ui.add_enabled(can_start, egui::Button::new("Start")).clicked() {
-                    if let Some(ms) = model_server {
-                        state.start(ms, rows);
+                    if let Some(ws) = ws_client {
+                        state.start(ws);
                     }
                 }
             });
@@ -207,26 +202,21 @@ fn draw_controls(
                             }
                         }
                     }
-                    AdversarialPhase::GA { grid_size, .. } => {
-                        let progress = if snap.ga_total_generations > 0 {
-                            snap.ga_generation as f32 / snap.ga_total_generations as f32
-                        } else {
-                            0.0
-                        };
+                    AdversarialPhase::GA { grid_size } => {
                         ui.label(format!("GA gs={grid_size}"));
                         ui.separator();
-                        ui.add(
-                            egui::ProgressBar::new(progress)
-                                .text(format!(
-                                    "Gen {}/{}",
-                                    snap.ga_generation, snap.ga_total_generations
-                                ))
-                                .desired_width(150.0),
-                        );
+                        ui.label(format!("Gen {}", snap.ga_generation));
+                        ui.separator();
+                        ui.label(format!("Best: {:.3}", snap.ga_best_fitness));
+                        ui.separator();
+                        ui.label(format!("Solvable: {:.0}%", snap.ga_solvable_rate * 100.0));
 
-                        if let Some((occupied, total)) = snap.archive_occ {
+                        if snap.archive_total_cells > 0 {
                             ui.separator();
-                            ui.label(format!("Archive: {occupied}/{total}"));
+                            ui.label(format!(
+                                "Archive: {}/{}",
+                                snap.archive_occupancy, snap.archive_total_cells
+                            ));
                         }
                     }
                 }
@@ -234,8 +224,8 @@ fn draw_controls(
                 // Right-align Stop button
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Stop").clicked() {
-                        if let Some(ms) = model_server {
-                            state.stop(ms);
+                        if let Some(ws) = ws_client {
+                            state.stop(ws);
                         }
                     }
                 });
@@ -337,164 +327,41 @@ fn draw_config_window(ui: &mut Ui, config: &mut AdversarialConfig, show: &mut bo
         });
 }
 
-/// Draw the MAP-Elites archive heatmap.
-fn draw_archive_heatmap(ui: &mut Ui, snapshot: Option<&ArchiveSnapshot>, target_log_wp: f64) {
-    ui.label("MAP-Elites Archive");
-
-    let Some(snap) = snapshot else {
-        ui.colored_label(egui::Color32::GRAY, "No archive data yet");
+/// Draw GA fitness history.
+fn draw_ga_charts(ui: &mut Ui, ga_history: &[(u32, f64, f64)]) {
+    if ga_history.is_empty() {
         return;
-    };
-
-    let occupied = snap.cells.iter().filter(|c| c.is_some()).count();
-    let total = snap.cells.len();
-    ui.label(format!("{occupied}/{total} cells occupied"));
-
-    let available = ui.available_size();
-    let side = available.x.min(available.y).min(300.0);
-    let size = egui::Vec2::new(side, side);
-    let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
-    let rect = response.rect;
-
-    let cell_w = rect.width() / snap.bfs_bins as f32;
-    let cell_h = rect.height() / snap.states_bins as f32;
-
-    for bi in 0..snap.bfs_bins {
-        for si in 0..snap.states_bins {
-            let idx = bi * snap.states_bins + si;
-            let x = rect.left() + bi as f32 * cell_w;
-            // Invert Y so states_bins increases upward
-            let y = rect.bottom() - (si + 1) as f32 * cell_h;
-            let cell_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h));
-
-            let color = match &snap.cells[idx] {
-                None => egui::Color32::from_gray(40),
-                Some(cell) => {
-                    let dist = (cell.log_policy_wp - target_log_wp).abs();
-                    // Map distance to color: 0 = green, >2 = red
-                    let t = (dist / 2.0).min(1.0) as f32;
-                    let r = (t * 220.0) as u8 + 30;
-                    let g = ((1.0 - t) * 200.0) as u8 + 30;
-                    egui::Color32::from_rgb(r, g, 50)
-                }
-            };
-
-            painter.rect_filled(cell_rect, 0.0, color);
-        }
     }
 
-    // Grid lines
-    let grid_color = egui::Color32::from_gray(60);
-    for i in 0..=snap.bfs_bins {
-        let x = rect.left() + i as f32 * cell_w;
-        painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            egui::Stroke::new(0.5, grid_color),
+    ui.label("GA Fitness");
+    let best_line: egui_plot::PlotPoints = ga_history
+        .iter()
+        .map(|(g, best, _)| [*g as f64, *best])
+        .collect();
+    let avg_line: egui_plot::PlotPoints = ga_history
+        .iter()
+        .map(|(g, _, avg)| [*g as f64, *avg])
+        .collect();
+
+    let plot = egui_plot::Plot::new("adv_ga_fitness")
+        .height(180.0)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .x_axis_label("Generation")
+        .y_axis_label("Fitness")
+        .legend(egui_plot::Legend::default());
+
+    plot.show(ui, |plot_ui| {
+        plot_ui.line(
+            egui_plot::Line::new(best_line)
+                .name("Best")
+                .color(egui::Color32::from_rgb(80, 140, 255)),
         );
-    }
-    for i in 0..=snap.states_bins {
-        let y = rect.top() + i as f32 * cell_h;
-        painter.line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            egui::Stroke::new(0.5, grid_color),
+        plot_ui.line(
+            egui_plot::Line::new(avg_line)
+                .name("Avg")
+                .color(egui::Color32::from_rgb(230, 160, 40)),
         );
-    }
-
-    // Tooltip on hover
-    if let Some(hover_pos) = response.hover_pos() {
-        let bi = ((hover_pos.x - rect.left()) / cell_w) as usize;
-        let si = snap.states_bins.saturating_sub(1)
-            - ((hover_pos.y - rect.top()) / cell_h).min(snap.states_bins as f32 - 1.0) as usize;
-        if bi < snap.bfs_bins && si < snap.states_bins {
-            let idx = bi * snap.states_bins + si;
-            if let Some(ref cell) = snap.cells[idx] {
-                response.clone().on_hover_ui_at_pointer(|ui: &mut Ui| {
-                    ui.label(format!("BFS moves: {}", cell.bfs_moves));
-                    ui.label(format!("States: {}", cell.n_states));
-                    ui.label(format!("log(policy WP): {:.2}", cell.log_policy_wp));
-                    ui.label(format!(
-                        "|dist to target|: {:.2}",
-                        (cell.log_policy_wp - target_log_wp).abs()
-                    ));
-                });
-            }
-        }
-    }
-
-    // Axis labels
-    ui.horizontal(|ui| {
-        ui.label(format!("BFS: {}..{}", snap.bfs_range.0, snap.bfs_range.1));
-        ui.separator();
-        ui.label(format!("States: {}..{}", snap.states_range.0, snap.states_range.1));
     });
-}
-
-/// Draw GA fitness history and archive occupancy.
-fn draw_ga_charts(
-    ui: &mut Ui,
-    ga_history: &[(usize, f64, f64)],
-    occupancy_history: &[(usize, usize)],
-) {
-    if !ga_history.is_empty() {
-        ui.label("GA Fitness");
-        let best_line: egui_plot::PlotPoints = ga_history
-            .iter()
-            .map(|(g, best, _)| [*g as f64, *best])
-            .collect();
-        let avg_line: egui_plot::PlotPoints = ga_history
-            .iter()
-            .map(|(g, _, avg)| [*g as f64, *avg])
-            .collect();
-
-        let plot = egui_plot::Plot::new("adv_ga_fitness")
-            .height(180.0)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .x_axis_label("Generation")
-            .y_axis_label("Fitness")
-            .legend(egui_plot::Legend::default());
-
-        plot.show(ui, |plot_ui| {
-            plot_ui.line(
-                egui_plot::Line::new(best_line)
-                    .name("Best")
-                    .color(egui::Color32::from_rgb(80, 140, 255)),
-            );
-            plot_ui.line(
-                egui_plot::Line::new(avg_line)
-                    .name("Avg")
-                    .color(egui::Color32::from_rgb(230, 160, 40)),
-            );
-        });
-    }
-
-    if !occupancy_history.is_empty() {
-        ui.add_space(8.0);
-        ui.label("Archive Occupancy");
-        let occ_points: egui_plot::PlotPoints = occupancy_history
-            .iter()
-            .enumerate()
-            .map(|(i, (_, occ))| [i as f64, *occ as f64])
-            .collect();
-
-        let plot = egui_plot::Plot::new("adv_archive_occ")
-            .height(100.0)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .x_axis_label("Update")
-            .y_axis_label("Occupied");
-
-        plot.show(ui, |plot_ui| {
-            plot_ui.line(
-                egui_plot::Line::new(occ_points)
-                    .color(egui::Color32::from_rgb(100, 200, 100)),
-            );
-        });
-    }
-
-    if ga_history.is_empty() && occupancy_history.is_empty() {
-        ui.colored_label(egui::Color32::GRAY, "No GA data yet");
-    }
 }

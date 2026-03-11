@@ -1,19 +1,12 @@
-//! Adversarial training loop state machine.
+//! Adversarial training loop state — thin wrapper over server-side loop.
 //!
-//! Orchestrates: Training(round N) → GA(gs=6) → GA(gs=8) → GA(gs=10) → Training(round N+1) → ...
-//!
-//! Uses a shared `ModelServer` for both training and GA policy evaluation.
+//! The Python WS server runs the full adversarial loop (training + GA).
+//! This module sends start/stop commands and displays progress from events.
 
-use crate::level_gen_tab::latest_checkpoint;
 use crate::data::{EpochRecord, TrainingPhase};
-use mummymaze::ga::archive::ArchiveSnapshot;
-use mummymaze::ga::{self, GaConfig, GaMessage};
-use mummymaze::model_server::{ModelServer, TrainingEvent};
-use mummymaze::parse::Level;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use crate::ws_client::{AdversarialEvent, WsClient};
+use mummymaze::event_types::TrainingEvent;
+use mummymaze::ga::GaConfig;
 
 /// Configuration for the adversarial training loop.
 #[derive(Clone)]
@@ -34,6 +27,24 @@ impl AdversarialConfig {
     /// Build the fitness expression from the target log win probability.
     pub fn fitness_expr(&self) -> String {
         format!("-abs(log_policy_win_prob - ({}))", self.target_log_wp)
+    }
+
+    /// Serialize to JSON for the WS server.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "n_rounds": self.n_rounds,
+            "epochs_per_round": self.epochs_per_round,
+            "batch_size": self.batch_size,
+            "lr": self.lr,
+            "seed": self.seed,
+            "target_log_wp": self.target_log_wp,
+            "ga_pop_size": self.ga_config.pop_size,
+            "ga_generations": self.ga_config.generations,
+            "grid_sizes": self.grid_sizes,
+            "fitness_expr": self.fitness_expr(),
+            "archive_bfs_bins": self.archive_bfs_bins,
+            "archive_states_bins": self.archive_states_bins,
+        })
     }
 }
 
@@ -61,7 +72,7 @@ impl Default for AdversarialConfig {
 #[derive(Clone)]
 pub enum AdversarialPhase {
     Training,
-    GA { grid_size: i32, gs_idx: usize },
+    GA { grid_size: i32 },
 }
 
 #[derive(Default)]
@@ -69,7 +80,8 @@ pub enum AdversarialStatus {
     #[default]
     Idle,
     Running {
-        round: usize,
+        round: u32,
+        n_rounds: u32,
         phase: AdversarialPhase,
         // Training sub-state
         training_epoch: u32,
@@ -81,8 +93,14 @@ pub enum AdversarialStatus {
         training_gs: i32,
         training_phase: TrainingPhase,
         // GA sub-state
-        ga_generation: usize,
-        ga_total_generations: usize,
+        ga_generation: u32,
+        ga_best_fitness: f64,
+        ga_solvable_rate: f64,
+        ga_pop_size: u32,
+        // Archive sub-state
+        archive_n_levels: u32,
+        archive_occupancy: u32,
+        archive_total_cells: u32,
     },
     Done,
     Error(String),
@@ -95,23 +113,13 @@ pub struct AdversarialState {
     // Training data (cumulative across rounds)
     pub epoch_history: Vec<EpochRecord>,
     pub batch_loss_history: Vec<[f64; 2]>,
-    // GA data (current round, resets each GA phase)
-    pub ga_history: Vec<(usize, f64, f64)>,
-    // Archive
-    pub archive_snapshot: Option<ArchiveSnapshot>,
-    pub archive_occupancy_history: Vec<(usize, usize)>,
+    // GA data (current round)
+    pub ga_history: Vec<(u32, f64, f64)>,
     // Round boundaries for vertical lines on training curves
     pub round_boundaries: Vec<usize>,
     pub curve_plot_height: f32,
-    // Internal
-    ga_rx: Option<Receiver<GaMessage>>,
-    ga_stop_flag: Option<Arc<AtomicBool>>,
-    round_archive_levels: Vec<Level>,
-    global_epoch: usize,
-    global_step: usize,
-    latest_checkpoint: Option<PathBuf>,
-    checkpoint_dir: PathBuf,
     pub log_messages: Vec<String>,
+    global_epoch: usize,
 }
 
 impl AdversarialState {
@@ -123,81 +131,27 @@ impl AdversarialState {
             epoch_history: Vec::new(),
             batch_loss_history: Vec::new(),
             ga_history: Vec::new(),
-            archive_snapshot: None,
-            archive_occupancy_history: Vec::new(),
             round_boundaries: Vec::new(),
             curve_plot_height: 150.0,
-            ga_rx: None,
-            ga_stop_flag: None,
-            round_archive_levels: Vec::new(),
-            global_epoch: 0,
-            global_step: 0,
-            latest_checkpoint: None,
-            checkpoint_dir: PathBuf::from("checkpoints/adversarial"),
             log_messages: Vec::new(),
+            global_epoch: 0,
         }
     }
 
-    /// Begin the adversarial loop from round 0.
-    pub fn start(&mut self, model_server: &Arc<ModelServer>, rows: &[crate::data::LevelRow]) {
+    /// Send start command to the server.
+    pub fn start(&mut self, ws: &WsClient) {
         self.epoch_history.clear();
         self.batch_loss_history.clear();
         self.ga_history.clear();
-        self.archive_snapshot = None;
-        self.archive_occupancy_history.clear();
         self.round_boundaries.clear();
-        self.round_archive_levels.clear();
         self.global_epoch = 0;
-        self.global_step = 0;
-        self.latest_checkpoint = latest_checkpoint().map(PathBuf::from);
         self.log_messages.clear();
 
-        self.checkpoint_dir = PathBuf::from("checkpoints/adversarial");
-        self.start_training_phase(0, model_server, rows);
-    }
-
-    /// Start a training round via the model server.
-    fn start_training_phase(
-        &mut self,
-        round: usize,
-        model_server: &Arc<ModelServer>,
-        _rows: &[crate::data::LevelRow],
-    ) {
-        self.round_boundaries.push(self.global_epoch);
-
-        let round_ckpt_dir = self.checkpoint_dir.join(format!("round{round:03}"));
-
-        // Build archive augmentation path from previous round
-        let archive_path = if round > 0 {
-            let prev_dir = self.checkpoint_dir.join(format!("round{:03}", round - 1));
-            let path = prev_dir.join("archive.json");
-            if path.exists() {
-                Some(path.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let mut train_config = serde_json::json!({
-            "epochs": self.config.epochs_per_round,
-            "batch_size": self.config.batch_size,
-            "lr": self.config.lr,
-            "seed": self.config.seed,
-            "checkpoint_dir": round_ckpt_dir.to_string_lossy(),
-            "epoch_offset": self.global_epoch,
-            "step_offset": self.global_step,
-        });
-
-        if let Some(aug) = archive_path {
-            train_config["augment_levels"] = serde_json::Value::String(aug);
-        }
-
-        match model_server.send_train(&train_config) {
+        match ws.send_adversarial(&self.config.to_json()) {
             Ok(()) => {
                 self.status = AdversarialStatus::Running {
-                    round,
+                    round: 0,
+                    n_rounds: self.config.n_rounds as u32,
                     phase: AdversarialPhase::Training,
                     training_epoch: 0,
                     training_total_epochs: self.config.epochs_per_round,
@@ -206,447 +160,216 @@ impl AdversarialState {
                     training_loss: 0.0,
                     training_acc: 0.0,
                     training_gs: 0,
-                    training_phase: TrainingPhase::Status("Loading dataset...".into()),
+                    training_phase: TrainingPhase::Status("Starting...".into()),
                     ga_generation: 0,
-                    ga_total_generations: self.config.ga_config.generations,
+                    ga_best_fitness: 0.0,
+                    ga_solvable_rate: 0.0,
+                    ga_pop_size: 0,
+                    archive_n_levels: 0,
+                    archive_occupancy: 0,
+                    archive_total_cells: 0,
                 };
             }
             Err(e) => {
-                self.status = AdversarialStatus::Error(format!("Failed to start training: {e}"));
+                self.status = AdversarialStatus::Error(format!("Failed to start: {e}"));
             }
         }
     }
 
-    /// Start GA phase for a specific grid_size within a round.
-    fn start_ga_phase(
-        &mut self,
-        round: usize,
-        gs_idx: usize,
-        model_server: &Arc<ModelServer>,
-        rows: &[crate::data::LevelRow],
-    ) {
-        let grid_size = self.config.grid_sizes[gs_idx];
-        let (tx, rx) = mpsc::channel();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-
-        let mut config = self.config.ga_config.clone();
-        config.grid_size = grid_size;
-        config.fitness_expr = self.config.fitness_expr();
-        config.seed = self.config.seed as u64 + round as u64 + gs_idx as u64 + 1;
-        config.eval_batch_size = self.config.batch_size;
-        let total_generations = config.generations;
-
-        let seed_levels: Vec<Level> = rows
-            .iter()
-            .filter(|r| r.level.grid_size == grid_size)
-            .map(|r| r.level.clone())
-            .collect();
-
-        let flag = stop_flag.clone();
-        let server = model_server.clone();
-        let target = self.config.target_log_wp;
-        let bfs_bins = self.config.archive_bfs_bins;
-        let states_bins = self.config.archive_states_bins;
-
-        std::thread::spawn(move || {
-            let archive = ga::archive::MapElitesArchive::new(
-                (1, 50),
-                (1, 500),
-                bfs_bins,
-                states_bins,
-                target,
-            );
-            ga::run_ga_with_model_server_archive(
-                &config,
-                seed_levels,
-                tx,
-                flag,
-                &server,
-                archive,
-            );
-        });
-
-        self.ga_rx = Some(rx);
-        self.ga_stop_flag = Some(stop_flag);
-        self.ga_history.clear();
-        self.status = AdversarialStatus::Running {
-            round,
-            phase: AdversarialPhase::GA {
-                grid_size,
-                gs_idx,
-            },
-            training_epoch: 0,
-            training_total_epochs: 0,
-            training_step: 0,
-            training_steps_in_epoch: 0,
-            training_loss: 0.0,
-            training_acc: 0.0,
-            training_gs: 0,
-            training_phase: TrainingPhase::default(),
-            ga_generation: 0,
-            ga_total_generations: total_generations,
-        };
+    /// Send stop command to the server.
+    pub fn stop(&mut self, ws: &WsClient) {
+        let _ = ws.send_stop_adversarial();
     }
 
-    /// Poll for events and handle phase transitions. Returns true if anything changed.
-    pub fn poll(
-        &mut self,
-        model_server: &Arc<ModelServer>,
-        rows: &[crate::data::LevelRow],
-    ) -> bool {
-        match &self.status {
-            AdversarialStatus::Idle | AdversarialStatus::Done | AdversarialStatus::Error(_) => return false,
-            _ => {}
+    /// Handle adversarial events from the server. Returns true if any processed.
+    pub fn handle_events(&mut self, events: &[AdversarialEvent]) -> bool {
+        if !matches!(self.status, AdversarialStatus::Running { .. }) {
+            return false;
         }
-
-        // Extract round and phase before mutable borrows
-        let (round, phase) = match &self.status {
-            AdversarialStatus::Running { round, phase, .. } => (*round, phase.clone()),
-            _ => return false,
-        };
-
-        match phase {
-            AdversarialPhase::Training => self.poll_training(round, model_server, rows),
-            AdversarialPhase::GA { gs_idx, .. } => self.poll_ga(round, gs_idx, model_server, rows),
-        }
-    }
-
-    /// Poll model server for training events.
-    fn poll_training(
-        &mut self,
-        round: usize,
-        model_server: &Arc<ModelServer>,
-        rows: &[crate::data::LevelRow],
-    ) -> bool {
-        let events = model_server.poll_events();
         if events.is_empty() {
             return false;
         }
 
-        let mut training_done = false;
-
         for event in events {
             match event {
-                TrainingEvent::Init { .. } => {}
-                TrainingEvent::EpochStart {
-                    epoch,
-                    total_epochs,
-                    steps_in_epoch,
+                AdversarialEvent::RoundStart { round, n_rounds } => {
+                    if let AdversarialStatus::Running {
+                        round: ref mut r,
+                        n_rounds: ref mut nr,
+                        phase: ref mut ph,
+                        training_phase: ref mut tph,
+                        ..
+                    } = self.status
+                    {
+                        *r = *round;
+                        *nr = *n_rounds;
+                        *ph = AdversarialPhase::Training;
+                        *tph = TrainingPhase::Status("Loading dataset...".into());
+                    }
+                    self.round_boundaries.push(self.global_epoch);
+                    self.log_messages
+                        .push(format!("Round {}/{n_rounds} started", round + 1));
+                }
+                AdversarialEvent::GaGeneration {
+                    round: _,
+                    grid_size,
+                    generation,
+                    best_fitness,
+                    avg_fitness,
+                    solvable_rate,
+                    pop_size,
                 } => {
                     if let AdversarialStatus::Running {
-                        training_epoch: ref mut e,
-                        training_total_epochs: ref mut te,
-                        training_steps_in_epoch: ref mut sie,
-                        training_step: ref mut es,
+                        phase: ref mut ph,
+                        ga_generation: ref mut g,
+                        ga_best_fitness: ref mut bf,
+                        ga_solvable_rate: ref mut sr,
+                        ga_pop_size: ref mut ps,
                         ..
                     } = self.status
                     {
-                        *e = epoch;
-                        *te = total_epochs;
-                        *sie = steps_in_epoch;
-                        *es = 0;
+                        *ph = AdversarialPhase::GA {
+                            grid_size: *grid_size as i32,
+                        };
+                        *g = *generation;
+                        *bf = *best_fitness;
+                        *sr = *solvable_rate;
+                        *ps = *pop_size;
                     }
+                    self.ga_history
+                        .push((*generation, *best_fitness, *avg_fitness));
                 }
-                TrainingEvent::Batch {
-                    step,
-                    epoch_step,
-                    loss,
-                    acc,
-                    gs,
-                } => {
-                    if let AdversarialStatus::Running {
-                        training_step: ref mut es,
-                        training_loss: ref mut l,
-                        training_acc: ref mut a,
-                        training_gs: ref mut g,
-                        training_phase: ref mut ph,
-                        ..
-                    } = self.status
-                    {
-                        *es = epoch_step;
-                        *l = loss;
-                        *a = acc;
-                        *g = gs;
-                        *ph = TrainingPhase::Training;
-                    }
-                    self.batch_loss_history
-                        .push([self.batch_loss_history.len() as f64, loss]);
-                    self.global_step = step as usize;
-                }
-                TrainingEvent::Status(text) => {
-                    if let AdversarialStatus::Running {
-                        training_phase: ref mut ph,
-                        ..
-                    } = self.status
-                    {
-                        *ph = TrainingPhase::Status(text);
-                    }
-                }
-                TrainingEvent::EpochEnd {
-                    epoch,
-                    train_loss,
-                    train_acc,
-                    val_loss,
-                    val_acc,
+                AdversarialEvent::ArchiveUpdate {
+                    n_levels,
+                    occupancy,
+                    total_cells,
                     ..
                 } => {
-                    self.epoch_history.push(EpochRecord {
-                        epoch,
-                        train_loss,
-                        train_acc,
-                        val_loss,
-                        val_acc,
-                    });
-                    self.global_epoch = epoch as usize;
+                    if let AdversarialStatus::Running {
+                        archive_n_levels: ref mut nl,
+                        archive_occupancy: ref mut occ,
+                        archive_total_cells: ref mut tc,
+                        ..
+                    } = self.status
+                    {
+                        *nl = *n_levels;
+                        *occ = *occupancy;
+                        *tc = *total_cells;
+                    }
                 }
-                TrainingEvent::LevelMetrics { .. } => {
-                    // Could update store.training_metrics here if desired
+                AdversarialEvent::RoundEnd {
+                    round,
+                    time,
+                    ga_levels,
+                } => {
+                    self.log_messages.push(format!(
+                        "Round {} complete: {ga_levels} GA levels in {time:.1}s",
+                        round + 1
+                    ));
                 }
-                TrainingEvent::Log(msg) => {
-                    self.log_messages.push(msg);
+                AdversarialEvent::Done { total_ga_levels } => {
+                    self.log_messages.push(format!(
+                        "Adversarial loop complete: {total_ga_levels} total GA levels"
+                    ));
+                    self.status = AdversarialStatus::Done;
                 }
-                TrainingEvent::Done => {
-                    training_done = true;
+                AdversarialEvent::Training(training_event) => {
+                    self.handle_training_event(training_event);
                 }
-                TrainingEvent::Error(msg) => {
-                    self.status = AdversarialStatus::Error(msg);
-                    return true;
-                }
-            }
-        }
-
-        if training_done {
-            // Find latest checkpoint
-            self.latest_checkpoint = find_latest_checkpoint_in(
-                self.checkpoint_dir.to_str().unwrap_or("checkpoints/adversarial"),
-            );
-            self.log_messages.push(format!(
-                "Round {round} training complete, checkpoint: {:?}",
-                self.latest_checkpoint
-            ));
-
-            // Decide: GA or Done
-            let is_last_round = round >= self.config.n_rounds - 1;
-            if is_last_round {
-                self.status = AdversarialStatus::Done;
-            } else if !self.config.grid_sizes.is_empty() {
-                // Start GA for first grid_size
-                self.start_ga_phase(round, 0, model_server, rows);
-            } else {
-                // No grid sizes configured, skip GA
-                self.start_training_phase(round + 1, model_server, rows);
             }
         }
 
         true
     }
 
-    /// Poll GA channel events.
-    fn poll_ga(
-        &mut self,
-        round: usize,
-        gs_idx: usize,
-        model_server: &Arc<ModelServer>,
-        rows: &[crate::data::LevelRow],
-    ) -> bool {
-        let Some(ref rx) = self.ga_rx else {
-            return false;
-        };
-
-        let mut changed = false;
-        let mut ga_done = false;
-        let mut ga_error = None;
-
-        #[allow(unused_assignments)]
-        while let Ok(msg) = rx.try_recv() {
-            changed = true;
-            match msg {
-                GaMessage::Status(s) => {
-                    if let AdversarialStatus::Running {
-                        training_phase: ref mut ph,
-                        ..
-                    } = self.status
-                    {
-                        *ph = TrainingPhase::Status(s);
-                    }
-                }
-                GaMessage::SeedsDone { .. } => {}
-                GaMessage::Generation(result) => {
-                    self.ga_history
-                        .push((result.generation, result.best.fitness, result.avg_fitness));
-                    if let AdversarialStatus::Running {
-                        ga_generation: ref mut g,
-                        ..
-                    } = self.status
-                    {
-                        *g = result.generation;
-                    }
-                }
-                GaMessage::ArchiveUpdate {
-                    occupancy,
-                    total_cells: _,
-                    grid,
-                } => {
-                    self.archive_snapshot = Some(grid);
-                    self.archive_occupancy_history.push((round, occupancy));
-                }
-                GaMessage::ArchiveLevels(levels) => {
-                    self.round_archive_levels.extend(levels);
-                }
-                GaMessage::Done => {
-                    ga_done = true;
-                }
-                GaMessage::Error(e) => {
-                    ga_error = Some(e);
+    /// Process an embedded training event from the adversarial loop.
+    fn handle_training_event(&mut self, event: &TrainingEvent) {
+        match event {
+            TrainingEvent::Init { .. } => {}
+            TrainingEvent::EpochStart {
+                epoch,
+                total_epochs,
+                steps_in_epoch,
+            } => {
+                if let AdversarialStatus::Running {
+                    training_epoch: ref mut e,
+                    training_total_epochs: ref mut te,
+                    training_steps_in_epoch: ref mut sie,
+                    training_step: ref mut es,
+                    ..
+                } = self.status
+                {
+                    *e = *epoch;
+                    *te = *total_epochs;
+                    *sie = *steps_in_epoch;
+                    *es = 0;
                 }
             }
-        }
-
-        if let Some(e) = ga_error {
-            self.log_messages.push(format!("GA error: {e}"));
-            // Treat GA error as non-fatal — skip to next grid_size or next round
-            ga_done = true;
-        }
-
-        if ga_done {
-            self.ga_rx = None;
-            self.ga_stop_flag = None;
-
-            let next_gs_idx = gs_idx + 1;
-            if next_gs_idx < self.config.grid_sizes.len() {
-                // More grid sizes to run GA on
-                self.start_ga_phase(round, next_gs_idx, model_server, rows);
-            } else {
-                // All grid sizes done for this round, start next training round
-                // Write archive.json for augmentation
-                let round_dir = self.checkpoint_dir.join(format!("round{round:03}"));
-                if let Err(e) = self.write_archive_json(&round_dir) {
-                    self.log_messages
-                        .push(format!("Failed to write archive.json: {e}"));
+            TrainingEvent::Batch {
+                epoch_step,
+                loss,
+                acc,
+                gs,
+                ..
+            } => {
+                if let AdversarialStatus::Running {
+                    training_step: ref mut es,
+                    training_loss: ref mut l,
+                    training_acc: ref mut a,
+                    training_gs: ref mut g,
+                    training_phase: ref mut ph,
+                    ..
+                } = self.status
+                {
+                    *es = *epoch_step;
+                    *l = *loss;
+                    *a = *acc;
+                    *g = *gs;
+                    *ph = TrainingPhase::Training;
                 }
-                self.round_archive_levels.clear();
-                self.start_training_phase(round + 1, model_server, rows);
+                self.batch_loss_history
+                    .push([self.batch_loss_history.len() as f64, *loss]);
             }
-        }
-
-        changed
-    }
-
-    /// Write collected archive levels to JSON for the next training round.
-    fn write_archive_json(&self, round_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(round_dir)?;
-        let path = round_dir.join("archive.json");
-        let mut entries = Vec::new();
-        for level in &self.round_archive_levels {
-            entries.push(level_to_json(level));
-        }
-        let json = serde_json::to_string(&entries)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(path, json)
-    }
-
-    /// Stop the running loop.
-    pub fn stop(&mut self, model_server: &Arc<ModelServer>) {
-        // Stop training if in training phase
-        let _ = model_server.send_stop_train();
-        // Stop GA if in GA phase
-        if let Some(ref flag) = self.ga_stop_flag {
-            flag.store(true, Ordering::Relaxed);
+            TrainingEvent::Status(text) => {
+                if let AdversarialStatus::Running {
+                    training_phase: ref mut ph,
+                    ..
+                } = self.status
+                {
+                    *ph = TrainingPhase::Status(text.clone());
+                }
+            }
+            TrainingEvent::EpochEnd {
+                epoch,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
+                ..
+            } => {
+                self.epoch_history.push(EpochRecord {
+                    epoch: *epoch,
+                    train_loss: *train_loss,
+                    train_acc: *train_acc,
+                    val_loss: *val_loss,
+                    val_acc: *val_acc,
+                });
+                self.global_epoch = *epoch as usize;
+            }
+            TrainingEvent::LevelMetrics { .. } => {}
+            TrainingEvent::Log(msg) => {
+                self.log_messages.push(msg.clone());
+            }
+            TrainingEvent::Done => {
+                // Training phase within a round finished — server handles transition
+            }
+            TrainingEvent::Error(msg) => {
+                self.status = AdversarialStatus::Error(msg.clone());
+            }
         }
     }
 
     pub fn is_running(&self) -> bool {
         matches!(self.status, AdversarialStatus::Running { .. })
     }
-}
-
-/// Find the newest .eqx checkpoint in a directory.
-fn find_latest_checkpoint_in(dir: &str) -> Option<PathBuf> {
-    let dir = PathBuf::from(dir);
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-
-    fn scan_dir(dir: &Path, best: &mut Option<(std::time::SystemTime, PathBuf)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                scan_dir(&path, best);
-            } else if path.extension().map_or(false, |e| e == "eqx") {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(mtime) = meta.modified() {
-                        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
-                            *best = Some((mtime, path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    scan_dir(&dir, &mut best);
-    best.map(|(_, p)| p)
-}
-
-/// Serialize a Level to a serde_json::Value matching Python's Level.to_dict() format.
-fn level_to_json(level: &Level) -> serde_json::Value {
-    let (h_walls, v_walls) = level.to_edges();
-
-    let mut obj = serde_json::Map::new();
-    obj.insert("grid_size".into(), level.grid_size.into());
-    obj.insert("flip".into(), level.flip.into());
-    obj.insert("h_walls".into(), h_walls.into());
-    obj.insert("v_walls".into(), v_walls.into());
-    obj.insert("exit_side".into(), level.exit_side_str().into());
-    obj.insert("exit_pos".into(), level.exit_pos().into());
-    obj.insert(
-        "player".into(),
-        vec![level.player_row, level.player_col].into(),
-    );
-    obj.insert(
-        "mummy1".into(),
-        vec![level.mummy1_row, level.mummy1_col].into(),
-    );
-    obj.insert(
-        "mummy2".into(),
-        if level.has_mummy2 {
-            vec![level.mummy2_row, level.mummy2_col].into()
-        } else {
-            serde_json::Value::Null
-        },
-    );
-    obj.insert(
-        "scorpion".into(),
-        if level.has_scorpion {
-            vec![level.scorpion_row, level.scorpion_col].into()
-        } else {
-            serde_json::Value::Null
-        },
-    );
-    let mut traps = Vec::new();
-    if level.trap_count >= 1 {
-        traps.push(vec![level.trap1_row, level.trap1_col]);
-    }
-    if level.trap_count >= 2 {
-        traps.push(vec![level.trap2_row, level.trap2_col]);
-    }
-    obj.insert("traps".into(), traps.into());
-    obj.insert(
-        "gate".into(),
-        if level.has_gate {
-            vec![level.gate_row, level.gate_col].into()
-        } else {
-            serde_json::Value::Null
-        },
-    );
-    obj.insert(
-        "key".into(),
-        if level.has_gate {
-            vec![level.key_row, level.key_col].into()
-        } else {
-            serde_json::Value::Null
-        },
-    );
-    serde_json::Value::Object(obj)
 }

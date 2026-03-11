@@ -18,9 +18,8 @@ use gameplay::GameplayState;
 use graph_view::GraphView;
 use mummymaze::game::{Action, State};
 use mummymaze::graph::StateGraph;
-use mummymaze::model_server::ModelServer;
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
+use ws_client::{ServerEvent, WsClient};
 
 #[derive(PartialEq, Clone, Copy)]
 enum RightTab {
@@ -44,8 +43,8 @@ struct App {
     agent_probs: AgentProbs,
     level_gen: level_gen_tab::LevelGenState,
     adversarial: adversarial::AdversarialState,
-    /// Shared model server for inference + training.
-    model_server: Option<Arc<ModelServer>>,
+    /// WebSocket client for the Python model server.
+    ws_client: Option<WsClient>,
     show_bfs_overlay: bool,
     show_agent_overlay: bool,
     right_tab: RightTab,
@@ -63,19 +62,19 @@ impl App {
 
         let agent_probs = AgentProbs::new(std::path::PathBuf::from("checkpoints/agent_probs.bin"));
 
-        // Spawn model server eagerly — will do JAX warm-up in background
-        let checkpoint = level_gen_tab::latest_checkpoint().map(std::path::PathBuf::from);
-        let model_server =
-            match ModelServer::spawn(maze_dir, checkpoint.as_deref()) {
-                Ok(ms) => {
-                    eprintln!("Model server spawned");
-                    Some(Arc::new(ms))
-                }
-                Err(e) => {
-                    eprintln!("Failed to spawn model server: {e}");
-                    None
-                }
-            };
+        // Connect to WebSocket model server
+        let ws_url = std::env::var("MODEL_SERVER_URL")
+            .unwrap_or_else(|_| "ws://localhost:8765".to_string());
+        let ws_client = match WsClient::connect(&ws_url) {
+            Ok(ws) => {
+                eprintln!("Connected to model server at {ws_url}");
+                Some(ws)
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to model server at {ws_url}: {e}");
+                None
+            }
+        };
 
         App {
             store,
@@ -87,7 +86,7 @@ impl App {
             agent_probs,
             level_gen: level_gen_tab::LevelGenState::new(),
             adversarial: adversarial::AdversarialState::new(),
-            model_server,
+            ws_client,
             show_bfs_overlay: false,
             show_agent_overlay: false,
             right_tab: RightTab::Graph,
@@ -289,17 +288,34 @@ impl eframe::App for App {
         if self.store.is_analyzing() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        // Poll model server for training events
-        if let Some(ref ms) = self.model_server {
-            if self.store.poll_training(ms) {
-                ctx.request_repaint();
+        // Poll WebSocket events and dispatch
+        if let Some(ref ws) = self.ws_client {
+            let events = ws.poll_events();
+            if !events.is_empty() {
+                let mut training_events = Vec::new();
+                let mut adversarial_events = Vec::new();
+                for event in events {
+                    match event {
+                        ServerEvent::Training(te) => training_events.push(te),
+                        ServerEvent::Adversarial(ae) => adversarial_events.push(ae),
+                        ServerEvent::Error(msg) => {
+                            self.store.log_messages.push(format!("Server error: {msg}"));
+                        }
+                    }
+                }
+                if self.store.handle_training_events(&training_events) {
+                    ctx.request_repaint();
+                }
+                if self.adversarial.handle_events(&adversarial_events) {
+                    ctx.request_repaint();
+                }
             }
         }
-        // Fast repaint while training is running for responsive batch updates
-        if self.store.is_training() {
+        // Fast repaint while training or adversarial is active
+        if self.store.is_training() || self.adversarial.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // Poll training metrics file periodically (skip when subprocess provides data)
+        // Poll training metrics file periodically
         if self.store.training_metrics.is_some() && !self.store.is_training() {
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
@@ -313,18 +329,6 @@ impl eframe::App for App {
         }
         if self.level_gen.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        // Poll adversarial loop
-        let adv_changed = if let Some(ref ms) = self.model_server {
-            self.adversarial.poll(ms, &self.store.rows)
-        } else {
-            false
-        };
-        if adv_changed {
-            ctx.request_repaint();
-        }
-        if self.adversarial.is_running() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
         // Consume keyboard input for gameplay BEFORE panels process it
@@ -451,14 +455,14 @@ impl eframe::App for App {
                 RightTab::Graph => self.draw_graph_panel(ui),
                 RightTab::Training => {
                     if let Some(clicked) =
-                        training_tab::draw_training_panel(ui, &mut self.store, self.model_server.as_ref())
+                        training_tab::draw_training_panel(ui, &mut self.store, self.ws_client.as_ref())
                     {
                         self.select_level(clicked);
                     }
                 }
                 RightTab::LevelGen => {
                     if let Some(level) =
-                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows, self.model_server.as_ref())
+                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows)
                     {
                         // Load GA-generated level into maze panel
                         self.gameplay = Some(GameplayState::new(level.clone()));
@@ -478,8 +482,7 @@ impl eframe::App for App {
                     adversarial_tab::draw_panel(
                         ui,
                         &mut self.adversarial,
-                        &self.store.rows,
-                        self.model_server.as_ref(),
+                        self.ws_client.as_ref(),
                     );
                 }
                 RightTab::Logs => {

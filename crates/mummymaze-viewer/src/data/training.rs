@@ -1,6 +1,6 @@
 use crate::training_metrics::TrainingMetrics;
-use mummymaze::model_server::{ModelServer, TrainingEvent};
-use std::sync::Arc;
+use crate::ws_client::WsClient;
+use mummymaze::event_types::TrainingEvent;
 
 use super::DataStore;
 
@@ -62,7 +62,7 @@ pub struct EpochRecord {
 
 impl DataStore {
     /// Start training via the model server.
-    pub fn start_training(&mut self, model_server: &Arc<ModelServer>) {
+    pub fn start_training(&mut self, model_server: &WsClient) {
         let config = &self.training_config;
         self.epoch_history.clear();
         self.batch_loss_history.clear();
@@ -93,17 +93,15 @@ impl DataStore {
     }
 
     /// Send stop command to training via model server.
-    pub fn stop_training(&mut self, model_server: &Arc<ModelServer>) {
+    pub fn stop_training(&mut self, model_server: &WsClient) {
         let _ = model_server.send_stop_train();
     }
 
-    /// Poll model server for training events. Returns true if any received.
-    pub fn poll_training(&mut self, model_server: &Arc<ModelServer>) -> bool {
+    /// Process training events received from the WebSocket. Returns true if any processed.
+    pub fn handle_training_events(&mut self, events: &[TrainingEvent]) -> bool {
         if !matches!(self.training_status, TrainingStatus::Running { .. }) {
             return false;
         }
-
-        let events = model_server.poll_events();
         if events.is_empty() {
             return false;
         }
@@ -126,9 +124,9 @@ impl DataStore {
                         ..
                     } = self.training_status
                     {
-                        *e = epoch;
-                        *te = total_epochs;
-                        *sie_ref = sie;
+                        *e = *epoch;
+                        *te = *total_epochs;
+                        *sie_ref = *sie;
                         *es = 0;
                     }
                 }
@@ -148,21 +146,21 @@ impl DataStore {
                         ..
                     } = self.training_status
                     {
-                        *es = epoch_step;
-                        *l = loss;
-                        *a = acc;
-                        *g = gs;
+                        *es = *epoch_step;
+                        *l = *loss;
+                        *a = *acc;
+                        *g = *gs;
                         *ph = TrainingPhase::Training;
                     }
                     self.batch_loss_history
-                        .push([self.batch_loss_history.len() as f64, loss]);
+                        .push([self.batch_loss_history.len() as f64, *loss]);
                 }
                 TrainingEvent::Status(text) => {
                     if let TrainingStatus::Running {
                         phase: ref mut ph, ..
                     } = self.training_status
                     {
-                        *ph = TrainingPhase::Status(text);
+                        *ph = TrainingPhase::Status(text.clone());
                     }
                 }
                 TrainingEvent::EpochEnd {
@@ -174,11 +172,11 @@ impl DataStore {
                     ..
                 } => {
                     self.epoch_history.push(EpochRecord {
-                        epoch,
-                        train_loss,
-                        train_acc,
-                        val_loss,
-                        val_acc,
+                        epoch: *epoch,
+                        train_loss: *train_loss,
+                        train_acc: *train_acc,
+                        val_loss: *val_loss,
+                        val_acc: *val_acc,
                     });
                 }
                 TrainingEvent::LevelMetrics {
@@ -189,17 +187,17 @@ impl DataStore {
                     let tm = self
                         .training_metrics
                         .get_or_insert_with(|| TrainingMetrics::new(std::path::PathBuf::new()));
-                    tm.update_from_event(run_id, step, levels);
+                    tm.update_from_event(run_id.clone(), *step, levels.clone());
                     needs_resort = true;
                 }
                 TrainingEvent::Log(msg) => {
-                    self.log_messages.push(msg);
+                    self.log_messages.push(msg.clone());
                 }
                 TrainingEvent::Done => {
                     self.training_status = TrainingStatus::Done;
                 }
                 TrainingEvent::Error(msg) => {
-                    self.training_status = TrainingStatus::Error(msg);
+                    self.training_status = TrainingStatus::Error(msg.clone());
                 }
             }
         }
