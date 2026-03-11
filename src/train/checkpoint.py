@@ -101,7 +101,7 @@ def load_checkpoint(
   state_path = path / "training_state.json"
   state = json.loads(state_path.read_text())
 
-  resolved_arch = arch or state["arch"]
+  resolved_arch = arch or state.get("arch", "cnn")
   model = make_model(resolved_arch, jax.random.key(0))
   model = eqx.tree_deserialise_leaves(path / "model.eqx", model)
 

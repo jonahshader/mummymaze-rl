@@ -653,10 +653,13 @@ def train(
   )
 
   # Restore optimizer state from checkpoint if available
-  if checkpoint is not None and ckpt.has_optimizer:
-    opt_state = ckpt.opt_state
-  else:
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+  if checkpoint is not None:
+    opt_state_path = checkpoint / "opt_state.eqx"
+    if opt_state_path.exists():
+      opt_state = eqx.tree_deserialise_leaves(opt_state_path, opt_state)
+      if use_tqdm:
+        print("Restored optimizer state from checkpoint")
 
   # wandb init
   run_id = f"bc-{arch}-{seed}"
