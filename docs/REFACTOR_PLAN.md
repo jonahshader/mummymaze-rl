@@ -112,9 +112,8 @@ Exposed CPU-intensive GA building blocks via PyO3:
 - `adversarial_loop.py` updated to use `run_ga()` instead of `mummymaze_rust.run_ga_round()`
 - Model stays in-process — no subprocess spawn, no re-JIT per GA round
 
-Still to clean up (separate commit):
-- Delete `run_ga_round` PyO3 function from `python.rs`
-- Delete `PolicyQuery` trait and `ModelServer` impl from `ga/mod.rs`
+Cleanup: `run_ga_round` PyO3 function deleted from `python.rs`.
+`PolicyQuery`/`ModelServer` impl kept in `ga/mod.rs` — still used by viewer (Task 4d).
 
 ### 4c — WebSocket API
 
