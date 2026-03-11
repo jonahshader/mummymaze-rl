@@ -1,0 +1,305 @@
+"""WebSocket server for model inference, training, and adversarial loops.
+
+Replaces the binary frame protocol with a JSON-over-WebSocket API.
+Any client (Rust viewer, web frontend, CLI) can connect.
+
+Usage:
+  uv run python -m src.train.ws_server --mazes mazes/ [--port 8765]
+"""
+
+import argparse
+import asyncio
+import json
+import logging
+import queue
+import threading
+from pathlib import Path
+
+import websockets
+from websockets.asyncio.server import ServerConnection
+
+from src.train.model_server import ModelServer
+from src.train.reporter import WebSocketReporter
+
+log = logging.getLogger(__name__)
+
+
+async def _drain_queue(
+  ws: ServerConnection,
+  q: queue.Queue[dict],
+  done_event: asyncio.Event,
+) -> None:
+  """Drain a sync queue to the WebSocket until done_event is set.
+
+  Bridges the sync training/GA thread to the async WebSocket loop.
+  """
+  loop = asyncio.get_running_loop()
+  while not done_event.is_set():
+    try:
+      msg = await loop.run_in_executor(None, q.get, True, 0.1)
+      await ws.send(json.dumps(msg))
+    except queue.Empty:
+      continue
+  # Drain any remaining messages
+  while True:
+    try:
+      msg = q.get_nowait()
+      await ws.send(json.dumps(msg))
+    except queue.Empty:
+      break
+
+
+class WsHandler:
+  """Handles a single WebSocket connection dispatching to ModelServer."""
+
+  def __init__(self, server: ModelServer) -> None:
+    self.server = server
+    self._train_stop = threading.Event()
+    self._adversarial_stop = threading.Event()
+
+  async def handle(self, ws: ServerConnection) -> None:
+    log.info("client connected: %s", ws.remote_address)
+    try:
+      async for raw in ws:
+        try:
+          msg = json.loads(raw)
+        except json.JSONDecodeError:
+          await self._send_error(ws, None, "Invalid JSON")
+          continue
+
+        msg_type = msg.get("type")
+        request_id = msg.get("request_id")
+        try:
+          await self._dispatch(ws, msg_type, msg, request_id)
+        except Exception as e:
+          log.exception("Error handling %s", msg_type)
+          await self._send_error(ws, request_id, str(e))
+    except websockets.ConnectionClosed:
+      log.info("client disconnected")
+
+  async def _dispatch(
+    self,
+    ws: ServerConnection,
+    msg_type: str | None,
+    msg: dict,
+    request_id: str | None,
+  ) -> None:
+    if msg_type == "evaluate":
+      await self._handle_evaluate(ws, msg, request_id)
+    elif msg_type == "train":
+      await self._handle_train(ws, msg, request_id)
+    elif msg_type == "stop_train":
+      self._train_stop.set()
+    elif msg_type == "adversarial":
+      await self._handle_adversarial(ws, msg, request_id)
+    elif msg_type == "stop_adversarial":
+      self._adversarial_stop.set()
+    elif msg_type == "reload_checkpoint":
+      await self._handle_reload(ws, msg, request_id)
+    elif msg_type == "list_checkpoints":
+      await self._handle_list_checkpoints(ws, request_id)
+    elif msg_type == "shutdown":
+      log.info("shutdown requested")
+      raise SystemExit
+    else:
+      await self._send_error(ws, request_id, f"Unknown message type: {msg_type}")
+
+  async def _handle_evaluate(
+    self,
+    ws: ServerConnection,
+    msg: dict,
+    request_id: str | None,
+  ) -> None:
+    level_key = msg.get("level_key", "")
+    states = await asyncio.to_thread(self.server.evaluate_level, level_key)
+    await ws.send(
+      json.dumps(
+        {
+          "type": "evaluate_result",
+          "request_id": request_id,
+          "states": states,
+        }
+      )
+    )
+
+  async def _handle_train(
+    self,
+    ws: ServerConnection,
+    msg: dict,
+    request_id: str | None,
+  ) -> None:
+    config = msg.get("config", {})
+    self._train_stop.clear()
+
+    event_queue: queue.Queue[dict] = queue.Queue()
+    reporter = WebSocketReporter(
+      event_queue, self._train_stop, event_type="training_event"
+    )
+    done = asyncio.Event()
+
+    async def run() -> None:
+      drain_task = asyncio.create_task(_drain_queue(ws, event_queue, done))
+      try:
+        await asyncio.to_thread(self.server.train, reporter, **config)
+      finally:
+        done.set()
+        await drain_task
+
+    await run()
+
+  async def _handle_adversarial(
+    self,
+    ws: ServerConnection,
+    msg: dict,
+    request_id: str | None,
+  ) -> None:
+    from src.train.adversarial_loop import adversarial_loop
+
+    config = msg.get("config", {})
+    self._adversarial_stop.clear()
+
+    # Training events go through a WebSocketReporter
+    train_queue: queue.Queue[dict] = queue.Queue()
+    train_reporter = WebSocketReporter(
+      train_queue, self._adversarial_stop, event_type="training_event"
+    )
+
+    # Adversarial events go through the on_event callback
+    adv_queue: queue.Queue[dict] = queue.Queue()
+
+    def on_event(event: dict) -> None:
+      adv_queue.put({"type": "adversarial_event", "event": event})
+
+    done = asyncio.Event()
+
+    async def run() -> None:
+      # Drain both queues concurrently
+      drain_train = asyncio.create_task(_drain_queue(ws, train_queue, done))
+      drain_adv = asyncio.create_task(_drain_queue(ws, adv_queue, done))
+      try:
+        await asyncio.to_thread(
+          adversarial_loop,
+          self.server.maze_dir,
+          reporter=train_reporter,
+          on_event=on_event,
+          **config,
+        )
+      finally:
+        done.set()
+        await asyncio.gather(drain_train, drain_adv)
+
+    await run()
+
+  async def _handle_reload(
+    self,
+    ws: ServerConnection,
+    msg: dict,
+    request_id: str | None,
+  ) -> None:
+    path = msg.get("path", "")
+    await asyncio.to_thread(self.server.reload_checkpoint, path)
+    await ws.send(
+      json.dumps(
+        {
+          "type": "reload_result",
+          "request_id": request_id,
+          "status": "ok",
+        }
+      )
+    )
+
+  async def _handle_list_checkpoints(
+    self,
+    ws: ServerConnection,
+    request_id: str | None,
+  ) -> None:
+    checkpoints = await asyncio.to_thread(self.server.list_checkpoints)
+    await ws.send(
+      json.dumps(
+        {
+          "type": "checkpoints_list",
+          "request_id": request_id,
+          "checkpoints": checkpoints,
+        }
+      )
+    )
+
+  @staticmethod
+  async def _send_error(
+    ws: ServerConnection,
+    request_id: str | None,
+    message: str,
+  ) -> None:
+    await ws.send(
+      json.dumps(
+        {
+          "type": "error",
+          "request_id": request_id,
+          "message": message,
+        }
+      )
+    )
+
+
+async def serve(
+  maze_dir: Path,
+  *,
+  port: int = 8765,
+  host: str = "localhost",
+  checkpoint: Path | None = None,
+  arch: str = "cnn",
+) -> None:
+  """Start the WebSocket server."""
+  server = ModelServer(maze_dir, checkpoint=checkpoint, arch=arch)
+  handler = WsHandler(server)
+
+  log.info("starting WebSocket server on %s:%d", host, port)
+
+  # Pre-load datasets so first request is fast
+  server.load_datasets()
+
+  async with websockets.serve(handler.handle, host, port):
+    log.info("ready — ws://%s:%d", host, port)
+    await asyncio.Future()  # run forever
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser(
+    description="WebSocket server for model inference and training"
+  )
+  parser.add_argument(
+    "--mazes",
+    type=Path,
+    default=Path("mazes"),
+    help="Directory containing B-*.dat files",
+  )
+  parser.add_argument("--port", type=int, default=8765)
+  parser.add_argument("--host", type=str, default="localhost")
+  parser.add_argument("--checkpoint", type=Path, default=None)
+  parser.add_argument("--arch", type=str, default="cnn")
+  parser.add_argument(
+    "-v",
+    "--verbose",
+    action="store_true",
+    help="Enable debug logging",
+  )
+  args = parser.parse_args()
+
+  logging.basicConfig(
+    level=logging.DEBUG if args.verbose else logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+  )
+
+  asyncio.run(
+    serve(
+      args.mazes,
+      port=args.port,
+      host=args.host,
+      checkpoint=args.checkpoint,
+      arch=args.arch,
+    )
+  )
+
+
+if __name__ == "__main__":
+  main()

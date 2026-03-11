@@ -117,25 +117,23 @@ Cleanup: `run_ga_round` PyO3 function deleted from `python.rs`.
 
 ### 4c — WebSocket API
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 4b
 
-Replace the binary frame protocol (`model_server.py`) with a WebSocket
-server. The Python process becomes a long-lived service that any client
-can connect to.
+Replaced the binary frame protocol with a JSON-over-WebSocket server.
 
-Endpoints / message types:
-- **Training:** start, stop, progress events (epoch, batch, done)
-- **GA / Adversarial:** start, per-generation progress, archive updates
-- **Inference:** query agent action probs for a single level on demand
-  (replaces `agent_probs.bin` mmap file)
-- **Checkpoint:** reload, list available
+What was done:
+- Deleted `agent_probs.bin` writing, `FrameReporter`, binary wire helpers
+- Refactored `ModelServer` into transport-agnostic class with `evaluate_level()`,
+  `train()`, `reload_checkpoint()`, `list_checkpoints()`, `stop_train()`
+- Added `WebSocketReporter` (queue-based bridge: sync thread → async WS)
+- Made `adversarial_loop()` reporter-injectable with `on_event` callback
+- Created `ws_server.py` — async WebSocket server using `websockets` library
+  - Entry: `uv run python -m src.train.ws_server --mazes mazes/ [--port 8765]`
+  - Dispatches JSON messages by type, uses `asyncio.to_thread()` for JAX work
+  - Queue drain bridges sync reporter → async WebSocket
 
-Delete:
-- `src/train/model_server.py` (binary frame protocol)
-- `src/train/wire.py` (binary I/O helpers for frames)
-- `crates/mummymaze/src/model_server.rs` (Rust subprocess client)
-- `agent_probs.bin` writing in `train_bc.py`
+Remaining Rust-side cleanup (model_server.rs deletion) deferred to Task 4d.
 
 ### 4d — Viewer as WebSocket client
 
