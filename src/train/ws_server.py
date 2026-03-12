@@ -15,6 +15,7 @@ import queue
 import threading
 from pathlib import Path
 
+import mummymaze_rust
 import websockets
 from websockets.asyncio.server import ServerConnection
 
@@ -56,6 +57,7 @@ class WsHandler:
     self.server = server
     self._train_stop = threading.Event()
     self._adversarial_stop = threading.Event()
+    self._ga_stop = threading.Event()
 
   async def handle(self, ws: ServerConnection) -> None:
     log.info("client connected: %s", ws.remote_address)
@@ -94,6 +96,10 @@ class WsHandler:
       await self._handle_adversarial(ws, msg, request_id)
     elif msg_type == "stop_adversarial":
       self._adversarial_stop.set()
+    elif msg_type == "ga":
+      await self._handle_ga(ws, msg, request_id)
+    elif msg_type == "stop_ga":
+      self._ga_stop.set()
     elif msg_type == "reload_checkpoint":
       await self._handle_reload(ws, msg, request_id)
     elif msg_type == "list_checkpoints":
@@ -187,6 +193,125 @@ class WsHandler:
       finally:
         done.set()
         await asyncio.gather(drain_train, drain_adv)
+
+    await run()
+
+  async def _handle_ga(
+    self,
+    ws: ServerConnection,
+    msg: dict,
+    request_id: str | None,
+  ) -> None:
+    from src.train.ga import GenerationResult, run_ga
+
+    config = msg.get("config", {})
+    self._ga_stop.clear()
+
+    # Extract server-side keys before forwarding remainder to run_ga()
+    seed_keys: list[str] = config.pop("seed_keys", [])
+    config.pop("grid_size", None)  # consumed by viewer, not needed server-side
+
+    ga_queue: queue.Queue[dict] = queue.Queue()
+
+    def load_and_run() -> None:
+      try:
+        # Load seed levels from keys
+        by_stem: dict[str, list[int]] = {}
+        for key in seed_keys:
+          stem, sub_s = key.split(":")
+          by_stem.setdefault(stem, []).append(int(sub_s))
+
+        seed_levels = []
+        for stem, subs in by_stem.items():
+          try:
+            all_in_file = mummymaze_rust.parse_file(
+              str(self.server.maze_dir / f"{stem}.dat"),
+            )
+            for sub in subs:
+              if sub < len(all_in_file):
+                seed_levels.append(all_in_file[sub])
+          except Exception:
+            pass
+
+        if not seed_levels:
+          ga_queue.put(
+            {
+              "type": "ga_event",
+              "event": {"type": "error", "message": "No valid seed levels found"},
+            }
+          )
+          return
+
+        prev_best_fitness = float("-inf")
+
+        def on_generation(gen_result: GenerationResult) -> None:
+          nonlocal prev_best_fitness
+          best = gen_result.best
+          # Only serialize level when fitness improves (avoids per-gen overhead)
+          best_dict: dict = {
+            "bfs_moves": best.bfs_moves,
+            "n_states": best.n_states,
+            "win_prob": best.win_prob,
+            "fitness": best.fitness,
+          }
+          if best.fitness > prev_best_fitness:
+            best_dict["level"] = best.level.to_json()
+            prev_best_fitness = best.fitness
+          ga_queue.put(
+            {
+              "type": "ga_event",
+              "event": {
+                "type": "generation",
+                "generation": gen_result.generation,
+                "best_fitness": best.fitness,
+                "avg_fitness": gen_result.avg_fitness,
+                "solvable_rate": gen_result.solvable_rate,
+                "pop_size": gen_result.pop_size,
+                "best": best_dict,
+              },
+            }
+          )
+
+        def on_status(message: str) -> None:
+          ga_queue.put(
+            {
+              "type": "ga_event",
+              "event": {"type": "status", "message": message},
+            }
+          )
+
+        run_ga(
+          seed_levels,
+          obs_and_forward=self.server.obs_and_forward,
+          on_generation=on_generation,
+          on_status=on_status,
+          stop_flag=self._ga_stop,
+          **config,
+        )
+
+        ga_queue.put(
+          {
+            "type": "ga_event",
+            "event": {"type": "done"},
+          }
+        )
+      except Exception as e:
+        ga_queue.put(
+          {
+            "type": "ga_event",
+            "event": {"type": "error", "message": str(e)},
+          }
+        )
+
+    done = asyncio.Event()
+
+    async def run() -> None:
+      drain_task = asyncio.create_task(_drain_queue(ws, ga_queue, done))
+      try:
+        await asyncio.to_thread(load_and_run)
+      finally:
+        done.set()
+        await drain_task
 
     await run()
 

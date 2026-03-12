@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -296,6 +297,7 @@ def run_ga(
   archive: MapElitesArchive | None = None,
   on_generation: Callable[[GenerationResult], None] | None = None,
   on_status: Callable[[str], None] | None = None,
+  stop_flag: threading.Event | None = None,
 ) -> tuple[list[Individual], MapElitesArchive | None]:
   """Run a GA round with in-process policy evaluation.
 
@@ -382,6 +384,8 @@ def run_ga(
 
   # --- Generation loop ---
   for generation in range(1, generations + 1):
+    if stop_flag is not None and stop_flag.is_set():
+      break
     n_elite = max(1, int(pop_size * elite_frac + 0.5))
     population.sort(key=lambda x: x.fitness, reverse=True)
 

@@ -27,7 +27,29 @@ type WsStream = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 pub enum ServerEvent {
     Training(TrainingEvent),
     Adversarial(AdversarialEvent),
+    Ga(GaEvent),
     Evaluate(EvalResult),
+    Error(String),
+}
+
+/// GA level generation progress event.
+#[derive(Debug)]
+pub enum GaEvent {
+    Status(String),
+    Generation {
+        generation: u32,
+        best_fitness: f64,
+        avg_fitness: f64,
+        #[allow(dead_code)]
+        solvable_rate: f64,
+        #[allow(dead_code)]
+        pop_size: u32,
+        best_bfs_moves: u32,
+        best_n_states: u32,
+        best_win_prob: f64,
+        best_level: Option<mummymaze::parse::Level>,
+    },
+    Done,
     Error(String),
 }
 
@@ -93,6 +115,9 @@ enum RawServerMessage {
         event: serde_json::Value,
     },
     AdversarialEvent {
+        event: serde_json::Value,
+    },
+    GaEvent {
         event: serde_json::Value,
     },
     Error {
@@ -230,6 +255,19 @@ impl WsClient {
     /// Stop the adversarial training loop.
     pub fn send_stop_adversarial(&self) -> Result<(), String> {
         self.send(&serde_json::json!({"type": "stop_adversarial"}))
+    }
+
+    /// Start a GA level generation run.
+    pub fn send_ga(&self, config: &serde_json::Value) -> Result<(), String> {
+        self.send(&serde_json::json!({
+            "type": "ga",
+            "config": config
+        }))
+    }
+
+    /// Stop the current GA run.
+    pub fn send_stop_ga(&self) -> Result<(), String> {
+        self.send(&serde_json::json!({"type": "stop_ga"}))
     }
 
     /// Reload model weights from a checkpoint.
@@ -415,6 +453,11 @@ fn dispatch_message(
             }
         }
 
+        RawServerMessage::GaEvent { event } => {
+            let ga_event = parse_ga_event(&event);
+            let _ = event_tx.send(ServerEvent::Ga(ga_event));
+        }
+
         RawServerMessage::Error { message, .. } => {
             if let Ok(tx) = eval_register_rx.try_recv() {
                 let _ = tx.send(Err(message));
@@ -432,6 +475,48 @@ fn dispatch_message(
                 let _ = tx.send(Ok(checkpoints));
             }
         }
+    }
+}
+
+fn parse_ga_event(event: &serde_json::Value) -> GaEvent {
+    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match event_type {
+        "status" => {
+            let message = event
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            GaEvent::Status(message)
+        }
+        "generation" => {
+            let best = event.get("best");
+            let best_level = best
+                .and_then(|b| b.get("level"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str::<mummymaze::parse::Level>(s).ok());
+            GaEvent::Generation {
+                generation: event.get("generation").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                best_fitness: event.get("best_fitness").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                avg_fitness: event.get("avg_fitness").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                solvable_rate: event.get("solvable_rate").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                pop_size: event.get("pop_size").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                best_bfs_moves: best.and_then(|b| b.get("bfs_moves")).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                best_n_states: best.and_then(|b| b.get("n_states")).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                best_win_prob: best.and_then(|b| b.get("win_prob")).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                best_level,
+            }
+        }
+        "done" => GaEvent::Done,
+        "error" => {
+            let message = event
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error")
+                .to_string();
+            GaEvent::Error(message)
+        }
+        _ => GaEvent::Error(format!("Unknown GA event type: {event_type}")),
     }
 }
 

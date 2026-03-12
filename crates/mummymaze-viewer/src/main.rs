@@ -317,10 +317,12 @@ impl eframe::App for App {
             if !events.is_empty() {
                 let mut training_events = Vec::new();
                 let mut adversarial_events = Vec::new();
+                let mut ga_events = Vec::new();
                 for event in events {
                     match event {
                         ServerEvent::Training(te) => training_events.push(te),
                         ServerEvent::Adversarial(ae) => adversarial_events.push(ae),
+                        ServerEvent::Ga(ge) => ga_events.push(ge),
                         ServerEvent::Evaluate(result) => {
                             // Populate cache if still pending
                             if let Some((_, ref mut data)) = self.cached_agent_probs {
@@ -345,18 +347,14 @@ impl eframe::App for App {
                 if self.adversarial.handle_events(&adversarial_events) {
                     ctx.request_repaint();
                 }
+                if self.level_gen.handle_events(ga_events) {
+                    ctx.request_repaint();
+                }
             }
         }
-        // Fast repaint while training or adversarial is active
-        if self.store.is_training() || self.adversarial.is_running() {
+        // Fast repaint while training, adversarial, or GA is active
+        if self.store.is_training() || self.adversarial.is_running() || self.level_gen.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-        // Poll level gen GA progress
-        if self.level_gen.poll() {
-            ctx.request_repaint();
-        }
-        if self.level_gen.is_running() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         // Consume keyboard input for gameplay BEFORE panels process it
@@ -490,7 +488,7 @@ impl eframe::App for App {
                 }
                 RightTab::LevelGen => {
                     if let Some(level) =
-                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows)
+                        level_gen_tab::draw_level_gen_panel(ui, &mut self.level_gen, &self.store.rows, self.ws_client.as_ref())
                     {
                         // Load GA-generated level into maze panel
                         self.gameplay = Some(GameplayState::new(level.clone()));

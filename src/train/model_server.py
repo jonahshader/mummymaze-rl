@@ -73,6 +73,11 @@ class ModelServer:
     # Training stop event
     self._stop_event = threading.Event()
 
+  @property
+  def obs_and_forward(self) -> Callable:
+    """Public access to the JIT'd inference closure for GA/adversarial loops."""
+    return self._obs_and_forward
+
   @staticmethod
   def _make_forward(model: eqx.Module) -> Callable:
     """Create a JIT'd inference closure capturing the given model weights."""

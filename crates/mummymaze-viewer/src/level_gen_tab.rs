@@ -1,13 +1,20 @@
 use crate::data::LevelRow;
 use crate::render;
+use crate::ws_client::{GaEvent, WsClient};
 use eframe::egui;
 use mummymaze::ga::fitness::{FitnessExpr, PRESETS};
-use mummymaze::ga::{CrossoverMode, GaConfig, GaMessage, Individual};
+use mummymaze::ga::{CrossoverMode, GaConfig};
 use mummymaze::game::State;
 use mummymaze::parse::Level;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+
+/// Best individual received from the server.
+pub struct BestLevel {
+    pub level: Level,
+    pub bfs_moves: u32,
+    pub n_states: u32,
+    pub win_prob: f64,
+    pub fitness: f64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GaStatus {
@@ -25,10 +32,8 @@ pub struct LevelGenState {
     pub config: GaConfig,
     pub show_config: bool,
     pub status: GaStatus,
-    pub best: Option<Individual>,
+    pub best: Option<BestLevel>,
     pub history: Vec<(usize, f64, f64)>, // (generation, best_fitness, avg_fitness)
-    rx: Option<Receiver<GaMessage>>,
-    stop_flag: Option<Arc<AtomicBool>>,
     /// Validation error for the fitness expression (empty = valid).
     fitness_error: String,
 }
@@ -47,80 +52,89 @@ impl LevelGenState {
             status: GaStatus::Idle,
             best: None,
             history: Vec::new(),
-            rx: None,
-            stop_flag: None,
             fitness_error: String::new(),
         }
     }
 
-    pub fn start(&mut self, seed_levels: Vec<Level>) {
-        let (tx, rx) = mpsc::channel();
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let config = self.config.clone();
-        let flag = stop_flag.clone();
-
+    /// Start a GA run via the WebSocket server.
+    pub fn start(&mut self, seed_keys: Vec<String>, ws: &WsClient) {
         self.history.clear();
         self.best = None;
-        self.status = GaStatus::Starting("Evaluating seeds...".to_string());
-        self.rx = Some(rx);
-        self.stop_flag = Some(stop_flag);
+        self.status = GaStatus::Starting("Sending to server...".to_string());
 
-        std::thread::spawn(move || {
-            mummymaze::ga::run_ga(&config, seed_levels, tx, flag);
+        let config = serde_json::json!({
+            "grid_size": self.config.grid_size,
+            "seed_keys": seed_keys,
+            "pop_size": self.config.pop_size,
+            "generations": self.config.generations,
+            "fitness_expr": self.config.fitness_expr,
+            "elite_frac": self.config.elite_frac,
+            "crossover_rate": self.config.crossover_rate,
+            "crossover_mode": self.config.crossover_mode.as_str(),
+            "seed": self.config.seed,
+            "w_wall": self.config.w_wall,
+            "w_move_entity": self.config.w_move_entity,
+            "w_move_player": self.config.w_move_player,
+            "w_add_entity": self.config.w_add_entity,
+            "w_remove_entity": self.config.w_remove_entity,
+            "w_move_exit": self.config.w_move_exit,
+            "extra_wall_prob": self.config.extra_wall_prob,
         });
-    }
 
-    pub fn stop(&mut self) {
-        if let Some(ref flag) = self.stop_flag {
-            flag.store(true, Ordering::Relaxed);
+        if let Err(e) = ws.send_ga(&config) {
+            self.status = GaStatus::Error(format!("Failed to send: {e}"));
         }
     }
 
-    /// Drain channel messages. Returns true if anything changed.
-    pub fn poll(&mut self) -> bool {
-        if self.rx.is_none() {
+    pub fn stop(&mut self, ws: &WsClient) {
+        let _ = ws.send_stop_ga();
+    }
+
+    /// Handle GA events from the WS event dispatch. Returns true if anything changed.
+    pub fn handle_events(&mut self, events: Vec<GaEvent>) -> bool {
+        if events.is_empty() {
             return false;
         }
-        let mut changed = false;
-        let mut finished = false;
-        // Drain messages while receiver exists
-        while let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            changed = true;
-            match msg {
-                GaMessage::Status(s) => {
-                    self.status = GaStatus::Starting(s);
+        for event in events {
+            match event {
+                GaEvent::Status(msg) => {
+                    self.status = GaStatus::Starting(msg);
                 }
-                GaMessage::SeedsDone { .. } => {}
-                GaMessage::ArchiveUpdate { .. } => {
-                    // Archive updates handled in adversarial tab
-                }
-                GaMessage::ArchiveLevels(_) => {
-                    // Archive levels handled in adversarial tab
-                }
-                GaMessage::Generation(result) => {
+                GaEvent::Generation {
+                    generation,
+                    best_fitness,
+                    avg_fitness,
+                    best_bfs_moves,
+                    best_n_states,
+                    best_win_prob,
+                    best_level,
+                    ..
+                } => {
                     self.history
-                        .push((result.generation, result.best.fitness, result.avg_fitness));
-                    self.best = Some(result.best);
+                        .push((generation as usize, best_fitness, avg_fitness));
+                    if let Some(level) = best_level {
+                        self.best = Some(BestLevel {
+                            level,
+                            bfs_moves: best_bfs_moves,
+                            n_states: best_n_states,
+                            win_prob: best_win_prob,
+                            fitness: best_fitness,
+                        });
+                    }
                     self.status = GaStatus::Running {
-                        generation: result.generation,
+                        generation: generation as usize,
                         total_generations: self.config.generations,
                     };
                 }
-                GaMessage::Done => {
+                GaEvent::Done => {
                     self.status = GaStatus::Done;
-                    finished = true;
                 }
-                GaMessage::Error(e) => {
-                    self.status = GaStatus::Error(e);
-                    finished = true;
+                GaEvent::Error(msg) => {
+                    self.status = GaStatus::Error(msg);
                 }
             }
         }
-        if finished {
-            self.rx = None;
-            self.stop_flag = None;
-        }
-        changed
+        true
     }
 
     pub fn is_running(&self) -> bool {
@@ -136,6 +150,7 @@ pub fn draw_level_gen_panel(
     ui: &mut egui::Ui,
     state: &mut LevelGenState,
     rows: &[LevelRow],
+    ws: Option<&WsClient>,
 ) -> Option<Level> {
     let mut load_level = None;
 
@@ -143,19 +158,27 @@ pub fn draw_level_gen_panel(
     ui.horizontal(|ui: &mut egui::Ui| {
         if state.is_running() {
             if ui.button("Stop").clicked() {
-                state.stop();
+                if let Some(ws) = ws {
+                    state.stop(ws);
+                }
             }
         } else {
             if ui.button("Configure").clicked() {
                 state.show_config = !state.show_config;
             }
-            if ui.button("Start").clicked() {
-                let seeds: Vec<Level> = rows
-                    .iter()
-                    .filter(|r| r.level.grid_size == state.config.grid_size)
-                    .map(|r| r.level.clone())
-                    .collect();
-                state.start(seeds);
+            let can_start = ws.is_some();
+            if ui.add_enabled(can_start, egui::Button::new("Start")).clicked() {
+                if let Some(ws) = ws {
+                    let seed_keys: Vec<String> = rows
+                        .iter()
+                        .filter(|r| r.level.grid_size == state.config.grid_size)
+                        .map(|r| format!("{}:{}", r.file_stem, r.sublevel))
+                        .collect();
+                    state.start(seed_keys, ws);
+                }
+            }
+            if ws.is_none() {
+                ui.colored_label(egui::Color32::YELLOW, "No server");
             }
         }
 
@@ -325,13 +348,6 @@ pub fn draw_level_gen_panel(
                             .max_decimals(2),
                     );
                     ui.end_row();
-
-                    ui.label("Eval batch size:");
-                    ui.add(
-                        egui::DragValue::new(&mut state.config.eval_batch_size)
-                            .range(0..=65536),
-                    );
-                    ui.end_row();
                 });
 
             ui.separator();
@@ -473,4 +489,3 @@ fn parse_progress_frac(msg: &str) -> Option<f32> {
         None
     }
 }
-

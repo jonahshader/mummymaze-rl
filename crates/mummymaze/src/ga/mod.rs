@@ -62,6 +62,16 @@ impl CrossoverMode {
             CrossoverMode::FeatureLevel => "Feature-level",
         }
     }
+
+    /// Snake_case identifier matching the Python/WS protocol.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CrossoverMode::SwapEntities => "swap_entities",
+            CrossoverMode::Region => "region",
+            CrossoverMode::WallPatch => "wall_patch",
+            CrossoverMode::FeatureLevel => "feature_level",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

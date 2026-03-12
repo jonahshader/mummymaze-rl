@@ -198,6 +198,15 @@ impl PyLevel {
         Ok(dict)
     }
 
+    /// Serialize level to a JSON string (internal representation).
+    ///
+    /// This uses serde to serialize the full Rust Level struct, including
+    /// cell bitmask walls. The Rust viewer can deserialize this directly.
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Reconstruct a Level from a dict (as returned by to_dict).
     #[staticmethod]
     #[pyo3(signature = (d,))]

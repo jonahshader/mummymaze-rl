@@ -162,25 +162,21 @@ What was done:
 
 ## Task 5 — Unified State Management
 
-**Status:** Not started
+**Status:** Done (resolved by Tasks 1-4)
 **Depends on:** Tasks 1-4 being settled
 
-Currently 10+ distinct file I/O patterns with ad-hoc paths. After Task 4
-removes `agent_probs.bin` and the binary frame protocol, the remaining I/O
-simplifies to:
+The original motivation was 10+ distinct file I/O patterns with ad-hoc paths.
+Task 4 eliminated the binary frame protocol, `agent_probs.bin` mmap, and
+file-watching training metrics, leaving a clean set:
 
 | File | Format | Lifecycle |
 |------|--------|-----------|
 | `checkpoints/epoch*/` | Directory (Task 2) | Persistent |
 | `checkpoints/adversarial/round*/archive.json` | JSON | Persistent |
-| `level_metrics.json` | JSON | Ephemeral (may move to WS-only) |
 | WebSocket messages | JSON | Transient |
 
-### Goals
-
-- Define a coherent project directory layout
-- All components discover paths from a single config/root
-- Cleanup policy for ephemeral files
+`level_metrics.json` is now WS-only (no file watcher). All paths are
+relative to CWD or passed via CLI args (`--mazes`). No further work needed.
 
 ---
 

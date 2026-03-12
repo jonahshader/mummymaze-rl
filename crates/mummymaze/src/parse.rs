@@ -46,10 +46,26 @@ pub struct Header {
     pub bytes_per_sub: i32,
 }
 
-#[derive(Debug, Clone)]
+/// Serde helper for `[u32; 100]` — serde only supports arrays up to 32 natively.
+mod walls_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(walls: &[u32; 100], ser: S) -> Result<S::Ok, S::Error> {
+        walls.as_slice().serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<[u32; 100], D::Error> {
+        let v: Vec<u32> = Vec::deserialize(de)?;
+        v.try_into()
+            .map_err(|v: Vec<u32>| serde::de::Error::custom(format!("expected 100 elements, got {}", v.len())))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Level {
     pub grid_size: i32,
     pub flip: bool,
+    #[serde(with = "walls_serde")]
     pub walls: [u32; MAX_GRID * MAX_GRID],
 
     pub player_row: i32,
