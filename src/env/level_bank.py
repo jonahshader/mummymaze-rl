@@ -17,6 +17,8 @@ import jax.random as jr
 import numpy as np
 from jaxtyping import Array, Bool, Int, PRNGKeyArray
 
+import mummymaze_rust
+
 from src.env.level_load import exit_cell
 from src.env.types import MAX_MUMMIES, MAX_SCORPIONS, MAX_TRAPS, LevelData
 
@@ -176,39 +178,6 @@ def _load_level_np(sublevel: object, header: object) -> tuple[int, dict[str, obj
   }
 
 
-def _np_fingerprint(d: dict[str, object]) -> bytes:
-  """Fast fingerprint from numpy arrays for deduplication."""
-  parts = []
-  for key in sorted(d):
-    v = d[key]
-    if isinstance(v, np.ndarray):
-      parts.append(v.tobytes())
-    else:
-      parts.append(bytes(np.array(v)))
-  return b"".join(parts)
-
-
-def _level_fingerprint(level: LevelData) -> tuple[object, ...]:
-  """Create a hashable fingerprint of a level for deduplication."""
-  return (
-    level.h_walls_base.tobytes(),
-    level.v_walls_base.tobytes(),
-    bool(level.is_red),
-    bool(level.has_key_gate),
-    int(level.gate_row),
-    int(level.gate_col),
-    level.trap_pos.tobytes(),
-    level.trap_active.tobytes(),
-    level.key_pos.tobytes(),
-    level.exit_cell.tobytes(),
-    level.initial_player.tobytes(),
-    level.initial_mummy_pos.tobytes(),
-    level.initial_mummy_alive.tobytes(),
-    level.initial_scorpion_pos.tobytes(),
-    level.initial_scorpion_alive.tobytes(),
-  )
-
-
 def _build_bank(
   grid_size: int,
   levels: list[dict[str, object]],
@@ -291,26 +260,29 @@ def load_all_levels(
     raise ImportError(msg)
 
   # Collect all unique levels binned by grid_size (numpy-only, no JAX overhead)
+  # Dedup uses Rust canonical_fingerprint (dihedral symmetry-aware).
   bins: dict[int, list[dict[str, object]]] = {}
   sources: dict[int, list[tuple[str, int]]] = {}
-  seen: dict[int, set[bytes]] = {}
+  seen: dict[int, set[int]] = {}
 
   dat_files = sorted(dat_dir.glob("B-*.dat"))
   for dat_path in dat_files:
     parsed = parse_file(dat_path)
     if parsed is None:
       continue
+    # Parse with Rust for canonical fingerprinting
+    rust_levels = mummymaze_rust.parse_file(str(dat_path))
     for sub_idx, sublevel in enumerate(parsed.sublevels):
       gs, level_np = _load_level_np(sublevel, parsed.header)
-      fp = _np_fingerprint(level_np)
+      cfp = rust_levels[sub_idx].canonical_fingerprint()
 
       if gs not in bins:
         bins[gs] = []
         sources[gs] = []
         seen[gs] = set()
 
-      if fp not in seen[gs]:
-        seen[gs].add(fp)
+      if cfp not in seen[gs]:
+        seen[gs].add(cfp)
         bins[gs].append(level_np)
         sources[gs].append((dat_path.stem, sub_idx))
 

@@ -627,15 +627,59 @@ impl Level {
         }
     }
 
+    /// Hash all gameplay-relevant fields to a u64 fingerprint.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        self.grid_size.hash(&mut h);
+        self.walls.hash(&mut h);
+        self.player_row.hash(&mut h);
+        self.player_col.hash(&mut h);
+        self.mummy1_row.hash(&mut h);
+        self.mummy1_col.hash(&mut h);
+        self.mummy2_row.hash(&mut h);
+        self.mummy2_col.hash(&mut h);
+        self.has_mummy2.hash(&mut h);
+        self.scorpion_row.hash(&mut h);
+        self.scorpion_col.hash(&mut h);
+        self.has_scorpion.hash(&mut h);
+        self.trap1_row.hash(&mut h);
+        self.trap1_col.hash(&mut h);
+        self.trap2_row.hash(&mut h);
+        self.trap2_col.hash(&mut h);
+        self.trap_count.hash(&mut h);
+        self.gate_row.hash(&mut h);
+        self.gate_col.hash(&mut h);
+        self.has_gate.hash(&mut h);
+        self.key_row.hash(&mut h);
+        self.key_col.hash(&mut h);
+        self.exit_row.hash(&mut h);
+        self.exit_col.hash(&mut h);
+        self.exit_mask.hash(&mut h);
+        self.flip.hash(&mut h);
+        h.finish()
+    }
+
+    /// Canonical fingerprint under dihedral symmetry (rotations + reflections).
+    ///
+    /// Gate-free levels use all 8 D4 symmetries. Gate levels use the 4 that
+    /// preserve the gate's vertical (E/W) orientation: identity, rot180,
+    /// h_mirror, v_mirror.
+    pub fn canonical_fingerprint(&self) -> u64 {
+        let syms: &[u8] = if self.has_gate {
+            // rot180 and v_mirror also preserve vertical gate orientation
+            // (with a cell shift handled in apply_dihedral).
+            &[0, 2, 4, 5]
+        } else {
+            &[0, 1, 2, 3, 4, 5, 6, 7]
+        };
+        syms.iter()
+            .map(|&s| self.apply_dihedral(s).fingerprint())
+            .min()
+            .unwrap()
+    }
+
     /// Apply a dihedral symmetry transform.
-    ///
-    /// `sym` is 0..8 for the 8 elements of the dihedral group D4:
-    ///   0=identity, 1=rot90cw, 2=rot180, 3=rot270cw,
-    ///   4=h_mirror, 5=v_mirror, 6=transpose, 7=anti_transpose
-    ///
-    /// Transforms that swap horizontal/vertical axes (1,3,6,7) toggle `flip`.
-    /// Gate levels should only use transforms that preserve the gate's E/W
-    /// orientation (0=identity, 4=h_mirror).
     pub fn apply_dihedral(&self, sym: u8) -> Level {
         let n = self.grid_size;
 
@@ -720,7 +764,13 @@ impl Level {
         let (sr, sc) = xf(self.scorpion_row, self.scorpion_col, self.has_scorpion);
         let (t1r, t1c) = xf(self.trap1_row, self.trap1_col, self.trap_count >= 1);
         let (t2r, t2c) = xf(self.trap2_row, self.trap2_col, self.trap_count >= 2);
-        let (gr, gc) = xf(self.gate_row, self.gate_col, self.has_gate);
+        let (gr, mut gc) = xf(self.gate_row, self.gate_col, self.has_gate);
+        // The gate is a vertical barrier on the east edge of its cell.
+        // Transforms that flip E↔W (rot180, v_mirror) move the barrier to
+        // the west edge; shift one cell left to keep it as an east edge.
+        if self.has_gate && matches!(sym, 2 | 5) {
+            gc -= 1;
+        }
         let (kr, kc) = xf(self.key_row, self.key_col, self.has_gate);
         let (er, ec) = coord(self.exit_row, self.exit_col);
 
@@ -820,6 +870,82 @@ mod tests {
         assert_eq!((rotated.mummy1_row, rotated.mummy1_col), (b.mummy1_row, b.mummy1_col));
         assert_eq!((rotated.exit_row, rotated.exit_col, rotated.exit_mask),
                    (b.exit_row, b.exit_col, b.exit_mask));
+    }
+
+    #[test]
+    fn gate_transforms_preserve_solvability() {
+        // All 4 valid gate symmetries (0, 2, 4, 5) must produce levels
+        // that solve with the same optimal move count.
+        use crate::solver;
+
+        let mazes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap().join("mazes");
+
+        let mut tested = 0;
+        for entry in std::fs::read_dir(&mazes).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.extension().is_some_and(|e| e == "dat") { continue; }
+            let Ok((_, levels)) = parse_file(&path) else { continue };
+            for (sub, lev) in levels.iter().enumerate() {
+                if !lev.has_gate { continue; }
+                let base_sol = solver::solve(lev).moves;
+                if base_sol.is_none() { continue; }
+                for &sym in &[2, 4, 5] {
+                    let transformed = lev.apply_dihedral(sym);
+                    let t_sol = solver::solve(&transformed).moves;
+                    assert_eq!(
+                        base_sol, t_sol,
+                        "sym={sym} changed solution for {}:{sub} (base={base_sol:?}, got={t_sol:?})",
+                        path.file_stem().unwrap().to_str().unwrap(),
+                    );
+                }
+                tested += 1;
+            }
+        }
+        assert!(tested > 100, "expected to test >100 gate levels, got {tested}");
+    }
+
+    #[test]
+    fn gate_double_transform_is_identity() {
+        // v_mirror and rot180 applied twice should return to identity for gate levels.
+        let mazes = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap().join("mazes");
+
+        let mut tested = 0;
+        for entry in std::fs::read_dir(&mazes).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.extension().is_some_and(|e| e == "dat") { continue; }
+            let Ok((_, levels)) = parse_file(&path) else { continue };
+            for lev in &levels {
+                if !lev.has_gate { continue; }
+                // v_mirror twice = identity
+                let vv = lev.apply_dihedral(5).apply_dihedral(5);
+                assert_eq!(lev.gate_row, vv.gate_row);
+                assert_eq!(lev.gate_col, vv.gate_col);
+                assert_eq!(lev.walls, vv.walls);
+                assert_eq!(lev.player_row, vv.player_row);
+                assert_eq!(lev.player_col, vv.player_col);
+                assert_eq!(lev.key_row, vv.key_row);
+                assert_eq!(lev.key_col, vv.key_col);
+
+                // rot180 twice = identity
+                let rr = lev.apply_dihedral(2).apply_dihedral(2);
+                assert_eq!(lev.gate_row, rr.gate_row);
+                assert_eq!(lev.gate_col, rr.gate_col);
+                assert_eq!(lev.walls, rr.walls);
+                assert_eq!(lev.player_row, rr.player_row);
+                assert_eq!(lev.player_col, rr.player_col);
+
+                // h_mirror twice = identity (was already working)
+                let hh = lev.apply_dihedral(4).apply_dihedral(4);
+                assert_eq!(lev.gate_row, hh.gate_row);
+                assert_eq!(lev.gate_col, hh.gate_col);
+                assert_eq!(lev.walls, hh.walls);
+
+                tested += 1;
+            }
+        }
+        assert!(tested > 100, "expected to test >100 gate levels, got {tested}");
     }
 
     #[test]

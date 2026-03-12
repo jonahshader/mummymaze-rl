@@ -9,52 +9,8 @@ use mummymaze::batch::{self, LevelAnalysis};
 use mummymaze::parse::Level;
 use mummymaze::solver;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
-
-/// Hash a Level by its gameplay-relevant fields for dedup.
-fn level_fingerprint(lev: &Level) -> u64 {
-    let mut h = std::hash::DefaultHasher::new();
-    lev.grid_size.hash(&mut h);
-    lev.walls.hash(&mut h);
-    lev.player_row.hash(&mut h);
-    lev.player_col.hash(&mut h);
-    lev.mummy1_row.hash(&mut h);
-    lev.mummy1_col.hash(&mut h);
-    lev.mummy2_row.hash(&mut h);
-    lev.mummy2_col.hash(&mut h);
-    lev.has_mummy2.hash(&mut h);
-    lev.scorpion_row.hash(&mut h);
-    lev.scorpion_col.hash(&mut h);
-    lev.has_scorpion.hash(&mut h);
-    lev.trap1_row.hash(&mut h);
-    lev.trap1_col.hash(&mut h);
-    lev.trap2_row.hash(&mut h);
-    lev.trap2_col.hash(&mut h);
-    lev.trap_count.hash(&mut h);
-    lev.gate_row.hash(&mut h);
-    lev.gate_col.hash(&mut h);
-    lev.has_gate.hash(&mut h);
-    lev.key_row.hash(&mut h);
-    lev.key_col.hash(&mut h);
-    lev.exit_row.hash(&mut h);
-    lev.exit_col.hash(&mut h);
-    lev.exit_mask.hash(&mut h);
-    lev.flip.hash(&mut h);
-    h.finish()
-}
-
-/// Canonical fingerprint under dihedral symmetry (rotations + reflections).
-/// Gate-free levels: all 8 D4 symmetries. Gate levels: identity + h_mirror only
-/// (the gate is a vertical barrier on the east edge; only h_mirror preserves that).
-fn canonical_fingerprint(lev: &Level) -> u64 {
-    let syms: &[u8] = if lev.has_gate { &[0, 4] } else { &[0, 1, 2, 3, 4, 5, 6, 7] };
-    syms.iter()
-        .map(|&s| level_fingerprint(&lev.apply_dihedral(s)))
-        .min()
-        .unwrap()
-}
 
 pub struct DataStore {
     pub rows: Vec<LevelRow>,
@@ -89,12 +45,12 @@ impl DataStore {
             .into_iter()
             .map(|(stem, sub, lev)| {
                 let bfs = solver::solve(&lev).moves;
-                let fp = level_fingerprint(&lev);
+                let fp = lev.fingerprint();
                 let is_duplicate = !seen.insert(fp);
                 // Canonical fingerprint: min over all dihedral symmetries.
                 // A rotation duplicate is a non-exact duplicate whose canonical
                 // form was already seen.
-                let cfp = canonical_fingerprint(&lev);
+                let cfp = lev.canonical_fingerprint();
                 let is_rotation_duplicate = !is_duplicate && !seen_canonical.insert(cfp);
                 // Also insert for exact duplicates so later rotations are caught
                 if is_duplicate { seen_canonical.insert(cfp); }

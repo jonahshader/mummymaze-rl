@@ -169,6 +169,18 @@ impl PyLevel {
         )
     }
 
+    /// Hash all gameplay-relevant fields to a u64 fingerprint.
+    fn fingerprint(&self) -> u64 {
+        self.inner.fingerprint()
+    }
+
+    /// Canonical fingerprint under dihedral symmetry.
+    /// Gate-free levels use all 8 D4 symmetries; gate levels use identity,
+    /// rot180, h_mirror, v_mirror.
+    fn canonical_fingerprint(&self) -> u64 {
+        self.inner.canonical_fingerprint()
+    }
+
     /// Serialize level to a Python dict (all fields).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let l = &self.inner;
