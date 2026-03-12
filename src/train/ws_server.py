@@ -58,6 +58,9 @@ class WsHandler:
     self._train_stop = threading.Event()
     self._adversarial_stop = threading.Event()
     self._ga_stop = threading.Event()
+    # Background task for long-running operations (train/adversarial/GA).
+    # Only one can run at a time; the message loop stays responsive for stop commands.
+    self._bg_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
   async def handle(self, ws: ServerConnection) -> None:
     log.info("client connected: %s", ws.remote_address)
@@ -78,6 +81,9 @@ class WsHandler:
           await self._send_error(ws, request_id, str(e))
     except websockets.ConnectionClosed:
       log.info("client disconnected")
+    finally:
+      if self._bg_task and not self._bg_task.done():
+        self._bg_task.cancel()
 
   async def _dispatch(
     self,
@@ -89,15 +95,15 @@ class WsHandler:
     if msg_type == "evaluate":
       await self._handle_evaluate(ws, msg, request_id)
     elif msg_type == "train":
-      await self._handle_train(ws, msg, request_id)
+      self._launch_bg(self._handle_train(ws, msg, request_id))
     elif msg_type == "stop_train":
       self._train_stop.set()
     elif msg_type == "adversarial":
-      await self._handle_adversarial(ws, msg, request_id)
+      self._launch_bg(self._handle_adversarial(ws, msg, request_id))
     elif msg_type == "stop_adversarial":
       self._adversarial_stop.set()
     elif msg_type == "ga":
-      await self._handle_ga(ws, msg, request_id)
+      self._launch_bg(self._handle_ga(ws, msg, request_id))
     elif msg_type == "stop_ga":
       self._ga_stop.set()
     elif msg_type == "reload_checkpoint":
@@ -109,6 +115,17 @@ class WsHandler:
       raise SystemExit
     else:
       await self._send_error(ws, request_id, f"Unknown message type: {msg_type}")
+
+  def _launch_bg(self, coro: object) -> None:
+    """Launch a long-running handler as a background task.
+
+    The message loop stays responsive so stop commands can be processed.
+    Only one background task runs at a time.
+    """
+    if self._bg_task and not self._bg_task.done():
+      log.warning("background task already running, ignoring new request")
+      return
+    self._bg_task = asyncio.create_task(coro)  # type: ignore[arg-type]
 
   async def _handle_evaluate(
     self,
