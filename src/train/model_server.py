@@ -301,6 +301,7 @@ class ModelServer:
       run_id=run_id,
       arch=self.arch,
       lr=lr,
+      level_metrics=True,
     )
 
     reporter.report_done()

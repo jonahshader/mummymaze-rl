@@ -1,10 +1,11 @@
 """Behavioral cloning training script for Mummy Maze."""
 
-import argparse
+import enum
 import json
 import sys
 import time
 from pathlib import Path
+from typing import Annotated
 
 import equinox as eqx
 import jax
@@ -16,13 +17,14 @@ import optax
 from collections.abc import Callable
 from typing import Any
 
+import typer
 from tqdm import tqdm
 
 from jaxtyping import Array, Float, Int
 
 from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
+from src.train.model import DEFAULT_ARCH, make_model
 from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
 
 
@@ -202,7 +204,7 @@ def train_epochs(
   *,
   epochs: int,
   batch_size: int,
-  checkpoint_dir: Path,
+  checkpoint_dir: Path | None,
   reporter: MetricsReporter,
   maze_dir: Path,
   key: jax.Array,
@@ -212,6 +214,7 @@ def train_epochs(
   run_id: str = "bc-cnn",
   arch: str = DEFAULT_ARCH,
   lr: float = 3e-4,
+  level_metrics: bool = False,
 ) -> tuple[eqx.Module, optax.OptState, int, jax.Array]:
   """Run training epochs. Returns (model, opt_state, final_step, key)."""
   use_tqdm = isinstance(reporter, FileReporter)
@@ -398,73 +401,106 @@ def train_epochs(
       )
 
     # Checkpoint
-    ckpt_path = checkpoint_dir / f"epoch{epoch + 1:03d}"
-    save_checkpoint(
-      ckpt_path,
-      model,
-      opt_state,
-      epoch=epoch + 1,
-      global_step=global_step,
-      arch=arch,
-      key=key,
-      lr=lr,
-      batch_size=batch_size,
-    )
-
-    # Compute level metrics
-    reporter.report_status("Computing level metrics...")
-    all_metrics: dict[int, dict[int, dict[str, object]]] = {}
-    total_val_states = sum(int(ds.val_mask.sum()) for ds in datasets.values())
-    if use_tqdm:
-      metrics_pbar = tqdm(
-        total=total_val_states,
-        desc="  Level metrics",
-        unit="state",
-      )
-    else:
-      metrics_pbar = None
-    for gs, ds in datasets.items():
-      all_metrics[gs] = compute_level_metrics(
+    if checkpoint_dir is not None:
+      ckpt_path = checkpoint_dir / f"epoch{epoch + 1:03d}"
+      save_checkpoint(
+        ckpt_path,
         model,
-        ds,
-        batch_size,
-        metrics_pbar,
-        logits_buffer=logits_buffers[gs],
-        jit_make_obs_fn=jit_make_obs[gs],
+        opt_state,
+        epoch=epoch + 1,
+        global_step=global_step,
+        arch=arch,
+        key=key,
+        lr=lr,
+        batch_size=batch_size,
       )
-    if metrics_pbar is not None:
-      metrics_pbar.close()
 
-    # Compute agent win% via Markov solver
+    # Per-level metrics (expensive — disabled by default, viewer enables it)
+    all_metrics: dict[int, dict[int, dict[str, object]]] = {}
+    if level_metrics:
+      reporter.report_status("Computing level metrics...")
+      total_val_states = sum(int(ds.val_mask.sum()) for ds in datasets.values())
+      if use_tqdm:
+        metrics_pbar = tqdm(
+          total=total_val_states,
+          desc="  Level metrics",
+          unit="state",
+        )
+      else:
+        metrics_pbar = None
+      for gs, ds in datasets.items():
+        all_metrics[gs] = compute_level_metrics(
+          model,
+          ds,
+          batch_size,
+          metrics_pbar,
+          logits_buffer=logits_buffers[gs],
+          jit_make_obs_fn=jit_make_obs[gs],
+        )
+      if metrics_pbar is not None:
+        metrics_pbar.close()
+
+    # Compute agent win% via Markov solver (validation levels only)
     reporter.report_status("Computing agent win%...")
-    from scipy.special import softmax as scipy_softmax
+    all_win_probs: list[float] = []
 
     for gs, ds in datasets.items():
-      probs = scipy_softmax(logits_buffers[gs], axis=-1)  # (n_states, 5) f32
-
       level_idx_np = np.array(ds.level_idx)
-      counts = np.bincount(level_idx_np, minlength=ds.n_levels)
-      offsets = np.zeros(ds.n_levels + 1, dtype=np.intp)
+      val_mask_np = np.array(ds.val_mask)
+
+      # Identify which levels are validation levels
+      val_level_set = set(int(x) for x in level_idx_np[val_mask_np])
+      if not val_level_set:
+        continue
+
+      # Run fresh inference on val states for policy probs
+      val_indices_arr = jnp.where(ds.val_mask, size=int(ds.val_mask.sum()))[0]
+      val_logits_list = []
+      for start in range(0, val_indices_arr.shape[0], batch_size):
+        end = min(start + batch_size, val_indices_arr.shape[0])
+        batch_idx = val_indices_arr[start:end]
+        obs = jit_make_obs[gs](ds.state_tuples[batch_idx], ds.level_idx[batch_idx])
+        val_logits_list.append(np.array(jax.vmap(model)(obs)))
+      val_logits = np.concatenate(val_logits_list, axis=0)
+      val_probs = np.exp(val_logits - val_logits.max(axis=-1, keepdims=True))
+      val_probs /= val_probs.sum(axis=-1, keepdims=True)
+
+      val_state_tuples = np.asarray(ds.state_tuples, dtype=np.int32)[val_mask_np]
+      val_level_idx = level_idx_np[val_mask_np]
+
+      # Remap level indices to dense range for the batch call
+      val_levels_sorted = sorted(val_level_set)
+      old_to_new = {old: new for new, old in enumerate(val_levels_sorted)}
+      remapped_idx = np.array([old_to_new[int(x)] for x in val_level_idx])
+
+      n_val_levels = len(val_levels_sorted)
+      counts = np.bincount(remapped_idx, minlength=n_val_levels)
+      offsets = np.zeros(n_val_levels + 1, dtype=np.intp)
       np.cumsum(counts, out=offsets[1:])
 
-      level_keys = list(sources[gs])
-      state_tuples_np = np.asarray(ds.state_tuples, dtype=np.int32)
+      # Sort states by remapped level index (required by batch solver)
+      sort_order = np.argsort(remapped_idx, kind="stable")
+      val_state_tuples = val_state_tuples[sort_order]
+      val_probs = val_probs[sort_order]
 
-      # Parse Level objects for the Rust Markov solver
-      rust_levels = _parse_rust_levels(maze_dir, level_keys)
+      level_keys = list(sources[gs])
+      val_keys = [level_keys[i] for i in val_levels_sorted]
+      rust_levels = _parse_rust_levels(maze_dir, val_keys)
 
       win_probs = mummymaze_rust.policy_win_prob_batch(
-        rust_levels, state_tuples_np, probs, offsets.tolist()
+        rust_levels, val_state_tuples, val_probs, offsets.tolist()
       )
 
       failed_levels: list[str] = []
-      for lvl_idx, wp in enumerate(win_probs):
-        if lvl_idx in all_metrics[gs]:
-          if np.isnan(wp):
-            stem, sub = level_keys[lvl_idx]
-            failed_levels.append(f"{stem}:{sub}")
-          else:
-            all_metrics[gs][lvl_idx]["agent_win_prob"] = round(wp, 6)
+      for new_idx, wp in enumerate(win_probs):
+        old_idx = val_levels_sorted[new_idx]
+        if np.isnan(wp):
+          stem, sub = level_keys[old_idx]
+          failed_levels.append(f"{stem}:{sub}")
+        else:
+          all_win_probs.append(wp)
+          if old_idx in all_metrics.get(gs, {}):
+            all_metrics[gs][old_idx]["agent_win_prob"] = round(wp, 6)
       if failed_levels:
         msg = (
           f"WARNING: {len(failed_levels)} gs={gs} levels failed convergence: "
@@ -475,7 +511,23 @@ def train_epochs(
         if use_tqdm:
           print(f"  {msg}")
 
-    reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
+    if level_metrics:
+      reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
+
+    # Log aggregate win% to wandb
+    if wandb_project is not None and all_win_probs:
+      import wandb
+
+      wandb.log(
+        {
+          "eval/mean_win_prob": float(np.mean(all_win_probs)),
+          "eval/median_win_prob": float(np.median(all_win_probs)),
+          "eval/min_win_prob": float(np.min(all_win_probs)),
+          "eval/max_win_prob": float(np.max(all_win_probs)),
+          "eval/n_levels": len(all_win_probs),
+        },
+        step=global_step,
+      )
 
   return model, opt_state, global_step, key
 
@@ -488,7 +540,7 @@ def train(
   seed: int = 0,
   wandb_project: str | None = None,
   metrics_path: Path = Path("level_metrics.json"),
-  checkpoint_dir: Path = Path("checkpoints"),
+  checkpoint_dir: Path | None = None,
   reporter: FileReporter | StdioReporter | None = None,
   checkpoint: Path | None = None,
   augment_levels: Path | None = None,
@@ -599,6 +651,7 @@ def train(
       project=wandb_project,
       name=run_id,
       config={
+        "arch": arch,
         "epochs": epochs,
         "batch_size": batch_size,
         "lr": lr,
@@ -653,80 +706,71 @@ def train(
   return model
 
 
-def main() -> None:
-  """CLI entry point."""
-  parser = argparse.ArgumentParser(description="Behavioral cloning for Mummy Maze")
-  parser.add_argument(
-    "--mazes",
-    type=Path,
-    default=Path("mazes"),
-    help="Directory containing B-*.dat files",
-  )
-  parser.add_argument("--epochs", type=int, default=10)
-  parser.add_argument("--batch-size", type=int, default=1024)
-  parser.add_argument("--lr", type=float, default=3e-4)
-  parser.add_argument("--seed", type=int, default=0)
-  parser.add_argument("--wandb-project", type=str, default=None)
-  parser.add_argument("--metrics-path", type=Path, default=Path("level_metrics.json"))
-  parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
-  parser.add_argument(
-    "--mode",
-    choices=["standalone", "subprocess"],
-    default="standalone",
-    help="standalone: tqdm + file output; subprocess: JSON lines to stdout",
-  )
-  parser.add_argument(
-    "--checkpoint",
-    type=Path,
-    default=None,
-    help="Resume from checkpoint (directory or legacy .eqx file)",
-  )
-  parser.add_argument(
-    "--augment-levels",
-    type=Path,
-    default=None,
-    help="JSON file of serialized levels to augment the dataset",
-  )
-  parser.add_argument("--epoch-offset", type=int, default=0)
-  parser.add_argument("--step-offset", type=int, default=0)
-  parser.add_argument(
-    "--arch",
-    type=str,
-    default=DEFAULT_ARCH,
-    choices=sorted(MODEL_REGISTRY),
-    help=f"Model architecture (default: {DEFAULT_ARCH})",
-  )
-  args = parser.parse_args()
+class Mode(str, enum.Enum):
+  standalone = "standalone"
+  subprocess = "subprocess"
 
-  # Create reporter based on mode
-  if args.mode == "subprocess":
+
+class Arch(str, enum.Enum):
+  cnn = "cnn"
+  resnet = "resnet"
+
+
+def main(
+  mazes: Annotated[
+    Path, typer.Option(help="Directory containing B-*.dat files")
+  ] = Path("mazes"),
+  epochs: int = 10,
+  batch_size: int = 1024,
+  lr: float = 3e-4,
+  seed: int = 0,
+  wandb_project: Annotated[str | None, typer.Option(help="W&B project name")] = None,
+  metrics_path: Path = Path("level_metrics.json"),
+  checkpoint_dir: Annotated[
+    Path | None, typer.Option(help="Save checkpoints to this directory")
+  ] = None,
+  mode: Annotated[
+    Mode, typer.Option(help="standalone: tqdm; subprocess: JSON")
+  ] = Mode.standalone,
+  checkpoint: Annotated[
+    Path | None, typer.Option(help="Resume from checkpoint directory")
+  ] = None,
+  augment_levels: Annotated[
+    Path | None, typer.Option(help="JSON file of extra levels")
+  ] = None,
+  epoch_offset: int = 0,
+  step_offset: int = 0,
+  arch: Annotated[Arch, typer.Option(help="Model architecture")] = Arch.cnn,
+) -> None:
+  """Behavioral cloning for Mummy Maze."""
+  if mode == Mode.subprocess:
     reporter: FileReporter | StdioReporter = StdioReporter()
   else:
-    reporter = FileReporter(args.metrics_path)
+    reporter = FileReporter(metrics_path)
 
   try:
     train(
-      maze_dir=args.mazes,
-      epochs=args.epochs,
-      batch_size=args.batch_size,
-      lr=args.lr,
-      seed=args.seed,
-      wandb_project=args.wandb_project,
-      metrics_path=args.metrics_path,
-      checkpoint_dir=args.checkpoint_dir,
+      maze_dir=mazes,
+      epochs=epochs,
+      batch_size=batch_size,
+      lr=lr,
+      seed=seed,
+      wandb_project=wandb_project,
+      metrics_path=metrics_path,
+      checkpoint_dir=checkpoint_dir,
       reporter=reporter,
-      checkpoint=args.checkpoint,
-      augment_levels=args.augment_levels,
-      epoch_offset=args.epoch_offset,
-      step_offset=args.step_offset,
-      arch=args.arch,
+      checkpoint=checkpoint,
+      augment_levels=augment_levels,
+      epoch_offset=epoch_offset,
+      step_offset=step_offset,
+      arch=arch.value,
     )
   except Exception as e:
-    if args.mode == "subprocess":
+    if mode == Mode.subprocess:
       sys.stdout.write(json.dumps({"type": "error", "message": str(e)}) + "\n")
       sys.stdout.flush()
     raise
 
 
 if __name__ == "__main__":
-  main()
+  typer.run(main)

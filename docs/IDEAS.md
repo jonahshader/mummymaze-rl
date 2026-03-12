@@ -88,6 +88,30 @@ both the architectures and the levels.
 - How to represent enemy movement rules to the agent (implicit via experience, or explicit)?
 - Evaluation metric: % levels solved, move optimality gap, generalization to unseen levels?
 
+## Training Infrastructure
+
+### Runtime Model Selection & Run Management
+Currently architecture is fixed at server startup (`--arch cnn`), training always
+starts immediately, and checkpoints go to a single shared directory. Problems:
+- Can't switch architectures from the viewer without restarting the server
+- Can't manage multiple training runs or resume a specific one
+- Model selection isn't consistent across training, GA eval, and policy visualizer
+
+Needed changes:
+- **Runtime model selection**: server supports switching architectures via WebSocket
+  message. `list_models` returns available architectures, `select_model` sets the
+  active one. Viewer populates a dropdown dynamically.
+- **Per-run checkpoint directories**: `checkpoints/{arch}/{run_id}/` with metadata
+  (timestamp, hparams, final metrics). Only keep latest checkpoint per run.
+- **Run management**: `list_runs` endpoint returns available runs (arch, step count,
+  metrics). Viewer can resume a specific run for continued training.
+- **Unified model selection**: the active model/run is shared across training, GA
+  evaluation, and the level play tab's policy probability visualizer.
+
+Future: self-registering model registry via `@register_model` decorator that exposes
+per-architecture hyperparameters, so the viewer can build config UI dynamically
+without knowing model types ahead of time (see memory for sketch).
+
 ## Backlog / Nice-to-have
 
 - **Agent expected_steps**: same Markov solver with `(I-Q)t = 1` using agent

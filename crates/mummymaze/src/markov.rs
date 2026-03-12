@@ -365,7 +365,7 @@ impl MarkovChain {
     pub fn start_log_win_prob(&self) -> Result<(f64, f64)> {
         let log_wp = self.solve_log_win_probs()?;
         let log_p = self.start_idx.map_or(f64::NEG_INFINITY, |i| log_wp[i]);
-        Ok((10.0f64.powf(log_p).max(0.0), log_p))
+        Ok((10.0f64.powf(log_p).clamp(0.0, 1.0), log_p.min(0.0)))
     }
 
     /// Run Gauss-Seidel with a given RHS vector (scaled win_absorb).
