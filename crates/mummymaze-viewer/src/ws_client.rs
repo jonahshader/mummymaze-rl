@@ -78,6 +78,18 @@ pub enum AdversarialEvent {
         occupancy: u32,
         total_cells: u32,
         time: f64,
+        #[serde(default)]
+        bfs_bins: Option<usize>,
+        #[serde(default)]
+        states_bins: Option<usize>,
+        #[serde(default)]
+        bfs_range: Option<(usize, usize)>,
+        #[serde(default)]
+        states_range: Option<(usize, usize)>,
+        #[serde(default)]
+        target_log_wp: Option<f64>,
+        #[serde(default)]
+        cells: Option<Vec<Option<ArchiveCellJson>>>,
     },
     RoundEnd {
         round: u32,
@@ -89,6 +101,16 @@ pub enum AdversarialEvent {
     },
     #[serde(skip)]
     Training(TrainingEvent),
+}
+
+/// A single archive cell as received from JSON (WS event or file).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArchiveCellJson {
+    pub level_json: String,
+    pub bfs_moves: u32,
+    pub n_states: usize,
+    pub log_policy_win_prob: f64,
+    pub fitness: f64,
 }
 
 /// Result from an evaluate request: per-state action probabilities.

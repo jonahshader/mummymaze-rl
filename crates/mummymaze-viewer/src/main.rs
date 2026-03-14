@@ -505,11 +505,23 @@ impl eframe::App for App {
                     }
                 }
                 RightTab::Adversarial => {
-                    adversarial_tab::draw_panel(
+                    if let Some(level) = adversarial_tab::draw_panel(
                         ui,
                         &mut self.adversarial,
                         self.ws_client.as_ref(),
-                    );
+                    ) {
+                        self.gameplay = Some(GameplayState::new(level.clone()));
+                        if let Ok(full) =
+                            mummymaze::batch::analyze_level_full("archive", 0, &level)
+                        {
+                            self.generated_analysis = Some(full.analysis);
+                            if let Some(ref mut gv) = self.graph_view {
+                                gv.load_level(&level, usize::MAX, &full.graph, &full.chain);
+                            }
+                            self.set_graph(full.graph);
+                        }
+                        self.store.selected = None;
+                    }
                 }
                 RightTab::Logs => {
                     ui.horizontal(|ui: &mut egui::Ui| {

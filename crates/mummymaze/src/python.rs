@@ -795,6 +795,61 @@ fn ga_evaluate_batch(
     Ok(out)
 }
 
+/// Replay a sequence of actions on a level, returning the state after each step.
+///
+/// Returns a list of dicts, one per step (including the initial state at index 0):
+///     {"player": (r, c), "mummy1": (r, c, alive), "mummy2": (r, c, alive),
+///      "scorpion": (r, c, alive), "gate_open": bool, "result": "ok"|"win"|"dead"}
+///
+/// The list has length `len(actions) + 1` (initial state + one per action).
+#[pyfunction]
+#[pyo3(signature = (level, actions))]
+fn replay_actions(py: Python<'_>, level: &PyLevel, actions: Vec<u32>) -> PyResult<Vec<PyObject>> {
+    use crate::game::{Action, StepResult, step};
+
+    let lev = &level.inner;
+    let mut state = State::from_level(lev);
+    let mut frames = Vec::with_capacity(actions.len() + 1);
+
+    let state_to_dict = |py: Python<'_>, s: &State, result: &str| -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        dict.set_item("player", (s.player_row, s.player_col))?;
+        dict.set_item("mummy1", (s.mummy1_row, s.mummy1_col, s.mummy1_alive))?;
+        dict.set_item("mummy2", (s.mummy2_row, s.mummy2_col, s.mummy2_alive))?;
+        dict.set_item("scorpion", (s.scorpion_row, s.scorpion_col, s.scorpion_alive))?;
+        dict.set_item("gate_open", s.gate_open)?;
+        dict.set_item("result", result)?;
+        Ok(dict.into())
+    };
+
+    // Initial state
+    frames.push(state_to_dict(py, &state, "ok")?);
+
+    for &action_idx in &actions {
+        let action = match action_idx {
+            0 => Action::North,
+            1 => Action::South,
+            2 => Action::East,
+            3 => Action::West,
+            4 => Action::Wait,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    format!("Invalid action index: {action_idx}. Use 0-4 (N/S/E/W/Wait)")
+                ));
+            }
+        };
+        let result = step(lev, &mut state, action);
+        let result_str = match result {
+            StepResult::Ok => "ok",
+            StepResult::Win => "win",
+            StepResult::Dead => "dead",
+        };
+        frames.push(state_to_dict(py, &state, result_str)?);
+    }
+
+    Ok(frames)
+}
+
 // ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
@@ -820,6 +875,7 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mutate_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ga_crossover, m)?)?;
     m.add_function(wrap_pyfunction!(ga_evaluate_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(replay_actions, m)?)?;
 
     Ok(())
 }

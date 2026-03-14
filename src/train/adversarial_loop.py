@@ -325,6 +325,25 @@ def adversarial_loop(
       n_archive = len(archive_individuals)
       occupied, total = archive.occupancy()
       print(f"    Archive: {n_archive} levels ({ga_time:.1f}s)")
+
+      # Build enriched cells array (flat row-major [bfs_bin * states_bins + states_bin])
+      archive_cells: list[dict | None] = []
+      for bi in range(archive.bfs_bins):
+        for si in range(archive.states_bins):
+          ind = archive.grid[bi][si]
+          if ind is None:
+            archive_cells.append(None)
+          else:
+            archive_cells.append(
+              {
+                "level_json": ind.level.to_json(),
+                "bfs_moves": ind.bfs_moves,
+                "n_states": ind.n_states,
+                "log_policy_win_prob": ind.log_policy_win_prob,
+                "fitness": ind.fitness,
+              }
+            )
+
       _emit(
         {
           "type": "archive_update",
@@ -334,8 +353,30 @@ def adversarial_loop(
           "occupancy": occupied,
           "total_cells": total,
           "time": ga_time,
+          "bfs_bins": archive.bfs_bins,
+          "states_bins": archive.states_bins,
+          "bfs_range": list(archive.bfs_range),
+          "states_range": list(archive.states_range),
+          "target_log_wp": archive.target_log_wp,
+          "cells": archive_cells,
         }
       )
+
+      # Save enriched per-grid-size archive file
+      gs_archive_path = round_ckpt_dir / f"archive_gs{gs}.json"
+      gs_archive_path.parent.mkdir(parents=True, exist_ok=True)
+      gs_archive_data = {
+        "bfs_bins": archive.bfs_bins,
+        "states_bins": archive.states_bins,
+        "bfs_range": list(archive.bfs_range),
+        "states_range": list(archive.states_range),
+        "target_log_wp": archive.target_log_wp,
+        "grid_size": gs,
+        "cells": archive_cells,
+      }
+      with open(gs_archive_path, "w") as f:
+        json.dump(gs_archive_data, f)
+      print(f"    Saved enriched archive to {gs_archive_path}")
 
       for ind in archive_individuals:
         round_ga_levels.append(ind.level)
