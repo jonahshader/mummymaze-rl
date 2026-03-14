@@ -181,6 +181,17 @@ impl PyLevel {
         self.inner.canonical_fingerprint()
     }
 
+    /// Whether this level has a gate (and key).
+    #[getter]
+    fn has_gate(&self) -> bool {
+        self.inner.has_gate
+    }
+
+    /// Apply a dihedral symmetry transform (0..8 for the 8 D4 elements).
+    fn apply_dihedral(&self, sym: u8) -> PyLevel {
+        PyLevel { inner: self.inner.apply_dihedral(sym) }
+    }
+
     /// Serialize level to a Python dict (all fields).
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let l = &self.inner;

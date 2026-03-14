@@ -7,25 +7,31 @@ Usage:
   uv run python -m src.train.adversarial_loop --mazes mazes/ --n-rounds 3
 """
 
-import argparse
+import enum
 import functools
 import json
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Annotated
 
 import equinox as eqx
+import typer
 import jax
 import jax.random as jr
 import mummymaze_rust
+import numpy as np
 import optax
 
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
-from src.train.augment import augment_dataset
+from src.train.augment import (
+  apply_dihedral_augmentation,
+  augment_dataset,
+)
 from src.train.dataset import load_bc_dataset
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
+from src.train.model import DEFAULT_ARCH, make_model
 from src.train.reporter import FileReporter, MetricsReporter
 from src.train.train_bc import train_epochs
 
@@ -60,6 +66,7 @@ def adversarial_loop(
   ga_generations: int = 50,
   ga_pop_size: int = 64,
   target_log_policy_wp: float = -1.0,
+  ga_seeds_per_gs: int = 100,
   archive_bfs_bins: int = 20,
   archive_states_bins: int = 20,
   grid_sizes: list[int] | None = None,
@@ -68,6 +75,8 @@ def adversarial_loop(
   arch: str = DEFAULT_ARCH,
   reporter: MetricsReporter | None = None,
   on_event: Callable[[dict], None] | None = None,
+  dihedral_augment: bool = False,
+  wandb_project: str | None = None,
 ) -> None:
   """Run the adversarial training loop.
 
@@ -75,6 +84,7 @@ def adversarial_loop(
     reporter: Training metrics reporter. Defaults to FileReporter.
     on_event: Callback for adversarial-specific events (round_start,
       ga_generation, archive_update, round_end, done).
+    wandb_project: If set, log training metrics to this W&B project.
   """
   if grid_sizes is None:
     grid_sizes = [6, 8, 10]
@@ -98,17 +108,29 @@ def adversarial_loop(
     n_val = int(ds.val_mask.sum())
     print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
 
+  if dihedral_augment:
+    banks = {gs: ds.bank for gs, ds in datasets.items()}
+    datasets = apply_dihedral_augmentation(
+      datasets,
+      sources,
+      banks,
+      maze_dir,
+    )
+
   # Initialize model
   key, model_key = jr.split(key)
   model = make_model(arch, model_key)
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
   print(f"Model: {n_params:,} parameters")
 
-  # Optimizer
-  steps_per_epoch = sum(
+  # Optimizer — step budget is based on initial dataset size.
+  # As the dataset grows from GA augmentation, later rounds will complete
+  # fewer epochs but the total step count (and LR schedule) stays fixed.
+  initial_steps_per_epoch = sum(
     int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
   )
-  total_steps = steps_per_epoch * epochs_per_round * n_rounds
+  steps_per_round = initial_steps_per_epoch * epochs_per_round
+  total_steps = steps_per_round * n_rounds
 
   schedule = optax.warmup_cosine_decay_schedule(
     init_value=lr * 0.1,
@@ -141,6 +163,30 @@ def adversarial_loop(
     }
   )
 
+  # wandb init
+  run_id = f"adversarial-{arch}-{seed}"
+  if wandb_project is not None:
+    import wandb
+
+    wandb.init(
+      project=wandb_project,
+      name=run_id,
+      config={
+        "mode": "adversarial",
+        "arch": arch,
+        "n_rounds": n_rounds,
+        "epochs_per_round": epochs_per_round,
+        "batch_size": batch_size,
+        "lr": lr,
+        "seed": seed,
+        "n_params": n_params,
+        "ga_generations": ga_generations,
+        "ga_pop_size": ga_pop_size,
+        "target_log_policy_wp": target_log_policy_wp,
+        "dihedral_augment": dihedral_augment,
+      },
+    )
+
   global_step = 0
   global_epoch = 0
   total_ga_levels = 0
@@ -161,6 +207,7 @@ def adversarial_loop(
     # --- Train Phase ---
     print(f"\n--- Training ({epochs_per_round} epochs) ---")
     round_ckpt_dir = checkpoint_dir / f"round{round_idx:03d}"
+    round_max_steps = global_step + steps_per_round
     model, opt_state, global_step, key = train_epochs(
       model,
       opt_state,
@@ -175,9 +222,11 @@ def adversarial_loop(
       key=key,
       epoch_offset=global_epoch,
       step_offset=global_step,
-      run_id=f"adversarial-{arch}-r{round_idx}",
+      wandb_project=wandb_project,
+      run_id=run_id,
       arch=arch,
       lr=lr,
+      max_steps=round_max_steps,
     )
     global_epoch += epochs_per_round
 
@@ -200,8 +249,17 @@ def adversarial_loop(
 
       print(f"\n  Grid size {gs}:")
 
-      # Use a subset of the training levels as seeds (batch-parse per .dat file)
-      gs_sources = sources[gs][:100]
+      # Sample 100 random train-only levels as GA seeds
+      bank = datasets[gs].bank
+      train_set = set(np.array(bank.train_indices).tolist())
+      all_sources = sources[gs]
+      train_sources = [
+        all_sources[i] for i in range(len(all_sources)) if i in train_set
+      ]
+      key, seed_key = jr.split(key)
+      n_seeds = min(ga_seeds_per_gs, len(train_sources))
+      perm = jr.permutation(seed_key, len(train_sources))[:n_seeds]
+      gs_sources = [train_sources[int(i)] for i in perm]
       by_stem: dict[str, list[int]] = {}
       for stem, sub in gs_sources:
         by_stem.setdefault(stem, []).append(sub)
@@ -295,10 +353,31 @@ def adversarial_loop(
 
     # --- Augment Phase ---
     print(f"\n--- Augmenting dataset with {len(round_ga_levels)} GA levels ---")
-    datasets = augment_dataset(datasets, round_ga_levels)
+    datasets = augment_dataset(
+      datasets,
+      round_ga_levels,
+      dihedral_augment=dihedral_augment,
+    )
     for gs, ds in sorted(datasets.items()):
       n_train = int(ds.train_mask.sum())
       print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
+
+    # Log adversarial-specific metrics to wandb
+    if wandb_project is not None:
+      import wandb
+
+      total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
+      total_train_levels = sum(len(ds.bank.train_indices) for ds in datasets.values())
+      wandb.log(
+        {
+          "adversarial/round": round_idx,
+          "adversarial/ga_levels_added": len(round_ga_levels),
+          "adversarial/total_ga_levels": total_ga_levels,
+          "adversarial/total_train_states": total_train_states,
+          "adversarial/total_train_levels": total_train_levels,
+        },
+        step=global_step,
+      )
 
     # Save archive state
     archive_path = round_ckpt_dir / "archive.json"
@@ -330,63 +409,69 @@ def adversarial_loop(
     }
   )
 
+  if wandb_project is not None:
+    import wandb
 
-def main() -> None:
-  parser = argparse.ArgumentParser(description="MAP-Elites adversarial training loop")
-  parser.add_argument(
-    "--mazes",
-    type=Path,
-    default=Path("mazes"),
-    help="Directory containing B-*.dat files",
-  )
-  parser.add_argument("--n-rounds", type=int, default=3)
-  parser.add_argument("--epochs-per-round", type=int, default=5)
-  parser.add_argument("--batch-size", type=int, default=1024)
-  parser.add_argument("--lr", type=float, default=3e-4)
-  parser.add_argument("--seed", type=int, default=0)
-  parser.add_argument("--ga-generations", type=int, default=50)
-  parser.add_argument("--ga-pop-size", type=int, default=64)
-  parser.add_argument("--target-log-wp", type=float, default=-1.0)
-  parser.add_argument("--archive-bfs-bins", type=int, default=20)
-  parser.add_argument("--archive-states-bins", type=int, default=20)
-  parser.add_argument("--grid-sizes", type=int, nargs="+", default=[6, 8, 10])
-  parser.add_argument(
-    "--checkpoint-dir",
-    type=Path,
-    default=Path("checkpoints/adversarial"),
-  )
-  parser.add_argument(
-    "--metrics-path",
-    type=Path,
-    default=Path("level_metrics_adversarial.json"),
-  )
-  parser.add_argument(
-    "--arch",
-    type=str,
-    default=DEFAULT_ARCH,
-    choices=sorted(MODEL_REGISTRY),
-    help=f"Model architecture (default: {DEFAULT_ARCH})",
-  )
-  args = parser.parse_args()
+    wandb.finish()
 
+
+class Arch(str, enum.Enum):
+  cnn = "cnn"
+  resnet = "resnet"
+
+
+def main(
+  mazes: Annotated[
+    Path, typer.Option(help="Directory containing B-*.dat files")
+  ] = Path("mazes"),
+  n_rounds: int = 3,
+  epochs_per_round: int = 5,
+  batch_size: int = 1024,
+  lr: float = 3e-4,
+  seed: int = 0,
+  ga_generations: int = 50,
+  ga_pop_size: int = 64,
+  target_log_wp: float = -1.0,
+  ga_seeds_per_gs: int = 100,
+  archive_bfs_bins: int = 20,
+  archive_states_bins: int = 20,
+  grid_sizes: Annotated[list[int], typer.Option(help="Grid sizes to train on")] = [
+    6,
+    8,
+    10,
+  ],
+  checkpoint_dir: Annotated[Path, typer.Option(help="Save checkpoints here")] = Path(
+    "checkpoints/adversarial"
+  ),
+  metrics_path: Path = Path("level_metrics_adversarial.json"),
+  arch: Annotated[Arch, typer.Option(help="Model architecture")] = Arch.cnn,
+  dihedral_augment: Annotated[
+    bool, typer.Option(help="Expand training set with dihedral variants")
+  ] = False,
+  wandb_project: Annotated[str | None, typer.Option(help="W&B project name")] = None,
+) -> None:
+  """MAP-Elites adversarial training loop."""
   adversarial_loop(
-    maze_dir=args.mazes,
-    n_rounds=args.n_rounds,
-    epochs_per_round=args.epochs_per_round,
-    batch_size=args.batch_size,
-    lr=args.lr,
-    seed=args.seed,
-    ga_generations=args.ga_generations,
-    ga_pop_size=args.ga_pop_size,
-    target_log_policy_wp=args.target_log_wp,
-    archive_bfs_bins=args.archive_bfs_bins,
-    archive_states_bins=args.archive_states_bins,
-    grid_sizes=args.grid_sizes,
-    checkpoint_dir=args.checkpoint_dir,
-    metrics_path=args.metrics_path,
-    arch=args.arch,
+    maze_dir=mazes,
+    n_rounds=n_rounds,
+    epochs_per_round=epochs_per_round,
+    batch_size=batch_size,
+    lr=lr,
+    seed=seed,
+    ga_generations=ga_generations,
+    ga_pop_size=ga_pop_size,
+    target_log_policy_wp=target_log_wp,
+    ga_seeds_per_gs=ga_seeds_per_gs,
+    archive_bfs_bins=archive_bfs_bins,
+    archive_states_bins=archive_states_bins,
+    grid_sizes=grid_sizes,
+    checkpoint_dir=checkpoint_dir,
+    metrics_path=metrics_path,
+    arch=arch.value,
+    dihedral_augment=dihedral_augment,
+    wandb_project=wandb_project,
   )
 
 
 if __name__ == "__main__":
-  main()
+  typer.run(main)

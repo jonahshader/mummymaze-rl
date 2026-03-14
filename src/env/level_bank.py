@@ -237,6 +237,13 @@ def _build_bank(
   )
 
 
+def dihedral_syms(has_gate: bool) -> list[int]:
+  """Valid non-identity dihedral symmetries for a level."""
+  if has_gate:
+    return [2, 4, 5]  # rot180, h_mirror, v_mirror
+  return [1, 2, 3, 4, 5, 6, 7]
+
+
 def load_all_levels(
   dat_dir: Path,
   val_fraction: float = 0.1,

@@ -1,13 +1,24 @@
 """Dataset augmentation: merge GA-generated levels into BC datasets."""
 
+import time
+from collections import defaultdict
+from pathlib import Path
+
 import jax.numpy as jnp
 import mummymaze_rust
 import numpy as np
 
-from src.env.level_bank import LevelBank
+from src.env.level_bank import LevelBank, dihedral_syms
 from src.env.level_load import exit_cell
 from src.env.types import MAX_MUMMIES, MAX_SCORPIONS, MAX_TRAPS
 from src.train.dataset import BCDataset, decode_action_masks
+
+
+def dihedral_variants(
+  level: mummymaze_rust.Level,
+) -> list[mummymaze_rust.Level]:
+  """Return all non-identity dihedral variants of a level."""
+  return [level.apply_dihedral(sym) for sym in dihedral_syms(level.has_gate)]
 
 
 def solve_levels(
@@ -145,10 +156,21 @@ def _extend_bank(bank: LevelBank, new_arrays: list[dict]) -> LevelBank:
 def augment_dataset(
   base: dict[int, BCDataset],
   new_levels: list[mummymaze_rust.Level],
+  dihedral_augment: bool = False,
 ) -> dict[int, BCDataset]:
-  """Append GA level data to existing datasets. New levels go to train set only."""
+  """Append GA level data to existing datasets. New levels go to train set only.
+
+  If dihedral_augment is True, each new level is expanded with all valid
+  dihedral variants before solving and merging.
+  """
   if not new_levels:
     return base
+
+  if dihedral_augment:
+    expanded = list(new_levels)
+    for lev in new_levels:
+      expanded.extend(dihedral_variants(lev))
+    new_levels = expanded
 
   # Solve all new levels
   solved_by_gs = solve_levels(new_levels)
@@ -215,3 +237,65 @@ def augment_dataset(
     )
 
   return result
+
+
+def expand_dihedral_train(
+  maze_dir: Path,
+  sources: dict[int, list[tuple[str, int]]],
+  banks: dict[int, LevelBank],
+) -> list[mummymaze_rust.Level]:
+  """Generate dihedral variants of train-only canonical levels.
+
+  Only expands levels in the train split to avoid leaking val data into
+  training. Parses canonical levels from .dat files, applies each valid
+  non-identity dihedral symmetry, and returns the expanded list.
+  """
+  # Build train-only source indices per grid_size
+  train_indices: dict[int, set[int]] = {}
+  for gs, bank in banks.items():
+    train_indices[gs] = set(np.array(bank.train_indices).tolist())
+
+  # Group source keys by file to avoid re-parsing the same .dat
+  by_file: dict[str, list[tuple[int, int, int]]] = defaultdict(list)
+  for gs, src_list in sources.items():
+    train_set = train_indices.get(gs, set())
+    for idx, (stem, sub) in enumerate(src_list):
+      if idx in train_set:
+        by_file[stem].append((sub, gs, idx))
+
+  variants: list[mummymaze_rust.Level] = []
+  for stem, entries in by_file.items():
+    dat_path = maze_dir / f"{stem}.dat"
+    rust_levels = mummymaze_rust.parse_file(str(dat_path))
+    for sub, _gs, _idx in entries:
+      variants.extend(dihedral_variants(rust_levels[sub]))
+
+  return variants
+
+
+def apply_dihedral_augmentation(
+  datasets: dict[int, BCDataset],
+  sources: dict[int, list[tuple[str, int]]],
+  banks: dict[int, LevelBank],
+  maze_dir: Path,
+  verbose: bool = True,
+) -> dict[int, BCDataset]:
+  """Expand training set with dihedral variants of train-only levels.
+
+  Generates non-identity dihedral variants, BFS-solves them, and merges
+  into the datasets. Val levels are not expanded.
+  """
+  if verbose:
+    print("Generating dihedral augmentations...")
+  t0 = time.time()
+  variants = expand_dihedral_train(maze_dir, sources, banks)
+  if verbose:
+    print(f"  {len(variants)} variants generated, solving...")
+  datasets = augment_dataset(datasets, variants)
+  if verbose:
+    print(f"  Dihedral augmentation done in {time.time() - t0:.1f}s")
+    for gs, ds in sorted(datasets.items()):
+      n_train = int(ds.train_mask.sum())
+      n_val = int(ds.val_mask.sum())
+      print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
+  return datasets

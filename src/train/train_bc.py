@@ -215,8 +215,13 @@ def train_epochs(
   arch: str = DEFAULT_ARCH,
   lr: float = 3e-4,
   level_metrics: bool = False,
+  max_steps: int | None = None,
 ) -> tuple[eqx.Module, optax.OptState, int, jax.Array]:
-  """Run training epochs. Returns (model, opt_state, final_step, key)."""
+  """Run training epochs. Returns (model, opt_state, final_step, key).
+
+  If max_steps is set, training stops once global_step reaches that limit,
+  even if not all epochs have completed.
+  """
   use_tqdm = isinstance(reporter, FileReporter)
 
   # Pre-extract train/val indices per grid_size
@@ -255,6 +260,8 @@ def train_epochs(
   for epoch_rel in range(epochs):
     if stop_requested:
       break
+    if max_steps is not None and global_step >= max_steps:
+      break
 
     epoch = epoch_offset + epoch_rel
     epoch_t0 = time.time()
@@ -287,10 +294,12 @@ def train_epochs(
       pbar = train_batches
     epoch_step = 0
     for gs, batch_idx, batch_idx_np in pbar:
-      # Check for stop command
+      # Check for stop command or step budget
       cmd = reporter.check_command()
       if cmd == "stop":
         stop_requested = True
+        break
+      if max_steps is not None and global_step >= max_steps:
         break
 
       ds = datasets[gs]
@@ -547,6 +556,7 @@ def train(
   epoch_offset: int = 0,
   step_offset: int = 0,
   arch: str = DEFAULT_ARCH,
+  dihedral_augment: bool = False,
 ) -> eqx.Module:
   """Main training loop."""
   if reporter is None:
@@ -591,6 +601,19 @@ def train(
       for gs, ds in sorted(datasets.items()):
         n_train = int(ds.train_mask.sum())
         print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
+
+  # Dihedral augmentation: expand train levels with rotations/reflections
+  if dihedral_augment:
+    from src.train.augment import apply_dihedral_augmentation
+
+    banks = {gs: ds.bank for gs, ds in datasets.items()}
+    datasets = apply_dihedral_augmentation(
+      datasets,
+      sources,
+      banks,
+      maze_dir,
+      verbose=use_tqdm,
+    )
 
   # Initialize model (or resume from checkpoint)
   if checkpoint is not None:
@@ -741,6 +764,9 @@ def main(
   epoch_offset: int = 0,
   step_offset: int = 0,
   arch: Annotated[Arch, typer.Option(help="Model architecture")] = Arch.cnn,
+  dihedral_augment: Annotated[
+    bool, typer.Option(help="Expand training set with dihedral variants")
+  ] = False,
 ) -> None:
   """Behavioral cloning for Mummy Maze."""
   if mode == Mode.subprocess:
@@ -764,6 +790,7 @@ def main(
       epoch_offset=epoch_offset,
       step_offset=step_offset,
       arch=arch.value,
+      dihedral_augment=dihedral_augment,
     )
   except Exception as e:
     if mode == Mode.subprocess:
