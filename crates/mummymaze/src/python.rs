@@ -584,14 +584,14 @@ fn best_actions_for_levels(py: Python<'_>, levels: Vec<PyRef<'_, PyLevel>>) -> P
 ///     level: Level to mutate
 ///     seed: RNG seed
 ///     w_wall, w_move_entity, w_move_player, w_add_entity, w_remove_entity,
-///     w_move_exit: relative mutation weights
+///     w_move_exit, w_move_gate: relative mutation weights
 ///     extra_wall_prob: probability of an extra wall flip after the primary mutation
 ///
 /// Returns a new mutated Level.
 #[pyfunction]
 #[pyo3(signature = (level, seed, w_wall=5.0, w_move_entity=3.0, w_move_player=2.0,
                     w_add_entity=1.0, w_remove_entity=1.0, w_move_exit=1.0,
-                    extra_wall_prob=0.3))]
+                    w_move_gate=1.0, extra_wall_prob=0.3))]
 fn mutate(
     level: &PyLevel,
     seed: u64,
@@ -601,6 +601,7 @@ fn mutate(
     w_add_entity: f64,
     w_remove_entity: f64,
     w_move_exit: f64,
+    w_move_gate: f64,
     extra_wall_prob: f64,
 ) -> PyLevel {
     use crate::ga::GaConfig;
@@ -613,6 +614,7 @@ fn mutate(
         w_add_entity,
         w_remove_entity,
         w_move_exit,
+        w_move_gate,
         extra_wall_prob,
         ..GaConfig::default()
     };
@@ -629,7 +631,7 @@ fn mutate(
 #[pyfunction]
 #[pyo3(signature = (levels, base_seed, w_wall=5.0, w_move_entity=3.0, w_move_player=2.0,
                     w_add_entity=1.0, w_remove_entity=1.0, w_move_exit=1.0,
-                    extra_wall_prob=0.3))]
+                    w_move_gate=1.0, extra_wall_prob=0.3))]
 fn mutate_batch(
     py: Python<'_>,
     levels: Vec<PyRef<'_, PyLevel>>,
@@ -640,6 +642,7 @@ fn mutate_batch(
     w_add_entity: f64,
     w_remove_entity: f64,
     w_move_exit: f64,
+    w_move_gate: f64,
     extra_wall_prob: f64,
 ) -> Vec<PyLevel> {
     use crate::ga::GaConfig;
@@ -652,6 +655,7 @@ fn mutate_batch(
         w_add_entity,
         w_remove_entity,
         w_move_exit,
+        w_move_gate,
         extra_wall_prob,
         ..GaConfig::default()
     };

@@ -4,16 +4,18 @@ use crate::parse::{Level, WALL_E, WALL_N, WALL_S, WALL_W};
 use rand::Rng;
 
 use super::CrossoverMode;
-use super::mutation::find_unoccupied_cell;
+use super::mutation::{find_unoccupied_cell, repair_gate};
 
 /// Dispatch crossover to the selected mode.
 pub fn crossover(a: &Level, b: &Level, rng: &mut impl Rng, mode: CrossoverMode) -> Level {
-    match mode {
+    let mut result = match mode {
         CrossoverMode::SwapEntities => crossover_swap_entities(a, b, rng),
         CrossoverMode::Region => crossover_region(a, b, rng),
         CrossoverMode::WallPatch => crossover_wall_patch(a, b, rng),
         CrossoverMode::FeatureLevel => crossover_feature_level(a, b, rng),
-    }
+    };
+    repair_gate(&mut result);
+    result
 }
 
 /// Pick flip randomly from either parent.

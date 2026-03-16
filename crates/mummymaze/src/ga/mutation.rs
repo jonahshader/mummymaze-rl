@@ -303,10 +303,72 @@ pub fn mutate_exit(level: &Level, rng: &mut impl Rng) -> Level {
     out
 }
 
+/// Move the gate to a random valid position and/or move the key.
+/// Gate must not be on the rightmost column (east edge would point off-grid).
+/// Returns None if the level has no gate.
+pub fn mutate_gate(level: &Level, rng: &mut impl Rng) -> Option<Level> {
+    if !level.has_gate {
+        return None;
+    }
+    let mut out = level.clone();
+    let n = level.grid_size;
+    let occupied = occupied_cells(&out, true);
+
+    // 50% chance to move gate, 50% chance to move key, or both
+    let move_gate = rng.random_bool(0.5);
+    let move_key = !move_gate || rng.random_bool(0.3);
+
+    if move_gate {
+        // Pick a random cell with col < n-1 (so east edge is interior)
+        for _ in 0..20 {
+            let r = rng.random_range(0..n);
+            let c = rng.random_range(0..n - 1); // col < n-1
+            out.gate_row = r;
+            out.gate_col = c;
+            break;
+        }
+    }
+
+    if move_key {
+        if let Some((nr, nc)) = find_unoccupied_cell(n, &occupied, rng) {
+            out.key_row = nr;
+            out.key_col = nc;
+        }
+    }
+
+    Some(out)
+}
+
+/// Repair invalid gate state after mutation/crossover.
+///
+/// Fixes:
+/// 1. Gate on rightmost column (east edge points off-grid) — move inward
+/// 2. East wall at gate cell (permanently blocks, hiding the gate) — remove wall
+pub fn repair_gate(level: &mut Level) {
+    if !level.has_gate {
+        return;
+    }
+    let n = level.grid_size;
+
+    // Fix gate on rightmost column
+    if level.gate_col >= n - 1 {
+        level.gate_col = n - 2;
+    }
+
+    // Remove east wall at gate cell (and matching west wall on neighbor)
+    let gate_idx = (level.gate_col + level.gate_row * 10) as usize;
+    if level.walls[gate_idx] & WALL_E != 0 {
+        level.walls[gate_idx] &= !WALL_E;
+        let neighbor_idx = (level.gate_col + 1 + level.gate_row * 10) as usize;
+        level.walls[neighbor_idx] &= !WALL_W;
+    }
+}
+
 /// Apply a random mutation operator using weighted probabilities from config.
 pub fn mutate_with_config(level: &Level, rng: &mut impl Rng, config: &GaConfig) -> Level {
     let total = config.w_wall + config.w_move_entity + config.w_move_player
-        + config.w_add_entity + config.w_remove_entity + config.w_move_exit;
+        + config.w_add_entity + config.w_remove_entity + config.w_move_exit
+        + config.w_move_gate;
     let r: f64 = rng.random::<f64>() * total;
 
     let mut cumulative = config.w_wall;
@@ -329,7 +391,12 @@ pub fn mutate_with_config(level: &Level, rng: &mut impl Rng, config: &GaConfig) 
                     if r < cumulative {
                         mutate_remove_entity(level, rng).unwrap_or_else(|| level.clone())
                     } else {
-                        mutate_exit(level, rng)
+                        cumulative += config.w_move_exit;
+                        if r < cumulative {
+                            mutate_exit(level, rng)
+                        } else {
+                            mutate_gate(level, rng).unwrap_or_else(|| level.clone())
+                        }
                     }
                 }
             }
@@ -340,5 +407,6 @@ pub fn mutate_with_config(level: &Level, rng: &mut impl Rng, config: &GaConfig) 
         result = mutate_wall(&result, rng);
     }
 
+    repair_gate(&mut result);
     result
 }

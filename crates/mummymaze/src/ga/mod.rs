@@ -90,6 +90,7 @@ pub struct GaConfig {
     pub w_add_entity: f64,
     pub w_remove_entity: f64,
     pub w_move_exit: f64,
+    pub w_move_gate: f64,
     /// Probability of an extra wall mutation after the primary mutation.
     pub extra_wall_prob: f64,
     /// Fitness expression (math formula over metric variables).
@@ -114,6 +115,7 @@ impl Default for GaConfig {
             w_add_entity: 1.0,
             w_remove_entity: 1.0,
             w_move_exit: 1.0,
+            w_move_gate: 1.0,
             extra_wall_prob: 0.3,
             fitness_expr: fitness::PRESET_DEFAULT.to_string(),
             eval_batch_size: 4096,
