@@ -66,7 +66,8 @@ both the architectures and the levels.
 ## Future Directions
 
 ### Architectures
-- **Transformer** — ViT-style over per-cell tokens, memory component for partial observability
+- **ResNet + self-attention** (`resnet-attn`) — implemented. ResNet stem for local features, self-attention layers for global reasoning
+- **Pure transformer** — ViT-style over per-cell tokens, memory component for partial observability
 - **Deep residual networks** — "1000 Layer Networks for Self-Supervised RL" (depth as implicit planning)
 - **Continuous Thought Machines** — Sakana AI CTM (adaptive computation, "think longer" on harder states)
 
@@ -108,9 +109,9 @@ Needed changes:
 - **Unified model selection**: the active model/run is shared across training, GA
   evaluation, and the level play tab's policy probability visualizer.
 
-Future: self-registering model registry via `@register_model` decorator that exposes
-per-architecture hyperparameters, so the viewer can build config UI dynamically
-without knowing model types ahead of time (see memory for sketch).
+Done: self-registering model registry via `@register_model` decorator in
+`src/train/model.py`. New architectures just decorate their class to appear
+in the registry automatically.
 
 ## Backlog / Nice-to-have
 

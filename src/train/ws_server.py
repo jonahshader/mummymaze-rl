@@ -19,6 +19,7 @@ import mummymaze_rust
 import websockets
 from websockets.asyncio.server import ServerConnection
 
+from src.train.model import DEFAULT_ARCH
 from src.train.model_server import ModelServer
 from src.train.reporter import WebSocketReporter
 
@@ -389,7 +390,7 @@ async def serve(
   port: int = 8765,
   host: str = "localhost",
   checkpoint: Path | None = None,
-  arch: str = "cnn",
+  arch: str = DEFAULT_ARCH,
 ) -> None:
   """Start the WebSocket server."""
   server = ModelServer(maze_dir, checkpoint=checkpoint, arch=arch)
@@ -418,7 +419,7 @@ def main() -> None:
   parser.add_argument("--port", type=int, default=8765)
   parser.add_argument("--host", type=str, default="localhost")
   parser.add_argument("--checkpoint", type=Path, default=None)
-  parser.add_argument("--arch", type=str, default="cnn")
+  parser.add_argument("--arch", type=str, default=DEFAULT_ARCH)
   parser.add_argument(
     "-v",
     "--verbose",

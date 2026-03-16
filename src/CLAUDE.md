@@ -12,7 +12,7 @@
   - `level_load.py` / `level_bank.py` — level loading and batched storage
 - `train/` — behavioral cloning pipeline
   - `train_bc.py` — training loop (supervised, BFS-optimal targets)
-  - `model.py` — CNN model (equinox)
+  - `model.py` — model architectures (equinox, `@register_model` decorator)
   - `dataset.py` — dataset construction from Rust solver
   - `reporter.py` — metrics reporting (level_metrics.json, wandb)
 - `baselines/random_agent.py` — random policy baseline

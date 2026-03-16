@@ -7,7 +7,6 @@ Usage:
   uv run python -m src.train.adversarial_loop --mazes mazes/ --n-rounds 3
 """
 
-import enum
 import functools
 import json
 import time
@@ -15,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
+import click
 import equinox as eqx
 import typer
 import jax
@@ -31,7 +31,7 @@ from src.train.augment import (
 )
 from src.train.dataset import load_bc_dataset
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
-from src.train.model import DEFAULT_ARCH, make_model
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
 from src.train.reporter import FileReporter, MetricsReporter
 from src.train.train_bc import train_epochs
 
@@ -456,11 +456,6 @@ def adversarial_loop(
     wandb.finish()
 
 
-class Arch(str, enum.Enum):
-  cnn = "cnn"
-  resnet = "resnet"
-
-
 def main(
   mazes: Annotated[
     Path, typer.Option(help="Directory containing B-*.dat files")
@@ -485,7 +480,13 @@ def main(
     "checkpoints/adversarial"
   ),
   metrics_path: Path = Path("level_metrics_adversarial.json"),
-  arch: Annotated[Arch, typer.Option(help="Model architecture")] = Arch.cnn,
+  arch: Annotated[
+    str,
+    typer.Option(
+      help="Model architecture",
+      click_type=click.Choice(sorted(MODEL_REGISTRY)),
+    ),
+  ] = DEFAULT_ARCH,
   dihedral_augment: Annotated[
     bool, typer.Option(help="Expand training set with dihedral variants")
   ] = False,
@@ -508,7 +509,7 @@ def main(
     grid_sizes=grid_sizes,
     checkpoint_dir=checkpoint_dir,
     metrics_path=metrics_path,
-    arch=arch.value,
+    arch=arch,
     dihedral_augment=dihedral_augment,
     wandb_project=wandb_project,
   )

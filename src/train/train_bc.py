@@ -17,6 +17,7 @@ import optax
 from collections.abc import Callable
 from typing import Any
 
+import click
 import typer
 from tqdm import tqdm
 
@@ -24,7 +25,7 @@ from jaxtyping import Array, Float, Int
 
 from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
-from src.train.model import DEFAULT_ARCH, make_model
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
 from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
 
 
@@ -734,11 +735,6 @@ class Mode(str, enum.Enum):
   subprocess = "subprocess"
 
 
-class Arch(str, enum.Enum):
-  cnn = "cnn"
-  resnet = "resnet"
-
-
 def main(
   mazes: Annotated[
     Path, typer.Option(help="Directory containing B-*.dat files")
@@ -763,7 +759,13 @@ def main(
   ] = None,
   epoch_offset: int = 0,
   step_offset: int = 0,
-  arch: Annotated[Arch, typer.Option(help="Model architecture")] = Arch.cnn,
+  arch: Annotated[
+    str,
+    typer.Option(
+      help="Model architecture",
+      click_type=click.Choice(sorted(MODEL_REGISTRY)),
+    ),
+  ] = DEFAULT_ARCH,
   dihedral_augment: Annotated[
     bool, typer.Option(help="Expand training set with dihedral variants")
   ] = False,
@@ -789,7 +791,7 @@ def main(
       augment_levels=augment_levels,
       epoch_offset=epoch_offset,
       step_offset=step_offset,
-      arch=arch.value,
+      arch=arch,
       dihedral_augment=dihedral_augment,
     )
   except Exception as e:

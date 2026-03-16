@@ -13,7 +13,7 @@ import equinox as eqx
 import jax
 import optax
 
-from src.train.model import make_model
+from src.train.model import DEFAULT_ARCH, make_model
 
 
 def save_checkpoint(
@@ -101,7 +101,7 @@ def load_checkpoint(
   state_path = path / "training_state.json"
   state = json.loads(state_path.read_text())
 
-  resolved_arch = arch or state.get("arch", "cnn")
+  resolved_arch = arch or state.get("arch", DEFAULT_ARCH)
   model = make_model(resolved_arch, jax.random.key(0))
   model = eqx.tree_deserialise_leaves(path / "model.eqx", model)
 
