@@ -46,19 +46,22 @@ class ModelServer:
     maze_dir: Path,
     checkpoint: Path | None = None,
     arch: str = DEFAULT_ARCH,
+    hparams: dict[str, object] | None = None,
   ) -> None:
     self.maze_dir = maze_dir
     self.arch = arch
+    self.hparams: dict[str, object] = hparams or {}
 
     # Initialize model
     if checkpoint is not None and checkpoint.exists():
       log.info("loading checkpoint: %s", checkpoint)
-      ckpt = load_checkpoint(checkpoint, arch=arch)
+      ckpt = load_checkpoint(checkpoint, arch=arch, hparams=hparams)
       self.model = ckpt.model
       self.arch = ckpt.arch
+      self.hparams = ckpt.hparams
     else:
       log.info("starting with random initialization")
-      self.model = make_model(arch, jax.random.key(0))
+      self.model = make_model(arch, jax.random.key(0), **self.hparams)
 
     self._obs_and_forward = self._make_forward(self.model)
 
@@ -302,6 +305,7 @@ class ModelServer:
       arch=self.arch,
       lr=lr,
       level_metrics=True,
+      hparams=self.hparams,
     )
 
     reporter.report_done()

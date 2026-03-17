@@ -25,7 +25,7 @@ from jaxtyping import Array, Float, Int
 
 from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model, parse_hparams
 from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
 
 
@@ -217,6 +217,7 @@ def train_epochs(
   lr: float = 3e-4,
   level_metrics: bool = False,
   max_steps: int | None = None,
+  hparams: dict[str, object] | None = None,
 ) -> tuple[eqx.Module, optax.OptState, int, jax.Array]:
   """Run training epochs. Returns (model, opt_state, final_step, key).
 
@@ -423,6 +424,7 @@ def train_epochs(
         key=key,
         lr=lr,
         batch_size=batch_size,
+        hparams=hparams,
       )
 
     # Per-level metrics (expensive — disabled by default, viewer enables it)
@@ -558,6 +560,7 @@ def train(
   step_offset: int = 0,
   arch: str = DEFAULT_ARCH,
   dihedral_augment: bool = False,
+  hparams: dict[str, object] | None = None,
 ) -> eqx.Module:
   """Main training loop."""
   if reporter is None:
@@ -617,12 +620,14 @@ def train(
     )
 
   # Initialize model (or resume from checkpoint)
+  model_hps = hparams or {}
   if checkpoint is not None:
     if use_tqdm:
       print(f"Loading checkpoint: {checkpoint}")
-    ckpt = load_checkpoint(checkpoint, arch=arch)
+    ckpt = load_checkpoint(checkpoint, arch=arch, hparams=model_hps or None)
     model = ckpt.model
     arch = ckpt.arch
+    model_hps = ckpt.hparams
     # Use checkpoint's training state for resume if no explicit offsets given
     if epoch_offset == 0 and ckpt.epoch > 0:
       epoch_offset = ckpt.epoch
@@ -632,7 +637,7 @@ def train(
       key = ckpt.key
   else:
     key, model_key = jr.split(key)
-    model = make_model(arch, model_key)
+    model = make_model(arch, model_key, **model_hps)
 
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
   if use_tqdm:
@@ -718,6 +723,7 @@ def train(
     run_id=run_id,
     arch=arch,
     lr=lr,
+    hparams=model_hps,
   )
 
   reporter.report_done()
@@ -769,12 +775,18 @@ def main(
   dihedral_augment: Annotated[
     bool, typer.Option(help="Expand training set with dihedral variants")
   ] = False,
+  hparam: Annotated[
+    list[str] | None,
+    typer.Option(help="Model hparam as key=value (repeatable)"),
+  ] = None,
 ) -> None:
   """Behavioral cloning for Mummy Maze."""
   if mode == Mode.subprocess:
     reporter: FileReporter | StdioReporter = StdioReporter()
   else:
     reporter = FileReporter(metrics_path)
+
+  hparams = parse_hparams(arch, hparam or [])
 
   try:
     train(
@@ -793,6 +805,7 @@ def main(
       step_offset=step_offset,
       arch=arch,
       dihedral_augment=dihedral_augment,
+      hparams=hparams,
     )
   except Exception as e:
     if mode == Mode.subprocess:

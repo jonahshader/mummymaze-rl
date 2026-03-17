@@ -19,7 +19,7 @@ import mummymaze_rust
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from src.train.model import DEFAULT_ARCH
+from src.train.model import DEFAULT_ARCH, parse_hparams
 from src.train.model_server import ModelServer
 from src.train.reporter import WebSocketReporter
 
@@ -391,9 +391,10 @@ async def serve(
   host: str = "localhost",
   checkpoint: Path | None = None,
   arch: str = DEFAULT_ARCH,
+  hparams: dict[str, object] | None = None,
 ) -> None:
   """Start the WebSocket server."""
-  server = ModelServer(maze_dir, checkpoint=checkpoint, arch=arch)
+  server = ModelServer(maze_dir, checkpoint=checkpoint, arch=arch, hparams=hparams)
   handler = WsHandler(server)
 
   log.info("starting WebSocket server on %s:%d", host, port)
@@ -421,6 +422,12 @@ def main() -> None:
   parser.add_argument("--checkpoint", type=Path, default=None)
   parser.add_argument("--arch", type=str, default=DEFAULT_ARCH)
   parser.add_argument(
+    "--hparam",
+    action="append",
+    default=[],
+    help="Model hparam as key=value (repeatable)",
+  )
+  parser.add_argument(
     "-v",
     "--verbose",
     action="store_true",
@@ -433,6 +440,8 @@ def main() -> None:
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
   )
 
+  hparams = parse_hparams(args.arch, args.hparam)
+
   asyncio.run(
     serve(
       args.mazes,
@@ -440,6 +449,7 @@ def main() -> None:
       host=args.host,
       checkpoint=args.checkpoint,
       arch=args.arch,
+      hparams=hparams,
     )
   )
 

@@ -1,5 +1,6 @@
 """Model architectures for behavioral cloning on Mummy Maze observations."""
 
+import inspect
 from collections.abc import Callable
 
 import equinox as eqx
@@ -9,13 +10,13 @@ from jaxtyping import Array, Float, PRNGKeyArray
 
 # All model classes must:
 #   - Be eqx.Module subclasses
-#   - Accept (key: PRNGKeyArray) as sole __init__ arg
+#   - Accept (key: PRNGKeyArray) as sole __init__ arg (plus optional **hparams)
 #   - Accept (x: Float[Array, "10 H W"]) and return Float[Array, "5"]
 #   - Work for all grid sizes (6/8/10) via global average pooling
 
 # --- Model registry ---
 
-ModelFactory = Callable[[PRNGKeyArray], eqx.Module]
+ModelFactory = Callable[..., eqx.Module]
 
 MODEL_REGISTRY: dict[str, ModelFactory] = {}
 
@@ -32,22 +33,77 @@ def register_model(name: str) -> Callable[[type[eqx.Module]], type[eqx.Module]]:
   return decorator
 
 
-def make_model(arch: str, key: PRNGKeyArray) -> eqx.Module:
-  """Create a model by architecture name.
+def make_model(arch: str, key: PRNGKeyArray, **hparams: object) -> eqx.Module:
+  """Create a model by architecture name, forwarding hparams to __init__.
 
   Raises KeyError with available architectures if name is unknown.
   """
   if arch not in MODEL_REGISTRY:
     available = ", ".join(sorted(MODEL_REGISTRY))
     raise KeyError(f"Unknown architecture {arch!r}. Available: {available}")
-  return MODEL_REGISTRY[arch](key)
+  return MODEL_REGISTRY[arch](key, **hparams)
+
+
+def model_hparams(arch: str) -> dict[str, inspect.Parameter]:
+  """Return the optional hparams (with defaults) for an architecture.
+
+  Excludes `self` and `key` — returns only keyword-only params that
+  the model's __init__ accepts beyond the required PRNG key.
+  """
+  if arch not in MODEL_REGISTRY:
+    return {}
+  sig = inspect.signature(MODEL_REGISTRY[arch].__init__)
+  return {
+    name: param
+    for name, param in sig.parameters.items()
+    if name not in ("self", "key") and param.default is not inspect.Parameter.empty
+  }
+
+
+def parse_hparams(arch: str, raw: list[str]) -> dict[str, object]:
+  """Parse CLI key=value strings into typed hparams for an architecture.
+
+  Uses the model's __init__ type hints to coerce string values.
+  """
+  available = model_hparams(arch)
+  result: dict[str, object] = {}
+  for item in raw:
+    if "=" not in item:
+      raise ValueError(f"Invalid hparam format {item!r}, expected key=value")
+    k, v = item.split("=", 1)
+    if k not in available:
+      valid = ", ".join(sorted(available)) or "(none)"
+      raise ValueError(f"Unknown hparam {k!r} for {arch!r}. Available: {valid}")
+    hint = available[k].annotation
+    if (
+      hint is bool
+      or hint is inspect.Parameter.empty
+      and isinstance(available[k].default, bool)
+    ):
+      result[k] = v.lower() in ("true", "1", "yes")
+    elif hint is int:
+      result[k] = int(v)
+    elif hint is float:
+      result[k] = float(v)
+    else:
+      result[k] = v
+  return result
 
 
 # --- Shared building blocks ---
 
 
 class ResNetStem(eqx.Module):
-  """Conv stem + N residual blocks. Shared by ResNet and ResNet+Attention."""
+  """Conv stem + N residual blocks. Shared by ResNet and ResNet+Attention.
+
+  Args:
+    n_blocks: Number of residual blocks.
+    channels: Channel width for all conv layers (must be divisible by 8).
+    keys: Pre-split PRNG keys (needs 2*n_blocks + 1).
+    attn_res: When True, replaces standard residual connections with Attention
+      Residuals (Kimi Team, 2025): each block's input is a learned softmax-
+      weighted sum of all previous block outputs.
+  """
 
   stem: eqx.nn.Conv2d
   stem_norm: eqx.nn.GroupNorm
@@ -55,31 +111,101 @@ class ResNetStem(eqx.Module):
   res_norm1: list[eqx.nn.GroupNorm]
   res_conv2: list[eqx.nn.Conv2d]
   res_norm2: list[eqx.nn.GroupNorm]
+  attn_res: bool = eqx.field(static=True)
+  n_blocks: int = eqx.field(static=True)
+  channels: int = eqx.field(static=True)
+  ar_queries: list[Array] | None
 
-  def __init__(self, n_blocks: int, keys: list) -> None:
-    self.stem = eqx.nn.Conv2d(10, 64, 3, padding=1, key=keys[0])
-    self.stem_norm = eqx.nn.GroupNorm(8, 64)
+  def __init__(
+    self,
+    n_blocks: int,
+    keys: list,
+    *,
+    channels: int = 64,
+    attn_res: bool = False,
+  ) -> None:
+    self.n_blocks = n_blocks
+    self.channels = channels
+    self.attn_res = attn_res
+
+    self.stem = eqx.nn.Conv2d(10, channels, 3, padding=1, key=keys[0])
+    self.stem_norm = eqx.nn.GroupNorm(8, channels)
 
     self.res_conv1 = []
     self.res_norm1 = []
     self.res_conv2 = []
     self.res_norm2 = []
     for i in range(n_blocks):
-      self.res_conv1.append(eqx.nn.Conv2d(64, 64, 3, padding=1, key=keys[1 + 2 * i]))
-      self.res_norm1.append(eqx.nn.GroupNorm(8, 64))
-      self.res_conv2.append(eqx.nn.Conv2d(64, 64, 3, padding=1, key=keys[2 + 2 * i]))
-      self.res_norm2.append(eqx.nn.GroupNorm(8, 64))
+      self.res_conv1.append(
+        eqx.nn.Conv2d(channels, channels, 3, padding=1, key=keys[1 + 2 * i])
+      )
+      self.res_norm1.append(eqx.nn.GroupNorm(8, channels))
+      self.res_conv2.append(
+        eqx.nn.Conv2d(channels, channels, 3, padding=1, key=keys[2 + 2 * i])
+      )
+      self.res_norm2.append(eqx.nn.GroupNorm(8, channels))
 
-  def __call__(self, x: Float[Array, "10 H W"]) -> Float[Array, "64 H W"]:
+    if attn_res:
+      # Queries for blocks 1..n_blocks-1 (block 0 trivially gets v_0)
+      # plus one final query for output aggregation. Init to zero so
+      # initial attention weights are uniform (paper Section 5).
+      self.ar_queries = [jnp.zeros(channels) for _ in range(n_blocks)]
+    else:
+      self.ar_queries = None
+
+  def _ar_aggregate(
+    self,
+    query: Float[Array, "C"],
+    values: list[Float[Array, "C H W"]],
+  ) -> Float[Array, "C H W"]:
+    """Depth-wise softmax attention over previous block outputs."""
+    v_stack = jnp.stack(values)  # (L, C, H, W)
+    # RMSNorm keys over channel dim
+    rms = jnp.sqrt(jnp.mean(v_stack**2, axis=1, keepdims=True) + 1e-6)  # (L, 1, H, W)
+    keys = v_stack / rms  # (L, C, H, W)
+    # Dot product: query (C,) against each key (C, H, W) -> (L, H, W)
+    logits = jnp.einsum("d, l d h w -> l h w", query, keys)
+    weights = jax.nn.softmax(logits, axis=0)  # (L, H, W)
+    return jnp.einsum("l h w, l d h w -> d h w", weights, v_stack)
+
+  def __call__(self, x: Float[Array, "10 H W"]) -> Float[Array, "C H W"]:
     x = jax.nn.gelu(self.stem_norm(self.stem(x)))
-    for c1, n1, c2, n2 in zip(
-      self.res_conv1, self.res_norm1, self.res_conv2, self.res_norm2
+
+    if not self.attn_res:
+      # Standard residual connections
+      for c1, n1, c2, n2 in zip(
+        self.res_conv1, self.res_norm1, self.res_conv2, self.res_norm2
+      ):
+        residual = x
+        x = jax.nn.gelu(n1(c1(x)))
+        x = n2(c2(x))
+        x = jax.nn.gelu(x + residual)
+      return x
+
+    # Attention Residuals: each block's input is a learned weighted
+    # sum of all previous block outputs (Full AttnRes, L=n_blocks).
+    assert self.ar_queries is not None
+    values: list[Float[Array, "C H W"]] = [x]  # v_0 = stem output
+
+    for i, (c1, n1, c2, n2) in enumerate(
+      zip(
+        self.res_conv1,
+        self.res_norm1,
+        self.res_conv2,
+        self.res_norm2,
+      )
     ):
-      residual = x
-      x = jax.nn.gelu(n1(c1(x)))
-      x = n2(c2(x))
-      x = jax.nn.gelu(x + residual)
-    return x
+      # Block 0 trivially gets v_0; blocks 1+ aggregate over history
+      if i > 0:
+        x = self._ar_aggregate(self.ar_queries[i - 1], values)
+
+      # Block transformation (no skip connection — AttnRes replaces it)
+      v = jax.nn.gelu(n1(c1(x)))
+      v = n2(c2(v))
+      values.append(v)
+
+    # Final aggregation over all values, then activate
+    return jax.nn.gelu(self._ar_aggregate(self.ar_queries[self.n_blocks - 1], values))
 
 
 # --- Architectures ---
@@ -170,20 +296,17 @@ class MazeResNet(eqx.Module):
 class MazeResNetAttn(eqx.Module):
   """ResNet stem + multi-head self-attention for global reasoning.
 
-  Architecture:
-    Conv2d(10->64, 3x3) -> GroupNorm -> GELU
-    4x ResBlock(64->64): Conv->GN->GELU->Conv->GN + skip -> GELU
-    Conv2d(64->128, 1x1) -> GroupNorm -> GELU
-    2x SelfAttention(128, 4 heads) with pre-norm residual
-    GlobalAvgPool -> Linear(128->5)
+  Controlled by a single `width` multiplier (default 2):
+    res_ch = 32 * width     (ResNet channel width)
+    res_blocks = 2 * width  (number of residual blocks)
+    d_model = 64 * width    (attention dimension)
+    attn_blocks = width     (number of self-attention blocks)
+    n_heads = 4             (fixed)
 
-  The ResNet stem extracts local features (walls, entities). Self-attention
-  layers then reason globally over the spatial feature map — every cell can
-  attend to every other cell in a single layer, enabling relational reasoning
-  about connectivity, threats, and paths that CNNs require many layers for.
+  width=1: ~80K params, width=2: ~577K (default), width=3: ~1.8M, width=4: ~4.2M
 
-  Grid-size-agnostic: attention operates on (H*W) tokens, no fixed positional
-  encoding needed since the conv stem already encodes spatial structure.
+  Grid-size-agnostic: conv stem uses global-average-pool-compatible spatial
+  ops, attention operates on (H*W) tokens with no fixed positional encoding.
   """
 
   body: ResNetStem
@@ -200,10 +323,17 @@ class MazeResNetAttn(eqx.Module):
   n_heads: int = eqx.field(static=True)
   d_model: int = eqx.field(static=True)
 
-  def __init__(self, key: PRNGKeyArray) -> None:
-    n_res_blocks = 4
-    n_attn_blocks = 2
-    d_model = 128
+  def __init__(
+    self,
+    key: PRNGKeyArray,
+    *,
+    width: int = 2,
+    attn_res: bool = False,
+  ) -> None:
+    res_ch = 32 * width
+    n_res_blocks = 2 * width
+    d_model = 64 * width
+    n_attn_blocks = width
     n_heads = 4
 
     self.d_model = d_model
@@ -212,12 +342,12 @@ class MazeResNetAttn(eqx.Module):
     n_keys = 2 * n_res_blocks + 4 * n_attn_blocks + 3
     keys = jax.random.split(key, n_keys)
 
-    # ResNet stem (uses first 2*n_res_blocks + 1 keys)
-    self.body = ResNetStem(n_res_blocks, keys)
+    # ResNet stem (optionally with Attention Residuals)
+    self.body = ResNetStem(n_res_blocks, keys, channels=res_ch, attn_res=attn_res)
     ki = 2 * n_res_blocks + 1
 
     # 1x1 projection to attention dimension
-    self.proj = eqx.nn.Conv2d(64, d_model, 1, key=keys[ki])
+    self.proj = eqx.nn.Conv2d(res_ch, d_model, 1, key=keys[ki])
     ki += 1
     self.proj_norm = eqx.nn.GroupNorm(8, d_model)
 

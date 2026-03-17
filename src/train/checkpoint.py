@@ -27,13 +27,14 @@ def save_checkpoint(
   key: jax.Array,
   lr: float,
   batch_size: int,
+  hparams: dict[str, object] | None = None,
 ) -> None:
   """Save a full checkpoint directory."""
   path.mkdir(parents=True, exist_ok=True)
   eqx.tree_serialise_leaves(path / "model.eqx", model)
   eqx.tree_serialise_leaves(path / "opt_state.eqx", opt_state)
 
-  state = {
+  state: dict[str, object] = {
     "epoch": epoch,
     "global_step": global_step,
     "arch": arch,
@@ -41,6 +42,8 @@ def save_checkpoint(
     "batch_size": batch_size,
     "rng_key": jax.random.key_data(key).tolist(),
   }
+  if hparams:
+    state["hparams"] = hparams
   (path / "training_state.json").write_text(json.dumps(state, indent=2))
 
 
@@ -56,6 +59,7 @@ class CheckpointData:
     "key",
     "lr",
     "batch_size",
+    "hparams",
   )
 
   def __init__(
@@ -68,6 +72,7 @@ class CheckpointData:
     key: jax.Array | None,
     lr: float,
     batch_size: int,
+    hparams: dict[str, object] | None = None,
   ) -> None:
     self.model = model
     self.opt_state = opt_state
@@ -77,6 +82,7 @@ class CheckpointData:
     self.key = key
     self.lr = lr
     self.batch_size = batch_size
+    self.hparams = hparams or {}
 
   @property
   def has_optimizer(self) -> bool:
@@ -87,6 +93,7 @@ def load_checkpoint(
   path: Path,
   arch: str | None = None,
   optimizer: optax.GradientTransformation | None = None,
+  hparams: dict[str, object] | None = None,
 ) -> CheckpointData:
   """Load a checkpoint directory.
 
@@ -97,12 +104,14 @@ def load_checkpoint(
     optimizer: If provided and the checkpoint has opt_state.eqx, the
       optimizer state is deserialized using this as the reference structure.
       If None, optimizer state is skipped.
+    hparams: Model hparams override. If None, read from training_state.json.
   """
   state_path = path / "training_state.json"
   state = json.loads(state_path.read_text())
 
   resolved_arch = arch or state.get("arch", DEFAULT_ARCH)
-  model = make_model(resolved_arch, jax.random.key(0))
+  resolved_hparams = hparams if hparams is not None else state.get("hparams", {})
+  model = make_model(resolved_arch, jax.random.key(0), **resolved_hparams)
   model = eqx.tree_deserialise_leaves(path / "model.eqx", model)
 
   opt_state = None
@@ -127,6 +136,7 @@ def load_checkpoint(
     key=key,
     lr=state.get("lr", 3e-4),
     batch_size=state.get("batch_size", 1024),
+    hparams=resolved_hparams,
   )
 
 

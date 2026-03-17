@@ -31,7 +31,7 @@ from src.train.augment import (
 )
 from src.train.dataset import load_bc_dataset
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model, parse_hparams
 from src.train.reporter import FileReporter, MetricsReporter
 from src.train.train_bc import train_epochs
 
@@ -77,6 +77,7 @@ def adversarial_loop(
   on_event: Callable[[dict], None] | None = None,
   dihedral_augment: bool = False,
   wandb_project: str | None = None,
+  hparams: dict[str, object] | None = None,
 ) -> None:
   """Run the adversarial training loop.
 
@@ -119,7 +120,7 @@ def adversarial_loop(
 
   # Initialize model
   key, model_key = jr.split(key)
-  model = make_model(arch, model_key)
+  model = make_model(arch, model_key, **(hparams or {}))
   n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
   print(f"Model: {n_params:,} parameters")
 
@@ -227,6 +228,7 @@ def adversarial_loop(
       arch=arch,
       lr=lr,
       max_steps=round_max_steps,
+      hparams=hparams,
     )
     global_epoch += epochs_per_round
 
@@ -491,8 +493,13 @@ def main(
     bool, typer.Option(help="Expand training set with dihedral variants")
   ] = False,
   wandb_project: Annotated[str | None, typer.Option(help="W&B project name")] = None,
+  hparam: Annotated[
+    list[str] | None,
+    typer.Option(help="Model hparam as key=value (repeatable)"),
+  ] = None,
 ) -> None:
   """MAP-Elites adversarial training loop."""
+  hparams = parse_hparams(arch, hparam or [])
   adversarial_loop(
     maze_dir=mazes,
     n_rounds=n_rounds,
@@ -512,6 +519,7 @@ def main(
     arch=arch,
     dihedral_augment=dihedral_augment,
     wandb_project=wandb_project,
+    hparams=hparams,
   )
 
 
