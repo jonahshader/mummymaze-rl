@@ -6,7 +6,6 @@ by callers.
 """
 
 import functools
-import json
 import logging
 import threading
 import time
@@ -18,15 +17,17 @@ import jax
 import jax.random as jr
 import mummymaze_rust
 import numpy as np
-import optax
 from scipy.special import softmax as scipy_softmax
 
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
+from src.train.callbacks import make_checkpoint_fn
 from src.train.checkpoint import load_checkpoint, load_model_weights
+from src.train.config import TrainConfig, TrainState
 from src.train.dataset import BCDataset, load_bc_dataset
 from src.train.ga import level_to_level_data
 from src.train.model import DEFAULT_ARCH, make_model
+from src.train.optim import count_params, make_optimizer
 from src.train.reporter import MetricsReporter
 from src.train.train_bc import train_epochs
 from src.train.wire import next_power_of_2, state_tuples_to_env_states
@@ -234,21 +235,11 @@ class ModelServer:
 
     # Augment dataset if requested
     if augment_levels_path:
-      from src.train.augment import augment_dataset
+      from src.train.augment import augment_dataset, load_augment_levels
 
       aug_path = Path(augment_levels_path)
       if aug_path.exists():
-        with open(aug_path) as f:
-          level_dicts = json.load(f)
-        _COORD_KEYS = {"player", "mummy1", "mummy2", "scorpion", "gate", "key"}
-        for d in level_dicts:
-          for k in _COORD_KEYS:
-            v = d.get(k)
-            if isinstance(v, list):
-              d[k] = tuple(v)
-          if isinstance(d.get("traps"), list):
-            d["traps"] = [tuple(t) for t in d["traps"]]
-        levels = [mummymaze_rust.Level.from_dict(d) for d in level_dicts]
+        levels = load_augment_levels(aug_path)
         log.info("augmenting dataset with %d levels", len(levels))
         datasets = augment_dataset(datasets, levels)
 
@@ -258,21 +249,10 @@ class ModelServer:
     )
     total_steps = steps_per_epoch * epochs
 
-    schedule = optax.warmup_cosine_decay_schedule(
-      init_value=lr * 0.1,
-      peak_value=lr,
-      warmup_steps=min(500, total_steps // 10),
-      decay_steps=total_steps,
-      end_value=lr * 0.01,
-    )
-    optimizer = optax.chain(
-      optax.clip_by_global_norm(1.0),
-      optax.adam(schedule),
-    )
+    optimizer = make_optimizer(lr, total_steps)
     opt_state = optimizer.init(eqx.filter(self.model, eqx.is_array))
 
-    arrays = jax.tree.leaves(eqx.filter(self.model, eqx.is_array))
-    n_params = sum(x.size for x in arrays)
+    n_params = count_params(self.model)
     reporter.report_init(
       {
         "n_params": n_params,
@@ -287,26 +267,33 @@ class ModelServer:
       }
     )
 
-    self.model, _opt_state, _final_step, _key = train_epochs(
-      self.model,
-      opt_state,
-      optimizer,
-      datasets,
-      sources,
+    config = TrainConfig(
       epochs=epochs,
       batch_size=batch_size,
-      checkpoint_dir=checkpoint_dir,
-      reporter=reporter,
-      maze_dir=self.maze_dir,
-      key=key,
-      epoch_offset=epoch_offset,
-      step_offset=step_offset,
-      run_id=run_id,
-      arch=self.arch,
       lr=lr,
-      level_metrics=True,
+      arch=self.arch,
       hparams=self.hparams,
+      level_metrics=True,
+      run_id=run_id,
+      maze_dir=self.maze_dir,
     )
+    train_state = TrainState(
+      model=self.model,
+      opt_state=opt_state,
+      optimizer=optimizer,
+      key=key,
+      global_step=step_offset,
+      epoch_offset=epoch_offset,
+    )
+    train_state = train_epochs(
+      train_state,
+      config,
+      datasets,
+      sources,
+      reporter,
+      checkpoint_fn=make_checkpoint_fn(checkpoint_dir),
+    )
+    self.model = train_state.model
 
     reporter.report_done()
     self._rebind_forward()

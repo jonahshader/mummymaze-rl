@@ -21,7 +21,6 @@ import jax
 import jax.random as jr
 import mummymaze_rust
 import numpy as np
-import optax
 
 from src.env.obs import observe
 from src.env.types import EnvState, LevelData
@@ -31,7 +30,14 @@ from src.train.augment import (
 )
 from src.train.dataset import load_bc_dataset
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
+from src.train.callbacks import (
+  LogFn,
+  make_checkpoint_fn,
+  make_wandb_log_fn,
+)
+from src.train.config import TrainConfig, TrainState
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model, parse_hparams
+from src.train.optim import count_params, make_optimizer
 from src.train.reporter import FileReporter, MetricsReporter
 from src.train.train_bc import train_epochs
 
@@ -121,7 +127,7 @@ def adversarial_loop(
   # Initialize model
   key, model_key = jr.split(key)
   model = make_model(arch, model_key, **(hparams or {}))
-  n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
+  n_params = count_params(model)
   print(f"Model: {n_params:,} parameters")
 
   # Optimizer — step budget is based on initial dataset size.
@@ -133,18 +139,14 @@ def adversarial_loop(
   steps_per_round = initial_steps_per_epoch * epochs_per_round
   total_steps = steps_per_round * n_rounds
 
-  schedule = optax.warmup_cosine_decay_schedule(
-    init_value=lr * 0.1,
-    peak_value=lr,
-    warmup_steps=min(500, total_steps // 10),
-    decay_steps=total_steps,
-    end_value=lr * 0.01,
-  )
-  optimizer = optax.chain(
-    optax.clip_by_global_norm(1.0),
-    optax.adam(schedule),
-  )
+  optimizer = make_optimizer(lr, total_steps)
   opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+  train_state = TrainState(
+    model=model,
+    opt_state=opt_state,
+    optimizer=optimizer,
+    key=key,
+  )
 
   reporter.report_init(
     {
@@ -164,8 +166,9 @@ def adversarial_loop(
     }
   )
 
-  # wandb init
+  # Callbacks
   run_id = f"adversarial-{arch}-{seed}"
+  log_fn: LogFn | None = None
   if wandb_project is not None:
     import wandb
 
@@ -187,8 +190,8 @@ def adversarial_loop(
         "dihedral_augment": dihedral_augment,
       },
     )
+    log_fn = make_wandb_log_fn()
 
-  global_step = 0
   global_epoch = 0
   total_ga_levels = 0
 
@@ -208,27 +211,26 @@ def adversarial_loop(
     # --- Train Phase ---
     print(f"\n--- Training ({epochs_per_round} epochs) ---")
     round_ckpt_dir = checkpoint_dir / f"round{round_idx:03d}"
-    round_max_steps = global_step + steps_per_round
-    model, opt_state, global_step, key = train_epochs(
-      model,
-      opt_state,
-      optimizer,
-      datasets,
-      sources,
+    round_max_steps = train_state.global_step + steps_per_round
+    round_config = TrainConfig(
       epochs=epochs_per_round,
       batch_size=batch_size,
-      checkpoint_dir=round_ckpt_dir,
-      reporter=reporter,
-      maze_dir=maze_dir,
-      key=key,
-      epoch_offset=global_epoch,
-      step_offset=global_step,
-      wandb_project=wandb_project,
-      run_id=run_id,
-      arch=arch,
       lr=lr,
+      arch=arch,
+      hparams=hparams or {},
+      run_id=run_id,
+      maze_dir=maze_dir,
       max_steps=round_max_steps,
-      hparams=hparams,
+    )
+    train_state.epoch_offset = global_epoch
+    train_state = train_epochs(
+      train_state,
+      round_config,
+      datasets,
+      sources,
+      reporter,
+      log_fn=log_fn,
+      checkpoint_fn=make_checkpoint_fn(round_ckpt_dir),
     )
     global_epoch += epochs_per_round
 
@@ -241,7 +243,7 @@ def adversarial_loop(
     print(f"\n--- GA Phase (grid_sizes={grid_sizes}) ---")
 
     fitness_expr = f"-abs(log_policy_win_prob - ({target_log_policy_wp}))"
-    obs_and_forward = _make_obs_and_forward(model)
+    obs_and_forward = _make_obs_and_forward(train_state.model)
 
     round_ga_levels: list[mummymaze_rust.Level] = []
 
@@ -405,21 +407,18 @@ def adversarial_loop(
       n_train = int(ds.train_mask.sum())
       print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
 
-    # Log adversarial-specific metrics to wandb
-    if wandb_project is not None:
-      import wandb
-
+    if log_fn is not None:
       total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
       total_train_levels = sum(len(ds.bank.train_indices) for ds in datasets.values())
-      wandb.log(
+      log_fn(
+        train_state.global_step,
         {
-          "adversarial/round": round_idx,
-          "adversarial/ga_levels_added": len(round_ga_levels),
-          "adversarial/total_ga_levels": total_ga_levels,
-          "adversarial/total_train_states": total_train_states,
-          "adversarial/total_train_levels": total_train_levels,
+          "adversarial/round": float(round_idx),
+          "adversarial/ga_levels_added": float(len(round_ga_levels)),
+          "adversarial/total_ga_levels": float(total_ga_levels),
+          "adversarial/total_train_states": float(total_train_states),
+          "adversarial/total_train_levels": float(total_train_levels),
         },
-        step=global_step,
       )
 
     # Save archive state

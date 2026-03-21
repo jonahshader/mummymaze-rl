@@ -11,7 +11,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import mummymaze_rust
 import numpy as np
 import optax
 from collections.abc import Callable
@@ -23,30 +22,20 @@ from tqdm import tqdm
 
 from jaxtyping import Array, Float, Int
 
-from src.train.checkpoint import load_checkpoint, save_checkpoint
+from src.train.callbacks import (
+  CheckpointFn,
+  LogFn,
+  make_checkpoint_fn,
+  make_wandb_log_fn,
+)
+from src.train.checkpoint import load_checkpoint
+from src.train.config import TrainConfig, TrainState
 from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
+from src.train.eval import compute_level_metrics, compute_markov_win_probs
+from src.train.loss import cross_entropy_loss, top1_accuracy
 from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model, parse_hparams
+from src.train.optim import count_params, make_optimizer
 from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
-
-
-def cross_entropy_loss(
-  logits: Float[Array, "B 5"],
-  targets: Float[Array, "B 5"],
-) -> Float[Array, ""]:
-  """Cross-entropy against soft targets: -sum(targets * log_softmax(logits))."""
-  log_probs = jax.nn.log_softmax(logits, axis=-1)
-  return -jnp.mean(jnp.sum(targets * log_probs, axis=-1))
-
-
-def top1_accuracy(
-  logits: Float[Array, "B 5"],
-  targets: Float[Array, "B 5"],
-) -> Float[Array, ""]:
-  """Fraction where argmax(logits) is an optimal action."""
-  preds = jnp.argmax(logits, axis=-1)
-  # An action is correct if target > 0 for that action
-  correct = jnp.take_along_axis(targets, preds[:, None], axis=1).squeeze(-1)
-  return jnp.mean(correct > 0)
 
 
 @eqx.filter_jit
@@ -90,141 +79,23 @@ def eval_step(
   return loss, acc
 
 
-def compute_level_metrics(
-  model: eqx.Module,
-  ds: BCDataset,
-  batch_size: int,
-  pbar: tqdm | None = None,
-  logits_buffer: np.ndarray | None = None,
-  jit_make_obs_fn: Callable[..., Any] | None = None,
-) -> dict[int, dict[str, object]]:
-  """Compute per-level accuracy and loss for level_metrics.json.
-
-  If logits_buffer is provided, train logits are taken from the buffer
-  and only val states need fresh inference (~10x speedup).
-  """
-  n = ds.n_states
-
-  if logits_buffer is not None:
-    # Use accumulated train logits from buffer, only run inference on val states
-    all_logits_arr = jnp.array(logits_buffer)
-
-    # Run inference only on val states
-    val_indices = jnp.where(ds.val_mask, size=int(ds.val_mask.sum()))[0]
-    n_val = val_indices.shape[0]
-
-    for start in range(0, n_val, batch_size):
-      end = min(start + batch_size, n_val)
-      batch_idx = val_indices[start:end]
-      batch_tuples = ds.state_tuples[batch_idx]
-      batch_level_idx = ds.level_idx[batch_idx]
-      if jit_make_obs_fn is not None:
-        obs = jit_make_obs_fn(batch_tuples, batch_level_idx)
-      else:
-        obs = make_batch_obs(ds.grid_size, ds.bank, batch_tuples, batch_level_idx)
-      logits = jax.vmap(model)(obs)
-      all_logits_arr = all_logits_arr.at[batch_idx].set(logits)
-      if pbar is not None:
-        pbar.update(end - start)
-  else:
-    # Full inference on all states (no buffer available)
-    all_logits = []
-    for start in range(0, n, batch_size):
-      end = min(start + batch_size, n)
-      batch_tuples = ds.state_tuples[start:end]
-      batch_level_idx = ds.level_idx[start:end]
-      if jit_make_obs_fn is not None:
-        obs = jit_make_obs_fn(batch_tuples, batch_level_idx)
-      else:
-        obs = make_batch_obs(ds.grid_size, ds.bank, batch_tuples, batch_level_idx)
-      logits = jax.vmap(model)(obs)
-      all_logits.append(logits)
-      if pbar is not None:
-        pbar.update(end - start)
-    all_logits_arr = jnp.concatenate(all_logits, axis=0)
-
-  # Compute per-state correctness and loss
-  preds = jnp.argmax(all_logits_arr, axis=-1)
-  per_state_correct = (
-    jnp.take_along_axis(ds.action_targets, preds[:, None], axis=1).squeeze(-1) > 0
-  ).astype(jnp.float32)
-
-  log_probs = jax.nn.log_softmax(all_logits_arr, axis=-1)
-  per_state_loss = -jnp.sum(ds.action_targets * log_probs, axis=-1)
-
-  # Aggregate by level using bincount
-  level_idx_np = np.array(ds.level_idx)
-  correct_np = np.array(per_state_correct)
-  loss_np = np.array(per_state_loss)
-
-  n_levels = ds.n_levels
-  counts = np.bincount(level_idx_np, minlength=n_levels)
-  correct_sums = np.bincount(level_idx_np, weights=correct_np, minlength=n_levels)
-  loss_sums = np.bincount(level_idx_np, weights=loss_np, minlength=n_levels)
-
-  metrics: dict[int, dict[str, object]] = {}
-  for lvl_idx in range(n_levels):
-    if counts[lvl_idx] == 0:
-      continue
-    metrics[lvl_idx] = {
-      "n_states": int(counts[lvl_idx]),
-      "accuracy": round(float(correct_sums[lvl_idx] / counts[lvl_idx]), 4),
-      "mean_loss": round(float(loss_sums[lvl_idx] / counts[lvl_idx]), 4),
-    }
-
-  return metrics
-
-
-def _parse_rust_levels(
-  maze_dir: Path,
-  level_keys: list[tuple[str, int]],
-) -> list["mummymaze_rust.Level"]:
-  """Parse Level objects from .dat files for a list of (file_stem, sublevel) keys."""
-  # Group by file to avoid re-parsing the same .dat file
-  from collections import defaultdict
-
-  by_file: dict[str, list[tuple[int, int]]] = defaultdict(list)
-  for i, (stem, sub) in enumerate(level_keys):
-    by_file[stem].append((sub, i))
-
-  result: list[mummymaze_rust.Level | None] = [None] * len(level_keys)
-  for stem, entries in by_file.items():
-    levels = mummymaze_rust.parse_file(str(maze_dir / f"{stem}.dat"))
-    for sub, idx in entries:
-      result[idx] = levels[sub]
-
-  return result  # type: ignore[return-value]
-
-
 def train_epochs(
-  model: eqx.Module,
-  opt_state: optax.OptState,
-  optimizer: optax.GradientTransformation,
+  state: TrainState,
+  config: TrainConfig,
   datasets: dict[int, BCDataset],
   sources: dict[int, list[tuple[str, int]]],
-  *,
-  epochs: int,
-  batch_size: int,
-  checkpoint_dir: Path | None,
   reporter: MetricsReporter,
-  maze_dir: Path,
-  key: jax.Array,
-  epoch_offset: int = 0,
-  step_offset: int = 0,
-  wandb_project: str | None = None,
-  run_id: str = "bc-cnn",
-  arch: str = DEFAULT_ARCH,
-  lr: float = 3e-4,
-  level_metrics: bool = False,
-  max_steps: int | None = None,
-  hparams: dict[str, object] | None = None,
-) -> tuple[eqx.Module, optax.OptState, int, jax.Array]:
-  """Run training epochs. Returns (model, opt_state, final_step, key).
+  *,
+  log_fn: LogFn | None = None,
+  checkpoint_fn: CheckpointFn | None = None,
+) -> TrainState:
+  """Run training epochs. Mutates and returns state.
 
-  If max_steps is set, training stops once global_step reaches that limit,
-  even if not all epochs have completed.
+  If config.max_steps is set, training stops once global_step reaches that
+  limit, even if not all epochs have completed.
   """
   use_tqdm = isinstance(reporter, FileReporter)
+  batch_size = config.batch_size
 
   # Pre-extract train/val indices per grid_size
   train_indices: dict[int, Int[Array, "n_train"]] = {}
@@ -249,27 +120,28 @@ def train_epochs(
 
   jitted_grid_sizes: set[int] = set()
 
-  global_step = step_offset
   stop_requested = False
 
   steps_per_epoch = sum(
     int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
   )
   if use_tqdm:
-    total_steps = steps_per_epoch * epochs
-    print(f"\nTraining for {epochs} epochs ({total_steps} steps)...")
+    total_steps = steps_per_epoch * config.epochs
+    print(f"\nTraining for {config.epochs} epochs ({total_steps} steps)...")
 
-  for epoch_rel in range(epochs):
+  for epoch_rel in range(config.epochs):
     if stop_requested:
       break
-    if max_steps is not None and global_step >= max_steps:
+    if config.max_steps is not None and state.global_step >= config.max_steps:
       break
 
-    epoch = epoch_offset + epoch_rel
+    epoch = state.epoch_offset + epoch_rel
     epoch_t0 = time.time()
     epoch_losses: list[float] = []
     epoch_accs: list[float] = []
-    reporter.report_epoch_start(epoch + 1, epoch_offset + epochs, steps_per_epoch)
+    reporter.report_epoch_start(
+      epoch + 1, state.epoch_offset + config.epochs, steps_per_epoch
+    )
 
     # Build train batches across all grid sizes for a single progress bar
     # Each entry: (grid_size, jax_indices, numpy_indices_for_scatter)
@@ -280,7 +152,7 @@ def train_epochs(
       n_train = ti.shape[0]
       if n_train < batch_size:
         continue
-      key, shuffle_key = jr.split(key)
+      state.key, shuffle_key = jr.split(state.key)
       perm = jr.permutation(shuffle_key, n_train)
       shuffled = ti[perm]
       shuffled_np = np.array(shuffled)
@@ -290,7 +162,7 @@ def train_epochs(
         train_batches.append((gs, shuffled[slc], shuffled_np[slc]))
 
     if use_tqdm:
-      total_epochs = epoch_offset + epochs
+      total_epochs = state.epoch_offset + config.epochs
       pbar = tqdm(train_batches, desc=f"Epoch {epoch + 1}/{total_epochs}", unit="batch")
     else:
       pbar = train_batches
@@ -301,7 +173,7 @@ def train_epochs(
       if cmd == "stop":
         stop_requested = True
         break
-      if max_steps is not None and global_step >= max_steps:
+      if config.max_steps is not None and state.global_step >= config.max_steps:
         break
 
       ds = datasets[gs]
@@ -314,12 +186,12 @@ def train_epochs(
         jitted_grid_sizes.add(gs)
 
       obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-      model, opt_state, loss, acc, logits = train_step(
-        model, opt_state, optimizer, obs, batch_targets
+      state.model, state.opt_state, loss, acc, logits = train_step(
+        state.model, state.opt_state, state.optimizer, obs, batch_targets
       )
       # Scatter logits into buffer for level metrics
       logits_buffers[gs][batch_idx_np] = np.array(logits)
-      global_step += 1
+      state.global_step += 1
       epoch_step += 1
 
       loss_val = float(loss)
@@ -330,18 +202,16 @@ def train_epochs(
       if use_tqdm:
         pbar.set_postfix(loss=f"{loss_val:.3f}", acc=f"{acc_val:.3f}", gs=gs)  # type: ignore[union-attr]
 
-      reporter.report_batch(global_step, epoch_step, loss_val, acc_val, gs)
+      reporter.report_batch(state.global_step, epoch_step, loss_val, acc_val, gs)
 
-      if wandb_project is not None:
-        import wandb
-
-        wandb.log(
+      if log_fn is not None:
+        log_fn(
+          state.global_step,
           {
             "train/loss": loss_val,
             "train/accuracy": acc_val,
-            "train/grid_size": gs,
+            "train/grid_size": float(gs),
           },
-          step=global_step,
         )
 
     if stop_requested:
@@ -372,7 +242,7 @@ def train_epochs(
       batch_level_idx = ds.level_idx[batch_idx]
 
       obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-      loss, acc = eval_step(model, obs, batch_targets)
+      loss, acc = eval_step(state.model, obs, batch_targets)
       val_losses.append(float(loss))
       val_accs.append(float(acc))
 
@@ -397,39 +267,24 @@ def train_epochs(
       epoch_time,
     )
 
-    if wandb_project is not None:
-      import wandb
-
-      wandb.log(
+    if log_fn is not None:
+      log_fn(
+        state.global_step,
         {
-          "epoch": epoch + 1,
+          "epoch": float(epoch + 1),
           "val/loss": mean_val_loss,
           "val/accuracy": mean_val_acc,
           "train/epoch_loss": mean_train_loss,
           "train/epoch_accuracy": mean_train_acc,
         },
-        step=global_step,
       )
 
-    # Checkpoint
-    if checkpoint_dir is not None:
-      ckpt_path = checkpoint_dir / f"epoch{epoch + 1:03d}"
-      save_checkpoint(
-        ckpt_path,
-        model,
-        opt_state,
-        epoch=epoch + 1,
-        global_step=global_step,
-        arch=arch,
-        key=key,
-        lr=lr,
-        batch_size=batch_size,
-        hparams=hparams,
-      )
+    if checkpoint_fn is not None:
+      checkpoint_fn(state, epoch + 1, config)
 
     # Per-level metrics (expensive — disabled by default, viewer enables it)
     all_metrics: dict[int, dict[int, dict[str, object]]] = {}
-    if level_metrics:
+    if config.level_metrics:
       reporter.report_status("Computing level metrics...")
       total_val_states = sum(int(ds.val_mask.sum()) for ds in datasets.values())
       if use_tqdm:
@@ -442,7 +297,7 @@ def train_epochs(
         metrics_pbar = None
       for gs, ds in datasets.items():
         all_metrics[gs] = compute_level_metrics(
-          model,
+          state.model,
           ds,
           batch_size,
           metrics_pbar,
@@ -454,94 +309,40 @@ def train_epochs(
 
     # Compute agent win% via Markov solver (validation levels only)
     reporter.report_status("Computing agent win%...")
-    all_win_probs: list[float] = []
+    all_win_probs, wp_updates = compute_markov_win_probs(
+      state.model,
+      datasets,
+      sources,
+      config.maze_dir,
+      batch_size,
+      jit_make_obs,
+      reporter_log=reporter.report_log,
+      use_tqdm=use_tqdm,
+    )
+    # Merge win prob updates into level metrics
+    for gs, gs_updates in wp_updates.items():
+      for lvl_idx, update in gs_updates.items():
+        if lvl_idx in all_metrics.get(gs, {}):
+          all_metrics[gs][lvl_idx].update(update)
 
-    for gs, ds in datasets.items():
-      level_idx_np = np.array(ds.level_idx)
-      val_mask_np = np.array(ds.val_mask)
-
-      # Identify which levels are validation levels
-      val_level_set = set(int(x) for x in level_idx_np[val_mask_np])
-      if not val_level_set:
-        continue
-
-      # Run fresh inference on val states for policy probs
-      val_indices_arr = jnp.where(ds.val_mask, size=int(ds.val_mask.sum()))[0]
-      val_logits_list = []
-      for start in range(0, val_indices_arr.shape[0], batch_size):
-        end = min(start + batch_size, val_indices_arr.shape[0])
-        batch_idx = val_indices_arr[start:end]
-        obs = jit_make_obs[gs](ds.state_tuples[batch_idx], ds.level_idx[batch_idx])
-        val_logits_list.append(np.array(jax.vmap(model)(obs)))
-      val_logits = np.concatenate(val_logits_list, axis=0)
-      val_probs = np.exp(val_logits - val_logits.max(axis=-1, keepdims=True))
-      val_probs /= val_probs.sum(axis=-1, keepdims=True)
-
-      val_state_tuples = np.asarray(ds.state_tuples, dtype=np.int32)[val_mask_np]
-      val_level_idx = level_idx_np[val_mask_np]
-
-      # Remap level indices to dense range for the batch call
-      val_levels_sorted = sorted(val_level_set)
-      old_to_new = {old: new for new, old in enumerate(val_levels_sorted)}
-      remapped_idx = np.array([old_to_new[int(x)] for x in val_level_idx])
-
-      n_val_levels = len(val_levels_sorted)
-      counts = np.bincount(remapped_idx, minlength=n_val_levels)
-      offsets = np.zeros(n_val_levels + 1, dtype=np.intp)
-      np.cumsum(counts, out=offsets[1:])
-
-      # Sort states by remapped level index (required by batch solver)
-      sort_order = np.argsort(remapped_idx, kind="stable")
-      val_state_tuples = val_state_tuples[sort_order]
-      val_probs = val_probs[sort_order]
-
-      level_keys = list(sources[gs])
-      val_keys = [level_keys[i] for i in val_levels_sorted]
-      rust_levels = _parse_rust_levels(maze_dir, val_keys)
-
-      win_probs = mummymaze_rust.policy_win_prob_batch(
-        rust_levels, val_state_tuples, val_probs, offsets.tolist()
+    if config.level_metrics:
+      reporter.report_level_metrics(
+        state.global_step, config.run_id, all_metrics, sources
       )
 
-      failed_levels: list[str] = []
-      for new_idx, wp in enumerate(win_probs):
-        old_idx = val_levels_sorted[new_idx]
-        if np.isnan(wp):
-          stem, sub = level_keys[old_idx]
-          failed_levels.append(f"{stem}:{sub}")
-        else:
-          all_win_probs.append(wp)
-          if old_idx in all_metrics.get(gs, {}):
-            all_metrics[gs][old_idx]["agent_win_prob"] = round(wp, 6)
-      if failed_levels:
-        msg = (
-          f"WARNING: {len(failed_levels)} gs={gs} levels failed convergence: "
-          f"{', '.join(failed_levels[:10])}"
-          f"{'...' if len(failed_levels) > 10 else ''}"
-        )
-        reporter.report_log(msg)
-        if use_tqdm:
-          print(f"  {msg}")
-
-    if level_metrics:
-      reporter.report_level_metrics(global_step, run_id, all_metrics, sources)
-
-    # Log aggregate win% to wandb
-    if wandb_project is not None and all_win_probs:
-      import wandb
-
-      wandb.log(
+    if log_fn is not None and all_win_probs:
+      log_fn(
+        state.global_step,
         {
           "eval/mean_win_prob": float(np.mean(all_win_probs)),
           "eval/median_win_prob": float(np.median(all_win_probs)),
           "eval/min_win_prob": float(np.min(all_win_probs)),
           "eval/max_win_prob": float(np.max(all_win_probs)),
-          "eval/n_levels": len(all_win_probs),
+          "eval/n_levels": float(len(all_win_probs)),
         },
-        step=global_step,
       )
 
-  return model, opt_state, global_step, key
+  return state
 
 
 def train(
@@ -583,21 +384,9 @@ def train(
 
   # Augment dataset with additional levels if provided
   if augment_levels is not None:
-    from src.train.augment import augment_dataset
+    from src.train.augment import augment_dataset, load_augment_levels
 
-    with open(augment_levels) as f:
-      level_dicts = json.load(f)
-    # JSON arrays → Python lists, but PyO3 from_dict expects tuples for
-    # coordinate fields. Convert coordinate lists to tuples.
-    _COORD_KEYS = {"player", "mummy1", "mummy2", "scorpion", "gate", "key"}
-    for d in level_dicts:
-      for k in _COORD_KEYS:
-        v = d.get(k)
-        if isinstance(v, list):
-          d[k] = tuple(v)
-      if isinstance(d.get("traps"), list):
-        d["traps"] = [tuple(t) for t in d["traps"]]
-    levels = [mummymaze_rust.Level.from_dict(d) for d in level_dicts]
+    levels = load_augment_levels(augment_levels)
     if use_tqdm:
       print(f"Augmenting dataset with {len(levels)} levels...")
     datasets = augment_dataset(datasets, levels)
@@ -628,7 +417,6 @@ def train(
     model = ckpt.model
     arch = ckpt.arch
     model_hps = ckpt.hparams
-    # Use checkpoint's training state for resume if no explicit offsets given
     if epoch_offset == 0 and ckpt.epoch > 0:
       epoch_offset = ckpt.epoch
     if step_offset == 0 and ckpt.global_step > 0:
@@ -639,7 +427,7 @@ def train(
     key, model_key = jr.split(key)
     model = make_model(arch, model_key, **model_hps)
 
-  n_params = sum(x.size for x in jax.tree.leaves(eqx.filter(model, eqx.is_array)))
+  n_params = count_params(model)
   if use_tqdm:
     print(f"Model: {arch} ({n_params:,} parameters)")
 
@@ -650,17 +438,7 @@ def train(
   )
   total_steps = steps_per_epoch * epochs
 
-  schedule = optax.warmup_cosine_decay_schedule(
-    init_value=lr * 0.1,
-    peak_value=lr,
-    warmup_steps=min(500, total_steps // 10),
-    decay_steps=total_steps,
-    end_value=lr * 0.01,
-  )
-  optimizer = optax.chain(
-    optax.clip_by_global_norm(1.0),
-    optax.adam(schedule),
-  )
+  optimizer = make_optimizer(lr, total_steps)
 
   # Restore optimizer state from checkpoint if available
   opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
@@ -671,8 +449,27 @@ def train(
       if use_tqdm:
         print("Restored optimizer state from checkpoint")
 
-  # wandb init
   run_id = f"bc-{arch}-{seed}"
+  config = TrainConfig(
+    epochs=epochs,
+    batch_size=batch_size,
+    lr=lr,
+    arch=arch,
+    hparams=model_hps,
+    run_id=run_id,
+    maze_dir=maze_dir,
+  )
+  state = TrainState(
+    model=model,
+    opt_state=opt_state,
+    optimizer=optimizer,
+    key=key,
+    global_step=step_offset,
+    epoch_offset=epoch_offset,
+  )
+
+  # Build callbacks
+  log_fn: LogFn | None = None
   if wandb_project is not None:
     import wandb
 
@@ -689,6 +486,11 @@ def train(
         "total_train_states": total_train_states,
       },
     )
+    log_fn = make_wandb_log_fn()
+
+  checkpoint_fn: CheckpointFn | None = None
+  if checkpoint_dir is not None:
+    checkpoint_fn = make_checkpoint_fn(checkpoint_dir)
 
   # Report init
   reporter.report_init(
@@ -705,25 +507,14 @@ def train(
     }
   )
 
-  model, _opt_state, _final_step, _key = train_epochs(
-    model,
-    opt_state,
-    optimizer,
+  state = train_epochs(
+    state,
+    config,
     datasets,
     sources,
-    epochs=epochs,
-    batch_size=batch_size,
-    checkpoint_dir=checkpoint_dir,
-    reporter=reporter,
-    maze_dir=maze_dir,
-    key=key,
-    epoch_offset=epoch_offset,
-    step_offset=step_offset,
-    wandb_project=wandb_project,
-    run_id=run_id,
-    arch=arch,
-    lr=lr,
-    hparams=model_hps,
+    reporter,
+    log_fn=log_fn,
+    checkpoint_fn=checkpoint_fn,
   )
 
   reporter.report_done()
@@ -733,7 +524,7 @@ def train(
 
     wandb.finish()
 
-  return model
+  return state.model
 
 
 class Mode(str, enum.Enum):

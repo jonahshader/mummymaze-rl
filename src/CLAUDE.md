@@ -11,10 +11,20 @@
   - `env.py` — gymnax-style functional RL wrapper
   - `level_load.py` / `level_bank.py` — level loading and batched storage
 - `train/` — behavioral cloning pipeline
-  - `train_bc.py` — training loop (supervised, BFS-optimal targets)
+  - `train_bc.py` — training loop (`train_epochs`, `train`, CLI entry point)
+  - `config.py` — `TrainConfig` (hyperparams) and `TrainState` (mutable model/optimizer state)
+  - `callbacks.py` — `LogFn`, `CheckpointFn` types and factory functions (wandb, directory checkpoints)
+  - `loss.py` — `cross_entropy_loss`, `top1_accuracy`
+  - `optim.py` — `make_optimizer`, `count_params`
+  - `eval.py` — `compute_level_metrics`, `compute_markov_win_probs`, `parse_rust_levels`
   - `model.py` — model architectures (equinox, `@register_model` decorator)
   - `dataset.py` — dataset construction from Rust solver
-  - `reporter.py` — metrics reporting (level_metrics.json, wandb)
+  - `augment.py` — dataset augmentation (GA levels, dihedral variants, `load_augment_levels`)
+  - `reporter.py` — metrics reporting (level_metrics.json, WebSocket, stdio)
+  - `wire.py` — shared state conversion helpers (`state_tuples_to_env_states`)
+  - `checkpoint.py` — checkpoint save/load
+  - `adversarial_loop.py` — MAP-Elites adversarial training loop
+  - `model_server.py` — in-process model server for inference + training
 - `baselines/random_agent.py` — random policy baseline
 - `tui.py` — terminal UI
 

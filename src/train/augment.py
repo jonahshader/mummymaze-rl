@@ -1,5 +1,6 @@
 """Dataset augmentation: merge GA-generated levels into BC datasets."""
 
+import json
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -12,6 +13,23 @@ from src.env.level_bank import LevelBank, dihedral_syms
 from src.env.level_load import exit_cell
 from src.env.types import MAX_MUMMIES, MAX_SCORPIONS, MAX_TRAPS
 from src.train.dataset import BCDataset, decode_action_masks
+
+
+_COORD_KEYS = {"player", "mummy1", "mummy2", "scorpion", "gate", "key"}
+
+
+def load_augment_levels(path: Path) -> list[mummymaze_rust.Level]:
+  """Load levels from a JSON file, converting coordinate lists to tuples."""
+  with open(path) as f:
+    level_dicts = json.load(f)
+  for d in level_dicts:
+    for k in _COORD_KEYS:
+      v = d.get(k)
+      if isinstance(v, list):
+        d[k] = tuple(v)
+    if isinstance(d.get("traps"), list):
+      d["traps"] = [tuple(t) for t in d["traps"]]
+  return [mummymaze_rust.Level.from_dict(d) for d in level_dicts]
 
 
 def dihedral_variants(

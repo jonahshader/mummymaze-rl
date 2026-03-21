@@ -11,7 +11,7 @@ from jaxtyping import Array, Bool, Float, Int
 import mummymaze_rust
 from src.env.level_bank import LevelBank, get_level, load_all_levels
 from src.env.obs import observe
-from src.env.types import EnvState
+from src.train.wire import state_tuples_to_env_states
 
 
 def decode_action_masks(action_masks_raw: bytes) -> np.ndarray:
@@ -43,52 +43,6 @@ class BCDataset:
   val_mask: Bool[Array, "n_states"]
 
 
-def _state_tuple_to_env_state(
-  tuples: Int[Array, "B 12"],
-) -> EnvState:
-  """Convert raw state tuples to EnvState batch.
-
-  Gate polarity is inverted: Rust gate_open=True means blocking,
-  JAX gate_open=True means open/not blocking.
-  Dead entities (99,99) are clamped to (0,0).
-  """
-  pr, pc = tuples[:, 0], tuples[:, 1]
-  m1r, m1c = tuples[:, 2], tuples[:, 3]
-  m1_alive = tuples[:, 4].astype(jnp.bool_)
-  m2r, m2c = tuples[:, 5], tuples[:, 6]
-  m2_alive = tuples[:, 7].astype(jnp.bool_)
-  sr, sc = tuples[:, 8], tuples[:, 9]
-  s_alive = tuples[:, 10].astype(jnp.bool_)
-  gate_open_rust = tuples[:, 11].astype(jnp.bool_)
-
-  # Clamp dead entity positions to (0,0)
-  m1r = jnp.where(m1_alive, m1r, 0)
-  m1c = jnp.where(m1_alive, m1c, 0)
-  m2r = jnp.where(m2_alive, m2r, 0)
-  m2c = jnp.where(m2_alive, m2c, 0)
-  sr = jnp.where(s_alive, sr, 0)
-  sc = jnp.where(s_alive, sc, 0)
-
-  b = tuples.shape[0]
-  return EnvState(
-    player=jnp.stack([pr, pc], axis=-1),
-    mummy_pos=jnp.stack(
-      [
-        jnp.stack([m1r, m1c], axis=-1),
-        jnp.stack([m2r, m2c], axis=-1),
-      ],
-      axis=1,
-    ),
-    mummy_alive=jnp.stack([m1_alive, m2_alive], axis=-1),
-    scorpion_pos=jnp.stack([sr, sc], axis=-1)[:, None, :],
-    scorpion_alive=s_alive[:, None],
-    gate_open=~gate_open_rust,  # invert polarity
-    done=jnp.zeros(b, dtype=jnp.bool_),
-    won=jnp.zeros(b, dtype=jnp.bool_),
-    turn=jnp.zeros(b, dtype=jnp.int32),
-  )
-
-
 def make_batch_obs(
   grid_size: int,
   bank: LevelBank,
@@ -103,7 +57,7 @@ def make_batch_obs(
   level_data = jax.vmap(lambda i: get_level(bank, i))(level_idx)
 
   # Convert state tuples to EnvState
-  env_states = _state_tuple_to_env_state(state_tuples)
+  env_states = state_tuples_to_env_states(state_tuples)
 
   # vmap observe over the batch
   return jax.vmap(lambda ld, es: observe(grid_size, ld, es))(level_data, env_states)

@@ -26,7 +26,7 @@ from src.env.obs import observe
 from src.env.step import step as jax_step
 from src.env.types import EnvState
 from src.train.model import MazeCNN
-from src.train.train_bc import cross_entropy_loss, top1_accuracy
+from src.train.loss import cross_entropy_loss, top1_accuracy
 
 DAT_DIR = Path(__file__).resolve().parent.parent / "mazes"
 
