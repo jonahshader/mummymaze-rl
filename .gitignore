@@ -23,5 +23,8 @@ checkpoints/
 level_metrics*.json
 wandb/
 
+# Notebook artifacts
+cache/
+
 # Game data (private repo only)
 # mazes/
