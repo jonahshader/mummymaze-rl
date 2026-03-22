@@ -7,7 +7,6 @@ Usage:
   uv run python -m src.train.adversarial_loop --mazes mazes/ --n-rounds 3
 """
 
-import functools
 import json
 import time
 from collections.abc import Callable
@@ -15,50 +14,20 @@ from pathlib import Path
 from typing import Annotated
 
 import click
-import equinox as eqx
 import typer
-import jax
 import jax.random as jr
 import mummymaze_rust
 import numpy as np
 
-from src.env.obs import observe
-from src.env.types import EnvState, LevelData
-from src.train.augment import (
-  apply_dihedral_augmentation,
-  augment_dataset,
-)
-from src.train.dataset import load_bc_dataset
+from src.train.augment import augment_dataset
+from src.train.callbacks import make_checkpoint_fn
+from src.train.config import TrainConfig
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
-from src.train.callbacks import (
-  LogFn,
-  make_checkpoint_fn,
-  make_wandb_log_fn,
-)
-from src.train.config import TrainConfig, TrainState
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model, parse_hparams
-from src.train.optim import count_params, make_optimizer
+from src.train.inference import make_obs_and_forward
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, parse_hparams
 from src.train.reporter import FileReporter, MetricsReporter
+from src.train.session import setup_training
 from src.train.train_bc import train_epochs
-
-
-def _make_obs_and_forward(
-  model: eqx.Module,
-) -> Callable:
-  """Build a JIT'd function: (grid_size, LevelData, EnvState) → logits."""
-
-  @functools.partial(jax.jit, static_argnums=(0,))
-  def obs_and_forward(
-    grid_size: int,
-    level_data: LevelData,
-    env_states: EnvState,
-  ) -> jax.Array:
-    obs = jax.vmap(lambda es: observe(grid_size, level_data, es))(
-      env_states,
-    )
-    return jax.vmap(model)(obs)
-
-  return obs_and_forward
 
 
 def adversarial_loop(
@@ -103,94 +72,41 @@ def adversarial_loop(
     if on_event is not None:
       on_event(event)
 
-  key = jr.key(seed)
-
-  # Load base dataset
-  print("Loading base dataset...")
-  t0 = time.time()
-  datasets, sources = load_bc_dataset(maze_dir)
-  print(f"Dataset loaded in {time.time() - t0:.1f}s")
-  for gs, ds in sorted(datasets.items()):
-    n_train = int(ds.train_mask.sum())
-    n_val = int(ds.val_mask.sum())
-    print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
-
-  if dihedral_augment:
-    banks = {gs: ds.bank for gs, ds in datasets.items()}
-    datasets = apply_dihedral_augmentation(
-      datasets,
-      sources,
-      banks,
-      maze_dir,
-    )
-
-  # Initialize model
-  key, model_key = jr.split(key)
-  model = make_model(arch, model_key, **(hparams or {}))
-  n_params = count_params(model)
-  print(f"Model: {n_params:,} parameters")
-
-  # Optimizer — step budget is based on initial dataset size.
-  # As the dataset grows from GA augmentation, later rounds will complete
-  # fewer epochs but the total step count (and LR schedule) stays fixed.
-  initial_steps_per_epoch = sum(
-    int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
-  )
-  steps_per_round = initial_steps_per_epoch * epochs_per_round
-  total_steps = steps_per_round * n_rounds
-
-  optimizer = make_optimizer(lr, total_steps)
-  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-  train_state = TrainState(
-    model=model,
-    opt_state=opt_state,
-    optimizer=optimizer,
-    key=key,
-  )
-
-  reporter.report_init(
-    {
-      "n_params": n_params,
+  session = setup_training(
+    maze_dir=maze_dir,
+    arch=arch,
+    hparams=hparams,
+    epochs=epochs_per_round,
+    batch_size=batch_size,
+    lr=lr,
+    seed=seed,
+    dihedral_augment=dihedral_augment,
+    wandb_project=wandb_project,
+    wandb_config={
+      "mode": "adversarial",
       "n_rounds": n_rounds,
       "epochs_per_round": epochs_per_round,
-      "batch_size": batch_size,
-      "lr": lr,
-      "seed": seed,
       "ga_generations": ga_generations,
       "ga_pop_size": ga_pop_size,
       "target_log_policy_wp": target_log_policy_wp,
-      "datasets": {
-        str(gs): {"n_states": ds.n_states, "n_levels": ds.n_levels}
-        for gs, ds in datasets.items()
-      },
-    }
+      "dihedral_augment": dihedral_augment,
+    },
+    reporter=reporter,
+    metrics_path=metrics_path,
+    run_id=f"adversarial-{arch}-{seed}",
+    schedule_epochs=epochs_per_round * n_rounds,
   )
+  train_state = session.state
+  datasets = session.datasets
+  sources = session.sources
+  reporter = session.reporter
+  log_fn = session.log_fn
 
-  # Callbacks
-  run_id = f"adversarial-{arch}-{seed}"
-  log_fn: LogFn | None = None
-  if wandb_project is not None:
-    import wandb
-
-    wandb.init(
-      project=wandb_project,
-      name=run_id,
-      config={
-        "mode": "adversarial",
-        "arch": arch,
-        "n_rounds": n_rounds,
-        "epochs_per_round": epochs_per_round,
-        "batch_size": batch_size,
-        "lr": lr,
-        "seed": seed,
-        "n_params": n_params,
-        "ga_generations": ga_generations,
-        "ga_pop_size": ga_pop_size,
-        "target_log_policy_wp": target_log_policy_wp,
-        "dihedral_augment": dihedral_augment,
-      },
-    )
-    log_fn = make_wandb_log_fn()
+  # Compute steps_per_round for max_steps budget per round
+  steps_per_round = (
+    sum(int(ds.train_mask.sum()) // batch_size for ds in datasets.values())
+    * epochs_per_round
+  )
 
   global_epoch = 0
   total_ga_levels = 0
@@ -243,7 +159,7 @@ def adversarial_loop(
     print(f"\n--- GA Phase (grid_sizes={grid_sizes}) ---")
 
     fitness_expr = f"-abs(log_policy_win_prob - ({target_log_policy_wp}))"
-    obs_and_forward = _make_obs_and_forward(train_state.model)
+    obs_and_forward = make_obs_and_forward(train_state.model)
 
     round_ga_levels: list[mummymaze_rust.Level] = []
 
@@ -442,7 +358,6 @@ def adversarial_loop(
       }
     )
 
-  reporter.report_done()
   print(f"\nAdversarial loop complete. Total GA levels: {total_ga_levels}")
   _emit(
     {
@@ -450,11 +365,7 @@ def adversarial_loop(
       "total_ga_levels": total_ga_levels,
     }
   )
-
-  if wandb_project is not None:
-    import wandb
-
-    wandb.finish()
+  session.finish()
 
 
 def main(

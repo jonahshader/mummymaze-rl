@@ -22,19 +22,12 @@ from tqdm import tqdm
 
 from jaxtyping import Array, Float, Int
 
-from src.train.callbacks import (
-  CheckpointFn,
-  LogFn,
-  make_checkpoint_fn,
-  make_wandb_log_fn,
-)
-from src.train.checkpoint import load_checkpoint
+from src.train.callbacks import CheckpointFn, LogFn
 from src.train.config import TrainConfig, TrainState
-from src.train.dataset import BCDataset, load_bc_dataset, make_batch_obs
+from src.train.dataset import BCDataset, make_batch_obs
 from src.train.eval import compute_level_metrics, compute_markov_win_probs
 from src.train.loss import cross_entropy_loss, top1_accuracy
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, make_model, parse_hparams
-from src.train.optim import count_params, make_optimizer
+from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, parse_hparams
 from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
 
 
@@ -345,188 +338,6 @@ def train_epochs(
   return state
 
 
-def train(
-  maze_dir: Path,
-  epochs: int = 10,
-  batch_size: int = 1024,
-  lr: float = 3e-4,
-  seed: int = 0,
-  wandb_project: str | None = None,
-  metrics_path: Path = Path("level_metrics.json"),
-  checkpoint_dir: Path | None = None,
-  reporter: FileReporter | StdioReporter | None = None,
-  checkpoint: Path | None = None,
-  augment_levels: Path | None = None,
-  epoch_offset: int = 0,
-  step_offset: int = 0,
-  arch: str = DEFAULT_ARCH,
-  dihedral_augment: bool = False,
-  hparams: dict[str, object] | None = None,
-) -> eqx.Module:
-  """Main training loop."""
-  if reporter is None:
-    reporter = FileReporter(metrics_path)
-
-  use_tqdm = isinstance(reporter, FileReporter)
-  key = jr.key(seed)
-
-  # Load dataset
-  if use_tqdm:
-    print("Loading dataset...")
-  t0 = time.time()
-  datasets, sources = load_bc_dataset(maze_dir)
-  if use_tqdm:
-    print(f"Dataset loaded in {time.time() - t0:.1f}s")
-    for gs, ds in sorted(datasets.items()):
-      n_train = int(ds.train_mask.sum())
-      n_val = int(ds.val_mask.sum())
-      print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train, {n_val} val)")
-
-  # Augment dataset with additional levels if provided
-  if augment_levels is not None:
-    from src.train.augment import augment_dataset, load_augment_levels
-
-    levels = load_augment_levels(augment_levels)
-    if use_tqdm:
-      print(f"Augmenting dataset with {len(levels)} levels...")
-    datasets = augment_dataset(datasets, levels)
-    if use_tqdm:
-      for gs, ds in sorted(datasets.items()):
-        n_train = int(ds.train_mask.sum())
-        print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
-
-  # Dihedral augmentation: expand train levels with rotations/reflections
-  if dihedral_augment:
-    from src.train.augment import apply_dihedral_augmentation
-
-    banks = {gs: ds.bank for gs, ds in datasets.items()}
-    datasets = apply_dihedral_augmentation(
-      datasets,
-      sources,
-      banks,
-      maze_dir,
-      verbose=use_tqdm,
-    )
-
-  # Initialize model (or resume from checkpoint)
-  model_hps = hparams or {}
-  if checkpoint is not None:
-    if use_tqdm:
-      print(f"Loading checkpoint: {checkpoint}")
-    ckpt = load_checkpoint(checkpoint, arch=arch, hparams=model_hps or None)
-    model = ckpt.model
-    arch = ckpt.arch
-    model_hps = ckpt.hparams
-    if epoch_offset == 0 and ckpt.epoch > 0:
-      epoch_offset = ckpt.epoch
-    if step_offset == 0 and ckpt.global_step > 0:
-      step_offset = ckpt.global_step
-    if ckpt.key is not None:
-      key = ckpt.key
-  else:
-    key, model_key = jr.split(key)
-    model = make_model(arch, model_key, **model_hps)
-
-  n_params = count_params(model)
-  if use_tqdm:
-    print(f"Model: {arch} ({n_params:,} parameters)")
-
-  # Optimizer
-  total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
-  steps_per_epoch = sum(
-    int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
-  )
-  total_steps = steps_per_epoch * epochs
-
-  optimizer = make_optimizer(lr, total_steps)
-
-  # Restore optimizer state from checkpoint if available
-  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-  if checkpoint is not None:
-    opt_state_path = checkpoint / "opt_state.eqx"
-    if opt_state_path.exists():
-      opt_state = eqx.tree_deserialise_leaves(opt_state_path, opt_state)
-      if use_tqdm:
-        print("Restored optimizer state from checkpoint")
-
-  run_id = f"bc-{arch}-{seed}"
-  config = TrainConfig(
-    epochs=epochs,
-    batch_size=batch_size,
-    lr=lr,
-    arch=arch,
-    hparams=model_hps,
-    run_id=run_id,
-    maze_dir=maze_dir,
-  )
-  state = TrainState(
-    model=model,
-    opt_state=opt_state,
-    optimizer=optimizer,
-    key=key,
-    global_step=step_offset,
-    epoch_offset=epoch_offset,
-  )
-
-  # Build callbacks
-  log_fn: LogFn | None = None
-  if wandb_project is not None:
-    import wandb
-
-    wandb.init(
-      project=wandb_project,
-      name=run_id,
-      config={
-        "arch": arch,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "lr": lr,
-        "seed": seed,
-        "n_params": n_params,
-        "total_train_states": total_train_states,
-      },
-    )
-    log_fn = make_wandb_log_fn()
-
-  checkpoint_fn: CheckpointFn | None = None
-  if checkpoint_dir is not None:
-    checkpoint_fn = make_checkpoint_fn(checkpoint_dir)
-
-  # Report init
-  reporter.report_init(
-    {
-      "n_params": n_params,
-      "epochs": epochs,
-      "batch_size": batch_size,
-      "lr": lr,
-      "seed": seed,
-      "datasets": {
-        str(gs): {"n_states": ds.n_states, "n_levels": ds.n_levels}
-        for gs, ds in datasets.items()
-      },
-    }
-  )
-
-  state = train_epochs(
-    state,
-    config,
-    datasets,
-    sources,
-    reporter,
-    log_fn=log_fn,
-    checkpoint_fn=checkpoint_fn,
-  )
-
-  reporter.report_done()
-
-  if wandb_project is not None:
-    import wandb
-
-    wandb.finish()
-
-  return state.model
-
-
 class Mode(str, enum.Enum):
   standalone = "standalone"
   subprocess = "subprocess"
@@ -579,8 +390,10 @@ def main(
 
   hparams = parse_hparams(arch, hparam or [])
 
+  from src.train.session import setup_training
+
   try:
-    train(
+    session = setup_training(
       maze_dir=mazes,
       epochs=epochs,
       batch_size=batch_size,
@@ -598,6 +411,8 @@ def main(
       dihedral_augment=dihedral_augment,
       hparams=hparams,
     )
+    session.run()
+    session.finish()
   except Exception as e:
     if mode == Mode.subprocess:
       sys.stdout.write(json.dumps({"type": "error", "message": str(e)}) + "\n")

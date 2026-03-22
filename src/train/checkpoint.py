@@ -7,6 +7,7 @@ Format: a directory containing:
 """
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import equinox as eqx
@@ -47,42 +48,19 @@ def save_checkpoint(
   (path / "training_state.json").write_text(json.dumps(state, indent=2))
 
 
+@dataclass(frozen=True, slots=True)
 class CheckpointData:
   """Result of loading a checkpoint."""
 
-  __slots__ = (
-    "model",
-    "opt_state",
-    "epoch",
-    "global_step",
-    "arch",
-    "key",
-    "lr",
-    "batch_size",
-    "hparams",
-  )
-
-  def __init__(
-    self,
-    model: eqx.Module,
-    opt_state: optax.OptState | None,
-    epoch: int,
-    global_step: int,
-    arch: str,
-    key: jax.Array | None,
-    lr: float,
-    batch_size: int,
-    hparams: dict[str, object] | None = None,
-  ) -> None:
-    self.model = model
-    self.opt_state = opt_state
-    self.epoch = epoch
-    self.global_step = global_step
-    self.arch = arch
-    self.key = key
-    self.lr = lr
-    self.batch_size = batch_size
-    self.hparams = hparams or {}
+  model: eqx.Module
+  opt_state: optax.OptState | None
+  epoch: int
+  global_step: int
+  arch: str
+  key: jax.Array | None
+  lr: float
+  batch_size: int
+  hparams: dict[str, object] = field(default_factory=dict)
 
   @property
   def has_optimizer(self) -> bool:

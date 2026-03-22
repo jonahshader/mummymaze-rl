@@ -11,9 +11,11 @@
   - `env.py` — gymnax-style functional RL wrapper
   - `level_load.py` / `level_bank.py` — level loading and batched storage
 - `train/` — behavioral cloning pipeline
-  - `train_bc.py` — training loop (`train_epochs`, `train`, CLI entry point)
+  - `train_bc.py` — `train_epochs` loop, `train_step`/`eval_step`, CLI entry point
+  - `session.py` — `TrainingSession` dataclass and `setup_training()` factory
   - `config.py` — `TrainConfig` (hyperparams) and `TrainState` (mutable model/optimizer state)
   - `callbacks.py` — `LogFn`, `CheckpointFn` types and factory functions (wandb, directory checkpoints)
+  - `inference.py` — shared `make_obs_and_forward` JIT'd closure
   - `loss.py` — `cross_entropy_loss`, `top1_accuracy`
   - `optim.py` — `make_optimizer`, `count_params`
   - `eval.py` — `compute_level_metrics`, `compute_markov_win_probs`, `parse_rust_levels`

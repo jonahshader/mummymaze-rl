@@ -5,7 +5,6 @@ training, checkpoint reload, etc. Transport (WebSocket, CLI) is handled
 by callers.
 """
 
-import functools
 import logging
 import threading
 import time
@@ -19,13 +18,13 @@ import mummymaze_rust
 import numpy as np
 from scipy.special import softmax as scipy_softmax
 
-from src.env.obs import observe
-from src.env.types import EnvState, LevelData
+from src.env.types import LevelData
 from src.train.callbacks import make_checkpoint_fn
 from src.train.checkpoint import load_checkpoint, load_model_weights
 from src.train.config import TrainConfig, TrainState
 from src.train.dataset import BCDataset, load_bc_dataset
 from src.train.ga import level_to_level_data
+from src.train.inference import make_obs_and_forward
 from src.train.model import DEFAULT_ARCH, make_model
 from src.train.optim import count_params, make_optimizer
 from src.train.reporter import MetricsReporter
@@ -64,7 +63,7 @@ class ModelServer:
       log.info("starting with random initialization")
       self.model = make_model(arch, jax.random.key(0), **self.hparams)
 
-    self._obs_and_forward = self._make_forward(self.model)
+    self._obs_and_forward = make_obs_and_forward(self.model)
 
     # Dataset cache (loaded lazily)
     self._datasets: dict[int, BCDataset] | None = None
@@ -82,21 +81,6 @@ class ModelServer:
     """Public access to the JIT'd inference closure for GA/adversarial loops."""
     return self._obs_and_forward
 
-  @staticmethod
-  def _make_forward(model: eqx.Module) -> Callable:
-    """Create a JIT'd inference closure capturing the given model weights."""
-
-    @functools.partial(jax.jit, static_argnums=(0,))
-    def obs_and_forward(
-      grid_size: int,
-      level_data: LevelData,
-      env_states: EnvState,
-    ) -> jax.Array:
-      obs = jax.vmap(lambda es: observe(grid_size, level_data, es))(env_states)
-      return jax.vmap(model)(obs)
-
-    return obs_and_forward
-
   def _rebind_forward(self) -> None:
     """Rebind the forward function after model weights change.
 
@@ -104,7 +88,7 @@ class ModelServer:
     After model weight updates, we need a new closure so JIT sees the new
     leaves. The XLA kernels (keyed on grid_size) persist across closures.
     """
-    self._obs_and_forward = self._make_forward(self.model)
+    self._obs_and_forward = make_obs_and_forward(self.model)
 
   def load_datasets(
     self,
