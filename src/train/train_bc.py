@@ -1,11 +1,6 @@
 """Behavioral cloning training script for Mummy Maze."""
 
-import enum
-import json
-import sys
 import time
-from pathlib import Path
-from typing import Annotated
 
 import equinox as eqx
 import jax
@@ -16,8 +11,6 @@ import optax
 from collections.abc import Callable
 from typing import Any
 
-import click
-import typer
 from tqdm import tqdm
 
 from jaxtyping import Array, Float, Int
@@ -27,8 +20,7 @@ from src.train.config import TrainConfig, TrainState
 from src.train.dataset import BCDataset, make_batch_obs
 from src.train.eval import compute_level_metrics, compute_markov_win_probs
 from src.train.loss import cross_entropy_loss, top1_accuracy
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, parse_hparams
-from src.train.reporter import FileReporter, MetricsReporter, StdioReporter
+from src.train.reporter import FileReporter, MetricsReporter
 
 
 @eqx.filter_jit
@@ -336,89 +328,3 @@ def train_epochs(
       )
 
   return state
-
-
-class Mode(str, enum.Enum):
-  standalone = "standalone"
-  subprocess = "subprocess"
-
-
-def main(
-  mazes: Annotated[
-    Path, typer.Option(help="Directory containing B-*.dat files")
-  ] = Path("mazes"),
-  epochs: int = 10,
-  batch_size: int = 1024,
-  lr: float = 3e-4,
-  seed: int = 0,
-  wandb_project: Annotated[str | None, typer.Option(help="W&B project name")] = None,
-  metrics_path: Path = Path("level_metrics.json"),
-  checkpoint_dir: Annotated[
-    Path | None, typer.Option(help="Save checkpoints to this directory")
-  ] = None,
-  mode: Annotated[
-    Mode, typer.Option(help="standalone: tqdm; subprocess: JSON")
-  ] = Mode.standalone,
-  checkpoint: Annotated[
-    Path | None, typer.Option(help="Resume from checkpoint directory")
-  ] = None,
-  augment_levels: Annotated[
-    Path | None, typer.Option(help="JSON file of extra levels")
-  ] = None,
-  epoch_offset: int = 0,
-  step_offset: int = 0,
-  arch: Annotated[
-    str,
-    typer.Option(
-      help="Model architecture",
-      click_type=click.Choice(sorted(MODEL_REGISTRY)),
-    ),
-  ] = DEFAULT_ARCH,
-  dihedral_augment: Annotated[
-    bool, typer.Option(help="Expand training set with dihedral variants")
-  ] = False,
-  hparam: Annotated[
-    list[str] | None,
-    typer.Option(help="Model hparam as key=value (repeatable)"),
-  ] = None,
-) -> None:
-  """Behavioral cloning for Mummy Maze."""
-  if mode == Mode.subprocess:
-    reporter: FileReporter | StdioReporter = StdioReporter()
-  else:
-    reporter = FileReporter(metrics_path)
-
-  hparams = parse_hparams(arch, hparam or [])
-
-  from src.train.session import setup_training
-
-  try:
-    session = setup_training(
-      maze_dir=mazes,
-      epochs=epochs,
-      batch_size=batch_size,
-      lr=lr,
-      seed=seed,
-      wandb_project=wandb_project,
-      metrics_path=metrics_path,
-      checkpoint_dir=checkpoint_dir,
-      reporter=reporter,
-      checkpoint=checkpoint,
-      augment_levels=augment_levels,
-      epoch_offset=epoch_offset,
-      step_offset=step_offset,
-      arch=arch,
-      dihedral_augment=dihedral_augment,
-      hparams=hparams,
-    )
-    session.run()
-    session.finish()
-  except Exception as e:
-    if mode == Mode.subprocess:
-      sys.stdout.write(json.dumps({"type": "error", "message": str(e)}) + "\n")
-      sys.stdout.flush()
-    raise
-
-
-if __name__ == "__main__":
-  typer.run(main)

@@ -13,7 +13,7 @@
 - `train/` — behavioral cloning pipeline
   - `__main__.py` — unified entry point: `python -m src.train config/foo.py --key=val`
   - `configurator.py` — nanoGPT-style config loader: `exec()` .py files + `--key=value` overrides
-  - `train_bc.py` — `train_epochs` loop, `train_step`/`eval_step`, legacy CLI entry point
+  - `train_bc.py` — `train_epochs` loop, `train_step`/`eval_step`
   - `session.py` — `TrainingSession` dataclass and `setup_training()` factory
   - `config.py` — `TrainConfig` (hyperparams) and `TrainState` (mutable model/optimizer state)
   - `callbacks.py` — `LogFn`, `CheckpointFn` types and factory functions (wandb, directory checkpoints)

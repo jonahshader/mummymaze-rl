@@ -24,14 +24,17 @@ optimal BFS actions from observations. Writes `level_metrics.json` (per-level
 accuracy/loss) after each epoch for the viewer's Training tab.
 
 ```bash
-# Basic training (10 epochs, writes level_metrics.json to CWD)
-uv run python -m src.train.train_bc
+# Basic training (10 epochs, default config)
+uv run python -m src.train config/bc_default.py
 
 # With wandb logging
-uv run python -m src.train.train_bc --wandb-project mummymaze
+uv run python -m src.train config/bc_default.py --wandb_project=mummymaze
 
 # Custom settings
-uv run python -m src.train.train_bc --epochs 20 --batch-size 2048 --lr 1e-3
+uv run python -m src.train config/bc_default.py --epochs=20 --batch_size=2048 --lr=1e-3
+
+# Adversarial training
+uv run python -m src.train config/adversarial_default.py
 ```
 
 **`solve_all.py`** — Batch BFS solver. Solves all 10,100 sublevels via the Rust engine

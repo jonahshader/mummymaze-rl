@@ -4,17 +4,14 @@ Train → generate hard levels via GA → retrain on augmented data → repeat.
 The GA targets a Goldilocks zone of difficulty and MAP-Elites ensures diversity.
 
 Usage:
-  uv run python -m src.train.adversarial_loop --mazes mazes/ --n-rounds 3
+  uv run python -m src.train config/adversarial_default.py
 """
 
 import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated
 
-import click
-import typer
 import jax.random as jr
 import mummymaze_rust
 import numpy as np
@@ -24,7 +21,7 @@ from src.train.callbacks import make_checkpoint_fn
 from src.train.config import TrainConfig
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
 from src.train.inference import make_obs_and_forward
-from src.train.model import DEFAULT_ARCH, MODEL_REGISTRY, parse_hparams
+from src.train.model import DEFAULT_ARCH
 from src.train.reporter import FileReporter, MetricsReporter
 from src.train.session import setup_training
 from src.train.train_bc import train_epochs
@@ -366,72 +363,3 @@ def adversarial_loop(
     }
   )
   session.finish()
-
-
-def main(
-  mazes: Annotated[
-    Path, typer.Option(help="Directory containing B-*.dat files")
-  ] = Path("mazes"),
-  n_rounds: int = 3,
-  epochs_per_round: int = 5,
-  batch_size: int = 1024,
-  lr: float = 3e-4,
-  seed: int = 0,
-  ga_generations: int = 50,
-  ga_pop_size: int = 64,
-  target_log_wp: float = -1.0,
-  ga_seeds_per_gs: int = 100,
-  archive_bfs_bins: int = 20,
-  archive_states_bins: int = 20,
-  grid_sizes: Annotated[list[int], typer.Option(help="Grid sizes to train on")] = [
-    6,
-    8,
-    10,
-  ],
-  checkpoint_dir: Annotated[Path, typer.Option(help="Save checkpoints here")] = Path(
-    "checkpoints/adversarial"
-  ),
-  metrics_path: Path = Path("level_metrics_adversarial.json"),
-  arch: Annotated[
-    str,
-    typer.Option(
-      help="Model architecture",
-      click_type=click.Choice(sorted(MODEL_REGISTRY)),
-    ),
-  ] = DEFAULT_ARCH,
-  dihedral_augment: Annotated[
-    bool, typer.Option(help="Expand training set with dihedral variants")
-  ] = False,
-  wandb_project: Annotated[str | None, typer.Option(help="W&B project name")] = None,
-  hparam: Annotated[
-    list[str] | None,
-    typer.Option(help="Model hparam as key=value (repeatable)"),
-  ] = None,
-) -> None:
-  """MAP-Elites adversarial training loop."""
-  hparams = parse_hparams(arch, hparam or [])
-  adversarial_loop(
-    maze_dir=mazes,
-    n_rounds=n_rounds,
-    epochs_per_round=epochs_per_round,
-    batch_size=batch_size,
-    lr=lr,
-    seed=seed,
-    ga_generations=ga_generations,
-    ga_pop_size=ga_pop_size,
-    target_log_policy_wp=target_log_wp,
-    ga_seeds_per_gs=ga_seeds_per_gs,
-    archive_bfs_bins=archive_bfs_bins,
-    archive_states_bins=archive_states_bins,
-    grid_sizes=grid_sizes,
-    checkpoint_dir=checkpoint_dir,
-    metrics_path=metrics_path,
-    arch=arch,
-    dihedral_augment=dihedral_augment,
-    wandb_project=wandb_project,
-    hparams=hparams,
-  )
-
-
-if __name__ == "__main__":
-  typer.run(main)
