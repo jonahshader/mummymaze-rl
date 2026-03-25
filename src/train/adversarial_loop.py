@@ -11,154 +11,71 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import jax.random as jr
 import mummymaze_rust
 import numpy as np
 
-from src.train.augment import augment_dataset
-from src.train.callbacks import make_checkpoint_fn
-from src.train.config import TrainConfig
+from src.train.config import TrainState
 from src.train.ga import GenerationResult, MapElitesArchive, run_ga
 from src.train.inference import make_obs_and_forward
+from src.train.loop import RoundEndFn, training_loop
 from src.train.model import DEFAULT_ARCH
 from src.train.reporter import FileReporter, MetricsReporter
 from src.train.session import setup_training
-from src.train.train_bc import train_epochs
+from src.train.stopping import stop_after
 
 
-def adversarial_loop(
-  maze_dir: Path,
+def make_ga_round_end(
   *,
-  n_rounds: int = 3,
-  epochs_per_round: int = 5,
-  batch_size: int = 1024,
-  lr: float = 3e-4,
-  seed: int = 0,
+  maze_dir: Path,
+  grid_sizes: list[int],
   ga_generations: int = 50,
   ga_pop_size: int = 64,
   target_log_policy_wp: float = -1.0,
   ga_seeds_per_gs: int = 100,
   archive_bfs_bins: int = 20,
   archive_states_bins: int = 20,
-  grid_sizes: list[int] | None = None,
   checkpoint_dir: Path = Path("checkpoints/adversarial"),
-  metrics_path: Path = Path("level_metrics_adversarial.json"),
-  arch: str = DEFAULT_ARCH,
-  reporter: MetricsReporter | None = None,
-  on_event: Callable[[dict], None] | None = None,
+  seed: int = 0,
   dihedral_augment: bool = False,
-  wandb_project: str | None = None,
-  hparams: dict[str, object] | None = None,
-) -> None:
-  """Run the adversarial training loop.
+  n_rounds: int | None = None,
+  log_fn: Callable | None = None,
+  on_event: Callable[[dict], None] | None = None,
+) -> RoundEndFn:
+  """Build a round-end callback that runs MAP-Elites GA level generation.
 
-  Args:
-    reporter: Training metrics reporter. Defaults to FileReporter.
-    on_event: Callback for adversarial-specific events (round_start,
-      ga_generation, archive_update, round_end, done).
-    wandb_project: If set, log training metrics to this W&B project.
+  Returns a RoundEndFn: (state, datasets, sources, round_idx) -> list[Level] | None.
+  The returned levels are automatically augmented into the dataset by training_loop.
   """
-  if grid_sizes is None:
-    grid_sizes = [6, 8, 10]
-
-  if reporter is None:
-    reporter = FileReporter(metrics_path)
+  key = jr.key(seed)
+  total_ga_levels = 0
 
   def _emit(event: dict) -> None:
     if on_event is not None:
       on_event(event)
 
-  session = setup_training(
-    maze_dir=maze_dir,
-    arch=arch,
-    hparams=hparams,
-    epochs=epochs_per_round,
-    batch_size=batch_size,
-    lr=lr,
-    seed=seed,
-    dihedral_augment=dihedral_augment,
-    wandb_project=wandb_project,
-    wandb_config={
-      "mode": "adversarial",
-      "n_rounds": n_rounds,
-      "epochs_per_round": epochs_per_round,
-      "ga_generations": ga_generations,
-      "ga_pop_size": ga_pop_size,
-      "target_log_policy_wp": target_log_policy_wp,
-      "dihedral_augment": dihedral_augment,
-    },
-    reporter=reporter,
-    metrics_path=metrics_path,
-    run_id=f"adversarial-{arch}-{seed}",
-    schedule_epochs=epochs_per_round * n_rounds,
-  )
-  train_state = session.state
-  datasets = session.datasets
-  sources = session.sources
-  reporter = session.reporter
-  log_fn = session.log_fn
+  def ga_round_end(
+    state: TrainState,
+    datasets: dict,
+    sources: dict,
+    round_idx: int,
+  ) -> list[Any] | None:
+    nonlocal key, total_ga_levels
 
-  # Compute steps_per_round for max_steps budget per round
-  steps_per_round = (
-    sum(int(ds.train_mask.sum()) // batch_size for ds in datasets.values())
-    * epochs_per_round
-  )
-
-  global_epoch = 0
-  total_ga_levels = 0
-
-  for round_idx in range(n_rounds):
-    round_t0 = time.time()
-    print(f"\n{'=' * 60}")
-    print(f"Round {round_idx}/{n_rounds - 1}")
-    print(f"{'=' * 60}")
-    _emit(
-      {
-        "type": "round_start",
-        "round": round_idx,
-        "n_rounds": n_rounds,
-      }
-    )
-
-    # --- Train Phase ---
-    print(f"\n--- Training ({epochs_per_round} epochs) ---")
-    round_ckpt_dir = checkpoint_dir / f"round{round_idx:03d}"
-    round_max_steps = train_state.global_step + steps_per_round
-    round_config = TrainConfig(
-      epochs=epochs_per_round,
-      batch_size=batch_size,
-      lr=lr,
-      arch=arch,
-      hparams=hparams or {},
-      run_id=run_id,
-      maze_dir=maze_dir,
-      max_steps=round_max_steps,
-    )
-    train_state.epoch_offset = global_epoch
-    train_state = train_epochs(
-      train_state,
-      round_config,
-      datasets,
-      sources,
-      reporter,
-      log_fn=log_fn,
-      checkpoint_fn=make_checkpoint_fn(round_ckpt_dir),
-    )
-    global_epoch += epochs_per_round
-
-    # Skip GA on the last round (no point generating levels we won't train on)
-    if round_idx == n_rounds - 1:
+    # Skip GA on the last round
+    if n_rounds is not None and round_idx == n_rounds - 1:
       print("\nLast round — skipping GA phase.")
-      continue
+      return None
 
-    # --- GA Phase ---
     print(f"\n--- GA Phase (grid_sizes={grid_sizes}) ---")
 
     fitness_expr = f"-abs(log_policy_win_prob - ({target_log_policy_wp}))"
-    obs_and_forward = make_obs_and_forward(train_state.model)
+    obs_and_forward = make_obs_and_forward(state.model)
 
     round_ga_levels: list[mummymaze_rust.Level] = []
+    round_ckpt_dir = checkpoint_dir / f"round{round_idx:03d}"
 
     for gs in grid_sizes:
       if gs not in datasets:
@@ -166,7 +83,7 @@ def adversarial_loop(
 
       print(f"\n  Grid size {gs}:")
 
-      # Sample 100 random train-only levels as GA seeds
+      # Sample random train-only levels as GA seeds
       bank = datasets[gs].bank
       train_set = set(np.array(bank.train_indices).tolist())
       all_sources = sources[gs]
@@ -243,7 +160,7 @@ def adversarial_loop(
       occupied, total = archive.occupancy()
       print(f"    Archive: {n_archive} levels ({ga_time:.1f}s)")
 
-      # Build enriched cells array (flat row-major [bfs_bin * states_bins + states_bin])
+      # Build enriched cells array
       archive_cells: list[dict | None] = []
       for bi in range(archive.bfs_bins):
         for si in range(archive.states_bins):
@@ -305,26 +222,17 @@ def adversarial_loop(
 
     if not round_ga_levels:
       print("\n  No GA levels generated, continuing without augmentation")
-      continue
+      return None
 
     total_ga_levels += len(round_ga_levels)
 
-    # --- Augment Phase ---
     print(f"\n--- Augmenting dataset with {len(round_ga_levels)} GA levels ---")
-    datasets = augment_dataset(
-      datasets,
-      round_ga_levels,
-      dihedral_augment=dihedral_augment,
-    )
-    for gs, ds in sorted(datasets.items()):
-      n_train = int(ds.train_mask.sum())
-      print(f"  grid_size={gs}: {ds.n_states} states ({n_train} train)")
 
     if log_fn is not None:
       total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
       total_train_levels = sum(len(ds.bank.train_indices) for ds in datasets.values())
       log_fn(
-        train_state.global_step,
+        state.global_step,
         {
           "adversarial/round": float(round_idx),
           "adversarial/ga_levels_added": float(len(round_ga_levels)),
@@ -336,30 +244,102 @@ def adversarial_loop(
 
     # Save archive state
     archive_path = round_ckpt_dir / "archive.json"
-    archive_data = []
-    for level in round_ga_levels:
-      archive_data.append(level.to_dict())
+    archive_data = [level.to_dict() for level in round_ga_levels]
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     with open(archive_path, "w") as f:
       json.dump(archive_data, f)
     print(f"  Saved archive to {archive_path}")
 
-    round_time = time.time() - round_t0
-    print(f"\nRound {round_idx} complete ({round_time:.1f}s)")
-    _emit(
-      {
-        "type": "round_end",
-        "round": round_idx,
-        "time": round_time,
-        "ga_levels": len(round_ga_levels),
-      }
-    )
+    # Return levels for augmentation (training_loop handles augment_dataset)
+    return round_ga_levels
 
-  print(f"\nAdversarial loop complete. Total GA levels: {total_ga_levels}")
-  _emit(
-    {
-      "type": "done",
-      "total_ga_levels": total_ga_levels,
-    }
+  return ga_round_end
+
+
+def adversarial_loop(
+  maze_dir: Path,
+  *,
+  n_rounds: int = 3,
+  epochs_per_round: int = 5,
+  batch_size: int = 1024,
+  lr: float = 3e-4,
+  seed: int = 0,
+  ga_generations: int = 50,
+  ga_pop_size: int = 64,
+  target_log_policy_wp: float = -1.0,
+  ga_seeds_per_gs: int = 100,
+  archive_bfs_bins: int = 20,
+  archive_states_bins: int = 20,
+  grid_sizes: list[int] | None = None,
+  checkpoint_dir: Path = Path("checkpoints/adversarial"),
+  metrics_path: Path = Path("level_metrics_adversarial.json"),
+  arch: str = DEFAULT_ARCH,
+  reporter: MetricsReporter | None = None,
+  on_event: Callable[[dict], None] | None = None,
+  dihedral_augment: bool = False,
+  wandb_project: str | None = None,
+  hparams: dict[str, object] | None = None,
+) -> None:
+  """Run the adversarial training loop.
+
+  Thin wrapper around training_loop + make_ga_round_end.
+  """
+  if grid_sizes is None:
+    grid_sizes = [6, 8, 10]
+
+  if reporter is None:
+    reporter = FileReporter(metrics_path)
+
+  session = setup_training(
+    maze_dir=maze_dir,
+    arch=arch,
+    hparams=hparams,
+    epochs=epochs_per_round,
+    batch_size=batch_size,
+    lr=lr,
+    seed=seed,
+    dihedral_augment=dihedral_augment,
+    wandb_project=wandb_project,
+    wandb_config={
+      "mode": "adversarial",
+      "n_rounds": n_rounds,
+      "epochs_per_round": epochs_per_round,
+      "ga_generations": ga_generations,
+      "ga_pop_size": ga_pop_size,
+      "target_log_policy_wp": target_log_policy_wp,
+      "dihedral_augment": dihedral_augment,
+    },
+    reporter=reporter,
+    metrics_path=metrics_path,
+    run_id=f"adversarial-{arch}-{seed}",
+    schedule_epochs=epochs_per_round * n_rounds,
   )
+
+  ga_round_end = make_ga_round_end(
+    maze_dir=maze_dir,
+    grid_sizes=grid_sizes,
+    ga_generations=ga_generations,
+    ga_pop_size=ga_pop_size,
+    target_log_policy_wp=target_log_policy_wp,
+    ga_seeds_per_gs=ga_seeds_per_gs,
+    archive_bfs_bins=archive_bfs_bins,
+    archive_states_bins=archive_states_bins,
+    checkpoint_dir=checkpoint_dir,
+    seed=seed,
+    dihedral_augment=dihedral_augment,
+    n_rounds=n_rounds,
+    log_fn=session.log_fn,
+    on_event=on_event,
+  )
+
+  training_loop(
+    session,
+    inner_stop=stop_after(epochs_per_round),
+    outer_stop=stop_after(n_rounds),
+    on_round_end=ga_round_end,
+    on_event=on_event,
+    round_checkpoint_dir=lambda r: str(checkpoint_dir / f"round{r:03d}"),
+  )
+
+  print("\nAdversarial loop complete.")
   session.finish()

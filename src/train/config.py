@@ -1,13 +1,30 @@
-"""Training configuration and state dataclasses."""
+"""Training configuration, state, and component dataclasses."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import equinox as eqx
 import jax
 import optax
 
 from src.train.model import DEFAULT_ARCH
+
+# Type aliases for swappable training components
+LossFn = Callable[..., Any]  # (logits, targets) -> scalar loss
+MetricFn = Callable[..., Any]  # (logits, targets) -> scalar metric
+MakeObsFn = Callable[..., Any]  # same signature as make_batch_obs
+StopFn = Callable[["TrainState", int], bool]  # (state, iteration) -> should_stop
+
+
+@dataclass(frozen=True)
+class TrainComponents:
+  """Swappable training components. Passed through to train_epochs."""
+
+  loss_fn: LossFn
+  metric_fn: MetricFn
+  make_obs_fn: MakeObsFn
 
 
 @dataclass(frozen=True)

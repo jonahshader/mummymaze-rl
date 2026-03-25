@@ -14,7 +14,7 @@ from src.train.callbacks import (
   make_wandb_log_fn,
 )
 from src.train.checkpoint import load_checkpoint
-from src.train.config import TrainConfig, TrainState
+from src.train.config import TrainComponents, TrainConfig, TrainState
 from src.train.dataset import BCDataset, load_bc_dataset
 from src.train.model import DEFAULT_ARCH, make_model
 from src.train.optim import count_params, make_optimizer
@@ -33,6 +33,7 @@ class TrainingSession:
   reporter: MetricsReporter
   log_fn: LogFn | None
   checkpoint_fn: CheckpointFn | None
+  components: TrainComponents | None = None
   _wandb_active: bool = field(default=False, repr=False)
 
   def run(self) -> TrainState:
@@ -45,6 +46,7 @@ class TrainingSession:
       self.reporter,
       log_fn=self.log_fn,
       checkpoint_fn=self.checkpoint_fn,
+      components=self.components,
     )
     return self.state
 
@@ -85,6 +87,9 @@ def setup_training(
   step_offset: int = 0,
   # Optimizer schedule override (e.g. adversarial: epochs_per_round * n_rounds)
   schedule_epochs: int | None = None,
+  # Swappable components
+  optimizer: object | None = None,  # optax.GradientTransformation; skip make_optimizer
+  components: TrainComponents | None = None,
 ) -> TrainingSession:
   """Set up a training run: load data, init model, create optimizer, build callbacks.
 
@@ -155,13 +160,13 @@ def setup_training(
 
   # --- Optimizer ---
   total_train_states = sum(int(ds.train_mask.sum()) for ds in datasets.values())
-  steps_per_epoch = sum(
-    int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
-  )
-  effective_epochs = schedule_epochs if schedule_epochs is not None else epochs
-  total_steps = steps_per_epoch * effective_epochs
-
-  optimizer = make_optimizer(lr, total_steps)
+  if optimizer is None:
+    steps_per_epoch = sum(
+      int(ds.train_mask.sum()) // batch_size for ds in datasets.values()
+    )
+    effective_epochs = schedule_epochs if schedule_epochs is not None else epochs
+    total_steps = steps_per_epoch * effective_epochs
+    optimizer = make_optimizer(lr, total_steps)
 
   # Restore optimizer state from checkpoint if available
   opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
@@ -241,5 +246,6 @@ def setup_training(
     reporter=reporter,
     log_fn=log_fn,
     checkpoint_fn=checkpoint_fn,
+    components=components,
     _wandb_active=wandb_active,
   )

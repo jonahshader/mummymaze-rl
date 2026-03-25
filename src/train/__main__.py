@@ -50,6 +50,17 @@ DEFAULTS: dict[str, object] = {
   "grid_sizes": [6, 8, 10],
 }
 
+# Config keys that are callables (not coercible from CLI strings)
+CALLABLE_KEYS = {
+  "loss_fn",
+  "metric_fn",
+  "make_obs_fn",
+  "optimizer",
+  "inner_stop",
+  "outer_stop",
+  "on_round_end",
+}
+
 
 def main() -> None:
   config_file, overrides = parse_argv()
@@ -57,6 +68,9 @@ def main() -> None:
 
   mode = config.pop("mode")
   subprocess_mode = config.pop("subprocess")
+
+  # Extract callables before primitive coercion
+  callables = {k: config.pop(k) for k in CALLABLE_KEYS if k in config}
 
   # Path coercion
   maze_dir = Path(str(config.pop("maze_dir")))
@@ -78,23 +92,62 @@ def main() -> None:
 
     reporter = FileReporter(metrics_path)
 
+  # Build TrainComponents from config callables (with defaults)
+  components = _build_components(callables)
+
   if mode == "bc":
-    _run_bc(config, maze_dir, checkpoint_dir, checkpoint, augment_levels, reporter)
+    _run_bc(
+      config,
+      callables,
+      components,
+      maze_dir,
+      checkpoint_dir,
+      checkpoint,
+      augment_levels,
+      reporter,
+    )
   elif mode == "adversarial":
-    _run_adversarial(config, maze_dir, checkpoint_dir, metrics_path, reporter)
+    _run_adversarial(
+      config,
+      callables,
+      components,
+      maze_dir,
+      checkpoint_dir,
+      metrics_path,
+      reporter,
+    )
   else:
     print(f"Unknown mode: {mode!r}. Expected 'bc' or 'adversarial'.")
     sys.exit(1)
 
 
+def _build_components(callables: dict) -> object | None:
+  """Build TrainComponents from config callables, or None for defaults."""
+  if not any(k in callables for k in ("loss_fn", "metric_fn", "make_obs_fn")):
+    return None
+
+  from src.train.config import TrainComponents
+  from src.train.dataset import make_batch_obs
+  from src.train.loss import cross_entropy_loss, top1_accuracy
+
+  return TrainComponents(
+    loss_fn=callables.get("loss_fn", cross_entropy_loss),
+    metric_fn=callables.get("metric_fn", top1_accuracy),
+    make_obs_fn=callables.get("make_obs_fn", make_batch_obs),
+  )
+
+
 def _run_bc(
   config: dict,
+  callables: dict,
+  components: object | None,
   maze_dir: Path,
   checkpoint_dir: Path | None,
   checkpoint: Path | None,
   augment_levels: Path | None,
   reporter: object,
 ) -> None:
+  from src.train.loop import training_loop
   from src.train.session import setup_training
 
   session = setup_training(
@@ -113,13 +166,23 @@ def _run_bc(
     step_offset=int(config.get("step_offset", 0)),
     dihedral_augment=bool(config.get("dihedral_augment", False)),
     reporter=reporter,
+    optimizer=callables.get("optimizer"),
+    components=components,
   )
-  session.run()
+
+  training_loop(
+    session,
+    inner_stop=callables.get("inner_stop"),
+    outer_stop=callables.get("outer_stop"),
+    on_round_end=callables.get("on_round_end"),
+  )
   session.finish()
 
 
 def _run_adversarial(
   config: dict,
+  callables: dict,
+  components: object | None,
   maze_dir: Path,
   checkpoint_dir: Path | None,
   metrics_path: Path,

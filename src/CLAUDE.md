@@ -13,9 +13,11 @@
 - `train/` — behavioral cloning pipeline
   - `__main__.py` — unified entry point: `python -m src.train config/foo.py --key=val`
   - `configurator.py` — nanoGPT-style config loader: `exec()` .py files + `--key=value` overrides
-  - `train_bc.py` — `train_epochs` loop, `train_step`/`eval_step`
+  - `loop.py` — unified `training_loop` with inner/outer stop conditions and round-end callbacks
+  - `train_bc.py` — `train_epochs` inner loop, `make_train_step`/`make_eval_step` closure factories
   - `session.py` — `TrainingSession` dataclass and `setup_training()` factory
-  - `config.py` — `TrainConfig` (hyperparams) and `TrainState` (mutable model/optimizer state)
+  - `config.py` — `TrainConfig`, `TrainState`, `TrainComponents` (swappable loss/metric/obs)
+  - `stopping.py` — stop-condition combinators: `stop_after`, `stop_at_step`, `any_of`, `all_of`
   - `callbacks.py` — `LogFn`, `CheckpointFn` types and factory functions (wandb, directory checkpoints)
   - `inference.py` — shared `make_obs_and_forward` JIT'd closure
   - `loss.py` — `cross_entropy_loss`, `top1_accuracy`

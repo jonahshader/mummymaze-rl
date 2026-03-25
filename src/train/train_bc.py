@@ -15,53 +15,77 @@ from tqdm import tqdm
 
 from jaxtyping import Array, Float, Int
 
+import itertools
+
 from src.train.callbacks import CheckpointFn, LogFn
-from src.train.config import TrainConfig, TrainState
+from src.train.config import (
+  LossFn,
+  MetricFn,
+  StopFn,
+  TrainComponents,
+  TrainConfig,
+  TrainState,
+)
 from src.train.dataset import BCDataset, make_batch_obs
 from src.train.eval import compute_level_metrics, compute_markov_win_probs
 from src.train.loss import cross_entropy_loss, top1_accuracy
 from src.train.reporter import FileReporter, MetricsReporter
 
 
-@eqx.filter_jit
-def train_step(
-  model: eqx.Module,
-  opt_state: optax.OptState,
-  optimizer: optax.GradientTransformation,
-  obs: Float[Array, "B 10 H W"],
-  targets: Float[Array, "B 5"],
-) -> tuple[
-  eqx.Module,
-  optax.OptState,
-  Float[Array, ""],
-  Float[Array, ""],
-  Float[Array, "B 5"],
-]:
-  """Single training step: forward, loss, backward, update. Returns logits too."""
-
-  def loss_fn(m: eqx.Module) -> tuple[Float[Array, ""], Float[Array, "B 5"]]:
-    logits = jax.vmap(m)(obs)
-    loss = cross_entropy_loss(logits, targets)
-    return loss, logits
-
-  (loss, logits), grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
-  updates, new_opt_state = optimizer.update(grads, opt_state, model)  # type: ignore[arg-type]
-  new_model = eqx.apply_updates(model, updates)
-  acc = top1_accuracy(logits, targets)
-  return new_model, new_opt_state, loss, acc, logits
+# --- Closure factories for JIT'd train/eval steps ---
 
 
-@eqx.filter_jit
-def eval_step(
-  model: eqx.Module,
-  obs: Float[Array, "B 10 H W"],
-  targets: Float[Array, "B 5"],
-) -> tuple[Float[Array, ""], Float[Array, ""]]:
-  """Evaluation step: forward + metrics, no gradients."""
-  logits = jax.vmap(model)(obs)
-  loss = cross_entropy_loss(logits, targets)
-  acc = top1_accuracy(logits, targets)
-  return loss, acc
+def make_train_step(loss_fn: LossFn, metric_fn: MetricFn) -> Callable[..., Any]:
+  """Build a JIT'd training step capturing the given loss and metric functions."""
+
+  @eqx.filter_jit
+  def train_step(
+    model: eqx.Module,
+    opt_state: optax.OptState,
+    optimizer: optax.GradientTransformation,
+    obs: Float[Array, "B 10 H W"],
+    targets: Float[Array, "B 5"],
+  ) -> tuple[
+    eqx.Module,
+    optax.OptState,
+    Float[Array, ""],
+    Float[Array, ""],
+    Float[Array, "B 5"],
+  ]:
+    def _loss(m: eqx.Module) -> tuple[Float[Array, ""], Float[Array, "B 5"]]:
+      logits = jax.vmap(m)(obs)
+      loss = loss_fn(logits, targets)
+      return loss, logits
+
+    (loss, logits), grads = eqx.filter_value_and_grad(_loss, has_aux=True)(model)
+    updates, new_opt_state = optimizer.update(grads, opt_state, model)  # type: ignore[arg-type]
+    new_model = eqx.apply_updates(model, updates)
+    acc = metric_fn(logits, targets)
+    return new_model, new_opt_state, loss, acc, logits
+
+  return train_step
+
+
+def make_eval_step(loss_fn: LossFn, metric_fn: MetricFn) -> Callable[..., Any]:
+  """Build a JIT'd eval step capturing the given loss and metric functions."""
+
+  @eqx.filter_jit
+  def eval_step(
+    model: eqx.Module,
+    obs: Float[Array, "B 10 H W"],
+    targets: Float[Array, "B 5"],
+  ) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    logits = jax.vmap(model)(obs)
+    loss = loss_fn(logits, targets)
+    acc = metric_fn(logits, targets)
+    return loss, acc
+
+  return eval_step
+
+
+# Backward-compatible module-level versions (used by model_server.py)
+train_step = make_train_step(cross_entropy_loss, top1_accuracy)
+eval_step = make_eval_step(cross_entropy_loss, top1_accuracy)
 
 
 def train_epochs(
@@ -73,12 +97,26 @@ def train_epochs(
   *,
   log_fn: LogFn | None = None,
   checkpoint_fn: CheckpointFn | None = None,
+  components: TrainComponents | None = None,
+  inner_stop: StopFn | None = None,
 ) -> TrainState:
   """Run training epochs. Mutates and returns state.
 
-  If config.max_steps is set, training stops once global_step reaches that
-  limit, even if not all epochs have completed.
+  If inner_stop is provided, it controls when training stops (called with
+  state and epoch index). Otherwise, runs for config.epochs epochs.
+  config.max_steps is always respected as a safety cap.
   """
+  # Resolve components (default to standard BC loss/metric/obs)
+  if components is None:
+    components = TrainComponents(
+      loss_fn=cross_entropy_loss,
+      metric_fn=top1_accuracy,
+      make_obs_fn=make_batch_obs,
+    )
+
+  _train_step = make_train_step(components.loss_fn, components.metric_fn)
+  _eval_step = make_eval_step(components.loss_fn, components.metric_fn)
+
   use_tqdm = isinstance(reporter, FileReporter)
   batch_size = config.batch_size
 
@@ -89,13 +127,12 @@ def train_epochs(
     train_indices[gs] = jnp.where(ds.train_mask, size=int(ds.train_mask.sum()))[0]
     val_indices[gs] = jnp.where(ds.val_mask, size=int(ds.val_mask.sum()))[0]
 
-  # JIT make_batch_obs per grid_size (traces once)
+  # JIT observation builder per grid_size (traces once)
+  obs_fn = components.make_obs_fn
   jit_make_obs: dict[int, Callable[..., Any]] = {}
   for gs, ds in datasets.items():
     jit_make_obs[gs] = jax.jit(
-      lambda tuples, lidx, _gs=gs, _bank=ds.bank: make_batch_obs(
-        _gs, _bank, tuples, lidx
-      )
+      lambda tuples, lidx, _gs=gs, _bank=ds.bank: obs_fn(_gs, _bank, tuples, lidx)
     )
 
   # Pre-allocate logits buffers for accumulation
@@ -114,9 +151,16 @@ def train_epochs(
     total_steps = steps_per_epoch * config.epochs
     print(f"\nTraining for {config.epochs} epochs ({total_steps} steps)...")
 
-  for epoch_rel in range(config.epochs):
+  for epoch_rel in itertools.count():
     if stop_requested:
       break
+    # Check inner stopping condition (or default epoch count)
+    if inner_stop is not None:
+      if inner_stop(state, epoch_rel):
+        break
+    elif epoch_rel >= config.epochs:
+      break
+    # Safety cap: max_steps always respected
     if config.max_steps is not None and state.global_step >= config.max_steps:
       break
 
@@ -171,7 +215,7 @@ def train_epochs(
         jitted_grid_sizes.add(gs)
 
       obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-      state.model, state.opt_state, loss, acc, logits = train_step(
+      state.model, state.opt_state, loss, acc, logits = _train_step(
         state.model, state.opt_state, state.optimizer, obs, batch_targets
       )
       # Scatter logits into buffer for level metrics
@@ -227,7 +271,7 @@ def train_epochs(
       batch_level_idx = ds.level_idx[batch_idx]
 
       obs = jit_make_obs[gs](batch_tuples, batch_level_idx)
-      loss, acc = eval_step(state.model, obs, batch_targets)
+      loss, acc = _eval_step(state.model, obs, batch_targets)
       val_losses.append(float(loss))
       val_accs.append(float(acc))
 

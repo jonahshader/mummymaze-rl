@@ -10,6 +10,7 @@ Usage:
 
 import ast
 import sys
+import types
 
 
 def load_config(
@@ -35,9 +36,9 @@ def load_config(
     # exec into a clean namespace so config files can't pollute globals
     ns: dict[str, object] = {}
     exec(compile(source, config_file, "exec"), ns)  # noqa: S102
-    # Merge non-dunder, non-module keys
+    # Merge non-dunder, non-module keys (allows functions/lambdas through)
     for k, v in ns.items():
-      if not k.startswith("_") and not hasattr(v, "__module__"):
+      if not k.startswith("_") and not isinstance(v, types.ModuleType):
         config[k] = v
 
   # Step 3: apply CLI overrides
