@@ -157,14 +157,25 @@ def pad_and_stack(
   skeletons: list[GraphSkeleton],
   *,
   round_to_pow2: bool = True,
+  fixed_max_states: int | None = None,
+  fixed_max_edges: int | None = None,
+  fixed_max_win_edges: int | None = None,
 ) -> PaddedSkeletonBatch:
-  """Pad a list of skeletons to common sizes and stack as JAX arrays."""
+  """Pad a list of skeletons to common sizes and stack as JAX arrays.
+
+  If fixed_max_* are provided, use those sizes (avoids JIT recompilation
+  when different batches have different max sizes).
+  """
   L = len(skeletons)
   raw_max_s = max(s.n_states for s in skeletons)
   raw_max_e = max(s.n_edges for s in skeletons)
   raw_max_w = max(s.n_win_edges for s in skeletons)
 
-  if round_to_pow2:
+  if fixed_max_states is not None:
+    S = fixed_max_states
+    E = fixed_max_edges or _next_pow2(raw_max_e)
+    W = fixed_max_win_edges or _next_pow2(max(raw_max_w, 1))
+  elif round_to_pow2:
     S = _next_pow2(raw_max_s)
     E = _next_pow2(raw_max_e)
     W = _next_pow2(max(raw_max_w, 1))
@@ -263,16 +274,39 @@ def _forward_vi(
   edge_src: Int[Array, "E"],
   edge_dst: Int[Array, "E"],
   n_iters: int,
+  V_init: Float[Array, "N"] | None = None,
 ) -> Float[Array, "N"]:
   """Value iteration: V <- win_absorb + P^pi @ V."""
   N = win_absorb.shape[0]
+  V0 = V_init if V_init is not None else jnp.zeros(N, dtype=jnp.float32)
 
   def _step(V: Float[Array, "N"], _: None) -> tuple[Float[Array, "N"], None]:
     PV = jnp.zeros(N, dtype=jnp.float32).at[edge_src].add(p_values * V[edge_dst])
     return win_absorb + PV, None
 
-  V, _ = jax.lax.scan(_step, jnp.zeros(N, dtype=jnp.float32), None, length=n_iters)
+  V, _ = jax.lax.scan(_step, V0, None, length=n_iters)
   return V
+
+
+def _adjoint_vi(
+  p_values: Float[Array, "E"],
+  edge_src: Int[Array, "E"],
+  edge_dst: Int[Array, "E"],
+  start_idx: Int[Array, ""],
+  N: int,
+  n_iters: int,
+  lam_init: Float[Array, "N"] | None = None,
+) -> Float[Array, "N"]:
+  """Adjoint solve: lambda <- e_start + P^T @ lambda."""
+  e_start = jnp.zeros(N, dtype=jnp.float32).at[start_idx].set(1.0)
+  lam0 = lam_init if lam_init is not None else jnp.zeros(N, dtype=jnp.float32)
+
+  def _step(lam: Float[Array, "N"], _: None) -> tuple[Float[Array, "N"], None]:
+    PT_lam = jnp.zeros(N, dtype=jnp.float32).at[edge_dst].add(p_values * lam[edge_src])
+    return e_start + PT_lam, None
+
+  lam, _ = jax.lax.scan(_step, lam0, None, length=n_iters)
+  return lam
 
 
 # ---------------------------------------------------------------------------
@@ -348,15 +382,15 @@ def _make_solve_single(n_fwd_iters: int, n_bwd_iters: int) -> object:
     return V[start_idx]
 
   def _solve_fwd(  # noqa: ANN202
-    logits,
-    action_mask,
-    edge_src,
-    edge_action,
-    edge_dst,
+    logits,  # noqa: ANN001
+    action_mask,  # noqa: ANN001
+    edge_src,  # noqa: ANN001
+    edge_action,  # noqa: ANN001
+    edge_dst,  # noqa: ANN001
     edge_mask,  # noqa: ANN001
-    win_src,
-    win_action,
-    win_mask,
+    win_src,  # noqa: ANN001
+    win_action,  # noqa: ANN001
+    win_mask,  # noqa: ANN001
     start_idx,  # noqa: ANN001
   ):  # custom_vjp fwd — signature mirrors _solve
     probs = _policy_from_logits(logits, action_mask)
@@ -451,3 +485,146 @@ def _make_solve_single(n_fwd_iters: int, n_bwd_iters: int) -> object:
 # Default solver: 500 forward + 500 adjoint iterations.
 # Converges to ~1e-6 for typical gs=6 levels.
 solve_win_prob = _make_solve_single(n_fwd_iters=500, n_bwd_iters=500)
+
+
+# ---------------------------------------------------------------------------
+# Surrogate solver — supports warm-start caching, no custom_vjp needed
+# ---------------------------------------------------------------------------
+
+
+def make_solve_surrogate(
+  n_fwd_iters: int = 20,
+  n_bwd_iters: int = 20,
+) -> object:
+  """Build a differentiable solver using the surrogate gradient trick.
+
+  Both forward (V) and adjoint (lambda) solves run under stop_gradient.
+  A surrogate expression then reconstructs the correct gradient through
+  live policy probs. Supports warm-starting from cached V/lambda.
+
+  Returns a function:
+    (logits, action_mask, ..., V_init, lam_init) -> (V_start, V, lam)
+  where V_start has the correct gradient, and V/lam are for caching.
+  """
+
+  def _solve(
+    logits: Float[Array, "N 5"],
+    action_mask: Bool[Array, "N 5"],
+    edge_src: Int[Array, "E"],
+    edge_action: Int[Array, "E"],
+    edge_dst: Int[Array, "E"],
+    edge_mask: Bool[Array, "E"],
+    win_src: Int[Array, "W"],
+    win_action: Int[Array, "W"],
+    win_mask: Bool[Array, "W"],
+    start_idx: Int[Array, ""],
+    V_init: Float[Array, "N"],
+    lam_init: Float[Array, "N"],
+  ) -> tuple[Float[Array, ""], Float[Array, "N"], Float[Array, "N"]]:
+    N = logits.shape[0]
+
+    # Policy: live (gradient flows through here via surrogate)
+    probs = _policy_from_logits(logits, action_mask)
+
+    # Stopped policy for the VI solves
+    probs_sg = jax.lax.stop_gradient(probs)
+    p_values_sg, win_absorb_sg = _build_markov(
+      probs_sg,
+      edge_src,
+      edge_action,
+      edge_dst,
+      edge_mask,
+      win_src,
+      win_action,
+      win_mask,
+    )
+
+    # Forward solve (no grad): V = (I - P^pi)^{-1} b
+    V = _forward_vi(p_values_sg, win_absorb_sg, edge_src, edge_dst, n_fwd_iters, V_init)
+    V = jax.lax.stop_gradient(V)
+
+    # Adjoint solve (no grad): (I - P^T) lam = e_start
+    lam = _adjoint_vi(
+      p_values_sg, edge_src, edge_dst, start_idx, N, n_bwd_iters, lam_init
+    )
+    lam = jax.lax.stop_gradient(lam)
+
+    # Surrogate: correct gradient through live probs.
+    # dV_start/d pi(a|s) = lam[s] * V_next(s,a)
+    edge_w = lam[edge_src] * V[edge_dst] * edge_mask
+    win_w = lam[win_src] * win_mask
+    surrogate = jnp.sum(probs[edge_src, edge_action] * edge_w) + jnp.sum(
+      probs[win_src, win_action] * win_w
+    )
+
+    # Straight-through: value = V[start], gradient = d(surrogate)/d(theta)
+    V_start = V[start_idx]
+    result = V_start + (surrogate - jax.lax.stop_gradient(surrogate))
+
+    return result, V, lam
+
+  return _solve
+
+
+# ---------------------------------------------------------------------------
+# Observation precomputation
+# ---------------------------------------------------------------------------
+
+
+def precompute_obs(
+  skeletons: list[GraphSkeleton],
+  grid_size: int,
+  bank: object,
+  make_obs_fn: object,
+  batch_size: int = 4096,
+) -> tuple[jax.Array, list[int]]:
+  """Pre-compute observations for all states across all skeletons.
+
+  Returns (obs_bank, offsets) where:
+    obs_bank: (total_states, 10, H, W) — all observations concatenated
+    offsets: list of per-skeleton start indices into obs_bank
+  """
+  jit_obs = jax.jit(lambda t, li: make_obs_fn(grid_size, bank, t, li))
+
+  # Concatenate all state tuples and level indices, track offsets
+  all_tuples: list[np.ndarray] = []
+  all_level_idx: list[np.ndarray] = []
+  offsets: list[int] = []
+  total = 0
+  for skel in skeletons:
+    offsets.append(total)
+    all_tuples.append(skel.state_tuples)
+    all_level_idx.append(np.full(skel.n_states, skel.bank_idx, dtype=np.int32))
+    total += skel.n_states
+
+  flat_tuples = jnp.array(np.concatenate(all_tuples, axis=0))
+  flat_level_idx = jnp.array(np.concatenate(all_level_idx, axis=0))
+
+  # Process in batches to avoid OOM
+  obs_parts: list[np.ndarray] = []
+  for start in range(0, total, batch_size):
+    end = min(start + batch_size, total)
+    obs = jit_obs(flat_tuples[start:end], flat_level_idx[start:end])
+    obs_parts.append(np.array(obs))
+
+  obs_bank = jnp.array(np.concatenate(obs_parts, axis=0))
+  return obs_bank, offsets
+
+
+def build_obs_indices(
+  skeletons: list[GraphSkeleton],
+  offsets: list[int],
+  skeleton_list_indices: list[int],
+  max_states: int,
+) -> np.ndarray:
+  """Build padded obs indices for a batch of skeletons.
+
+  Returns (L, max_states) int32 array indexing into the obs bank.
+  Padded slots get index 0 (safe — masked out in the solve).
+  """
+  L = len(skeleton_list_indices)
+  idx = np.zeros((L, max_states), dtype=np.int32)
+  for i, si in enumerate(skeleton_list_indices):
+    n = skeletons[si].n_states
+    idx[i, :n] = np.arange(offsets[si], offsets[si] + n)
+  return idx

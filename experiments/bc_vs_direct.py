@@ -28,9 +28,11 @@ from src.train.eval import parse_rust_levels
 from src.train.loss import cross_entropy_loss, top1_accuracy
 from src.train.markov_jax import (
   GraphSkeleton,
-  _make_solve_single,
+  build_obs_indices,
   build_skeleton,
+  make_solve_surrogate,
   pad_and_stack,
+  precompute_obs,
 )
 from src.train.model import make_model
 from src.train.optim import count_params, make_optimizer
@@ -271,32 +273,53 @@ def run_direct_arm(
   print(f"  LR: {direct_lr}, {n_levels} levels, {args.levels_per_step} per step")
   opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-  solve = _make_solve_single(args.vi_iters, args.vi_iters)
+  # Global max sizes for consistent padding (avoids JIT recompilation)
+  from src.train.markov_jax import _next_pow2
+
+  global_max_s = _next_pow2(max(s.n_states for s in skeletons))
+  global_max_e = _next_pow2(max(s.n_edges for s in skeletons))
+  global_max_w = _next_pow2(max(s.n_win_edges for s in skeletons))
+  print(
+    f"  Fixed padding: states={global_max_s} edges={global_max_e} win={global_max_w}"
+  )
+
+  # Pre-compute observations (eliminates redundant obs computation each step)
+  print("  Pre-computing observations...")
+  t0 = time.time()
+  obs_bank, obs_offsets = precompute_obs(skeletons, GRID_SIZE, ds.bank, make_batch_obs)
+  print(f"  obs_bank: {obs_bank.shape} ({time.time() - t0:.1f}s)")
+
+  # Surrogate solver with warm-start support
+  solve = make_solve_surrogate(args.vi_iters, args.vi_iters)
+
+  # V/lam cache: per-level numpy arrays, warm-start the next solve
+  v_cache: dict[int, np.ndarray] = {}
+  lam_cache: dict[int, np.ndarray] = {}
 
   @eqx.filter_jit
-  def train_step(  # noqa: ANN202
-    model,
-    opt_state,
+  def train_step(  # noqa: ANN001, ANN202
+    model,  # noqa: ANN001
+    opt_state,  # noqa: ANN001
     optimizer,  # noqa: ANN001
-    state_tuples,
-    level_idx,
+    obs_flat,  # noqa: ANN001
     action_mask,  # noqa: ANN001
-    edge_src,
-    edge_action,
-    edge_dst,
+    edge_src,  # noqa: ANN001
+    edge_action,  # noqa: ANN001
+    edge_dst,  # noqa: ANN001
     edge_mask,  # noqa: ANN001
-    win_src,
-    win_action,
-    win_mask,
+    win_src,  # noqa: ANN001
+    win_action,  # noqa: ANN001
+    win_mask,  # noqa: ANN001
     start_idx,  # noqa: ANN001
+    V_init,  # noqa: ANN001
+    lam_init,  # noqa: ANN001
   ):  # JIT'd closure — types are dynamic JAX arrays
     n_lvl, max_s = action_mask.shape[:2]
 
     def _loss(m):  # noqa: ANN001, ANN202
-      obs = jit_make_obs(state_tuples.reshape(-1, 12), level_idx.reshape(-1))
-      logits_flat = jax.vmap(m)(obs)
+      logits_flat = jax.vmap(m)(obs_flat)
       logits = logits_flat.reshape(n_lvl, max_s, 5)
-      v_starts = jax.vmap(solve)(
+      vs, V_new, lam_new = jax.vmap(solve)(
         logits,
         action_mask,
         edge_src,
@@ -307,29 +330,76 @@ def run_direct_arm(
         win_action,
         win_mask,
         start_idx,
+        V_init,
+        lam_init,
       )
-      return -jnp.mean(v_starts)
+      return -jnp.mean(vs), (V_new, lam_new)
 
-    loss, grads = eqx.filter_value_and_grad(_loss)(model)
+    (loss, (V_new, lam_new)), grads = eqx.filter_value_and_grad(_loss, has_aux=True)(
+      model
+    )
     updates, new_opt_state = optimizer.update(grads, opt_state, model)
     new_model = eqx.apply_updates(model, updates)
-    return new_model, new_opt_state, loss
+    return new_model, new_opt_state, loss, V_new, lam_new
+
+  def _build_batch(
+    level_idxs: list[int],
+  ) -> tuple:
+    """Build padded batch + obs + V/lam init from cache."""
+    batch_skels = [skeletons[i] for i in level_idxs]
+    batch = pad_and_stack(
+      batch_skels,
+      fixed_max_states=global_max_s,
+      fixed_max_edges=global_max_e,
+      fixed_max_win_edges=global_max_w,
+    )
+    S = batch.max_states
+
+    # Obs from precomputed bank
+    oi = build_obs_indices(skeletons, obs_offsets, level_idxs, S)
+    obs_flat = obs_bank[jnp.array(oi.reshape(-1))]
+
+    # V/lam from cache (zeros if not cached)
+    V_init = np.zeros((len(level_idxs), S), dtype=np.float32)
+    lam_init = np.zeros((len(level_idxs), S), dtype=np.float32)
+    for i, li in enumerate(level_idxs):
+      if li in v_cache:
+        v = v_cache[li]
+        V_init[i, : len(v)] = v
+      if li in lam_cache:
+        la = lam_cache[li]
+        lam_init[i, : len(la)] = la
+
+    return batch, obs_flat, jnp.array(V_init), jnp.array(lam_init)
+
+  def _update_cache(
+    level_idxs: list[int],
+    V_new: jax.Array,
+    lam_new: jax.Array,
+  ) -> None:
+    """Store converged V/lam back into the cache."""
+    V_np = np.array(V_new)
+    lam_np = np.array(lam_new)
+    for i, li in enumerate(level_idxs):
+      n = skeletons[li].n_states
+      v_cache[li] = V_np[i, :n]
+      lam_cache[li] = lam_np[i, :n]
 
   # --- JIT warmup ---
-  print("  JIT warmup (compiling forward + adjoint solver)...")
+  print("  JIT warmup (compiling surrogate solver)...")
   warmup_t0 = time.time()
   key, warmup_key = jr.split(key)
-  warmup_idxs = jr.choice(
+  warmup_idxs_jax = jr.choice(
     warmup_key, n_levels, shape=(args.levels_per_step,), replace=False
   )
-  warmup_batch = pad_and_stack([skeletons[int(i)] for i in warmup_idxs])
+  warmup_idxs = [int(i) for i in warmup_idxs_jax]
+  warmup_batch, warmup_obs, warmup_V, warmup_lam = _build_batch(warmup_idxs)
 
   result = train_step(
     model,
     opt_state,
     optimizer,
-    warmup_batch.state_tuples,
-    warmup_batch.level_idx,
+    warmup_obs,
     warmup_batch.action_mask,
     warmup_batch.edge_src,
     warmup_batch.edge_action,
@@ -339,6 +409,8 @@ def run_direct_arm(
     warmup_batch.win_action,
     warmup_batch.win_mask,
     warmup_batch.start_idx,
+    warmup_V,
+    warmup_lam,
   )
   jax.block_until_ready(result)
   warmup_time = time.time() - warmup_t0
@@ -355,17 +427,17 @@ def run_direct_arm(
 
   for step_idx in range(total_steps):
     key, sample_key = jr.split(key)
-    level_indices = jr.choice(
+    level_idxs_jax = jr.choice(
       sample_key, n_levels, shape=(args.levels_per_step,), replace=False
     )
-    batch = pad_and_stack([skeletons[int(i)] for i in level_indices])
+    level_idxs = [int(i) for i in level_idxs_jax]
+    batch, obs_flat, V_init, lam_init = _build_batch(level_idxs)
 
-    model, opt_state, loss = train_step(
+    model, opt_state, loss, V_new, lam_new = train_step(
       model,
       opt_state,
       optimizer,
-      batch.state_tuples,
-      batch.level_idx,
+      obs_flat,
       batch.action_mask,
       batch.edge_src,
       batch.edge_action,
@@ -375,7 +447,10 @@ def run_direct_arm(
       batch.win_action,
       batch.win_mask,
       batch.start_idx,
+      V_init,
+      lam_init,
     )
+    _update_cache(level_idxs, V_new, lam_new)
     global_step += 1
 
     # Evaluate periodically (wall-time based)
@@ -437,8 +512,8 @@ def main() -> None:
   parser.add_argument(
     "--vi-iters",
     type=int,
-    default=500,
-    help="Value iteration steps (forward + adjoint)",
+    default=50,
+    help="Value iteration steps per solve (warm-started from cache)",
   )
   parser.add_argument(
     "--direct-lr",
