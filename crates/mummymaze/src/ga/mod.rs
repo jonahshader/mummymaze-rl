@@ -7,6 +7,7 @@ pub mod archive;
 pub mod crossover;
 pub mod fitness;
 pub mod mutation;
+pub mod random_level;
 
 use crate::graph::build_graph;
 use crate::markov::MarkovChain;

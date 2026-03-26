@@ -854,6 +854,84 @@ fn replay_actions(py: Python<'_>, level: &PyLevel, actions: Vec<u32>) -> PyResul
     Ok(frames)
 }
 
+/// Generate random solvable levels.
+///
+/// Each level has random walls, random entity placement, and is guaranteed
+/// BFS-solvable. Entity composition is controlled by spawn probabilities.
+///
+/// Args:
+///     count: Number of solvable levels to generate.
+///     grid_size: Grid size (6, 8, or 10).
+///     seed: RNG seed for reproducibility.
+///     wall_density: Probability each interior wall exists (default 0.3).
+///     mummy2_prob: Probability of a second mummy (default 0.3).
+///     scorpion_prob: Probability of a scorpion (default 0.2).
+///     trap1_prob: Probability of 1 trap (default 0.15).
+///     trap2_prob: Probability of 2nd trap, given 1st exists (default 0.3).
+///     gate_prob: Probability of a gate+key pair (default 0.15).
+///     flip_prob: Probability of red mummies (default 0.5).
+///
+/// Returns a list of `count` solvable Level objects.
+#[pyfunction]
+#[pyo3(signature = (count, grid_size=6, seed=0, wall_density=0.3,
+                    mummy2_prob=0.3, scorpion_prob=0.2, trap1_prob=0.15,
+                    trap2_prob=0.3, gate_prob=0.15, flip_prob=0.5))]
+fn generate_random_solvable(
+    py: Python<'_>,
+    count: usize,
+    grid_size: i32,
+    seed: u64,
+    wall_density: f64,
+    mummy2_prob: f64,
+    scorpion_prob: f64,
+    trap1_prob: f64,
+    trap2_prob: f64,
+    gate_prob: f64,
+    flip_prob: f64,
+) -> PyResult<Vec<PyLevel>> {
+    use crate::ga::random_level::{generate_random_solvable as gen_level, RandomLevelConfig};
+    use rand::SeedableRng;
+    use rayon::prelude::*;
+
+    let config = RandomLevelConfig {
+        grid_size,
+        wall_density,
+        mummy2_prob,
+        scorpion_prob,
+        trap1_prob,
+        trap2_prob,
+        gate_prob,
+        flip_prob,
+        max_attempts: 1000,
+    };
+
+    let results: Vec<Option<Level>> = py.allow_threads(|| {
+        (0..count)
+            .into_par_iter()
+            .map(|i| {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(i as u64));
+                gen_level(&mut rng, &config)
+            })
+            .collect()
+    });
+
+    let levels: Vec<PyLevel> = results
+        .into_iter()
+        .flatten()
+        .map(|inner| PyLevel { inner })
+        .collect();
+
+    if levels.len() < count {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Only generated {}/{} solvable levels (max_attempts=1000 per level)",
+            levels.len(),
+            count
+        )));
+    }
+
+    Ok(levels)
+}
+
 // ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
@@ -880,6 +958,7 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ga_crossover, m)?)?;
     m.add_function(wrap_pyfunction!(ga_evaluate_batch, m)?)?;
     m.add_function(wrap_pyfunction!(replay_actions, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_random_solvable, m)?)?;
 
     Ok(())
 }
