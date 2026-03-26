@@ -1,9 +1,15 @@
 """Unified training entry point with nanoGPT-style configuration.
 
+All training modes flow through the same path:
+  setup_training() → training_loop(inner_stop, outer_stop, on_round_end)
+
+BC = single round, no on_round_end.
+Adversarial = multiple rounds, GA callback as on_round_end.
+Custom = config file provides its own lambdas.
+
 Usage:
   uv run python -m src.train config/bc_default.py
   uv run python -m src.train config/bc_default.py --lr=1e-4 --seed=42
-  uv run python -m src.train --epochs=5 --arch=cnn
   uv run python -m src.train config/adversarial_default.py --n_rounds=1
 """
 
@@ -13,10 +19,8 @@ from pathlib import Path
 
 from src.train.configurator import load_config, parse_argv
 
-# Default config values — union of BC and adversarial parameters.
-# Config files and CLI overrides add to or replace these.
+# Default config values. Config files and CLI overrides add to or replace these.
 DEFAULTS: dict[str, object] = {
-  "mode": "bc",
   "maze_dir": "mazes",
   # Training
   "epochs": 10,
@@ -38,9 +42,7 @@ DEFAULTS: dict[str, object] = {
   "step_offset": 0,
   # Subprocess mode
   "subprocess": False,
-  # Adversarial-specific
-  "n_rounds": 3,
-  "epochs_per_round": 5,
+  # GA params (used when on_round_end is auto-constructed)
   "ga_generations": 50,
   "ga_pop_size": 64,
   "target_log_policy_wp": -1.0,
@@ -50,7 +52,7 @@ DEFAULTS: dict[str, object] = {
   "grid_sizes": [6, 8, 10],
 }
 
-# Config keys that are callables (not coercible from CLI strings)
+# Config keys that are callables (pass through without type coercion)
 CALLABLE_KEYS = {
   "loss_fn",
   "metric_fn",
@@ -59,6 +61,7 @@ CALLABLE_KEYS = {
   "inner_stop",
   "outer_stop",
   "on_round_end",
+  "on_event",
 }
 
 
@@ -66,7 +69,6 @@ def main() -> None:
   config_file, overrides = parse_argv()
   config = load_config(config_file, overrides, DEFAULTS)
 
-  mode = config.pop("mode")
   subprocess_mode = config.pop("subprocess")
 
   # Extract callables before primitive coercion
@@ -95,30 +97,62 @@ def main() -> None:
   # Build TrainComponents from config callables (with defaults)
   components = _build_components(callables)
 
-  if mode == "bc":
-    _run_bc(
-      config,
-      callables,
-      components,
-      maze_dir,
-      checkpoint_dir,
-      checkpoint,
-      augment_levels,
-      reporter,
-    )
-  elif mode == "adversarial":
-    _run_adversarial(
-      config,
-      callables,
-      components,
-      maze_dir,
-      checkpoint_dir,
-      metrics_path,
-      reporter,
-    )
-  else:
-    print(f"Unknown mode: {mode!r}. Expected 'bc' or 'adversarial'.")
-    sys.exit(1)
+  # Determine schedule_epochs for optimizer LR schedule
+  outer_stop = callables.get("outer_stop")
+  n_rounds = int(config.get("n_rounds", 1))
+  epochs = int(config["epochs"])
+  schedule_epochs = epochs * n_rounds if n_rounds > 1 else None
+
+  from src.train.loop import training_loop
+  from src.train.session import setup_training
+
+  session = setup_training(
+    maze_dir=maze_dir,
+    epochs=epochs,
+    batch_size=int(config["batch_size"]),
+    lr=float(config["lr"]),
+    seed=int(config["seed"]),
+    arch=str(config["arch"]),
+    hparams=config["hparams"] if config["hparams"] else None,
+    wandb_project=config.get("wandb_project"),
+    checkpoint_dir=checkpoint_dir,
+    checkpoint=checkpoint,
+    augment_levels=augment_levels,
+    epoch_offset=int(config.get("epoch_offset", 0)),
+    step_offset=int(config.get("step_offset", 0)),
+    dihedral_augment=bool(config.get("dihedral_augment", False)),
+    reporter=reporter,
+    metrics_path=metrics_path,
+    optimizer=callables.get("optimizer"),
+    components=components,
+    schedule_epochs=schedule_epochs,
+  )
+
+  # Build on_round_end: use config callable, or auto-construct from GA params
+  on_round_end = callables.get("on_round_end")
+  if on_round_end is None and n_rounds > 1:
+    on_round_end = _build_ga_round_end(config, maze_dir, checkpoint_dir, session)
+
+  # Build stopping conditions
+  inner_stop = callables.get("inner_stop")
+  if outer_stop is None and n_rounds > 1:
+    from src.train.stopping import stop_after
+
+    outer_stop = stop_after(n_rounds)
+
+  training_loop(
+    session,
+    inner_stop=inner_stop,
+    outer_stop=outer_stop,
+    on_round_end=on_round_end,
+    on_event=callables.get("on_event"),
+    round_checkpoint_dir=(
+      (lambda r: str(checkpoint_dir / f"round{r:03d}"))
+      if checkpoint_dir and n_rounds > 1
+      else None
+    ),
+  )
+  session.finish()
 
 
 def _build_components(callables: dict) -> object | None:
@@ -137,85 +171,29 @@ def _build_components(callables: dict) -> object | None:
   )
 
 
-def _run_bc(
+def _build_ga_round_end(
   config: dict,
-  callables: dict,
-  components: object | None,
   maze_dir: Path,
   checkpoint_dir: Path | None,
-  checkpoint: Path | None,
-  augment_levels: Path | None,
-  reporter: object,
-) -> None:
-  from src.train.loop import training_loop
-  from src.train.session import setup_training
+  session: object,
+) -> object:
+  """Auto-construct GA round-end callback from config params."""
+  from src.train.adversarial_loop import make_ga_round_end
 
-  session = setup_training(
+  return make_ga_round_end(
     maze_dir=maze_dir,
-    epochs=int(config["epochs"]),
-    batch_size=int(config["batch_size"]),
-    lr=float(config["lr"]),
-    seed=int(config["seed"]),
-    arch=str(config["arch"]),
-    hparams=config["hparams"] if config["hparams"] else None,
-    wandb_project=config.get("wandb_project"),
-    checkpoint_dir=checkpoint_dir,
-    checkpoint=checkpoint,
-    augment_levels=augment_levels,
-    epoch_offset=int(config.get("epoch_offset", 0)),
-    step_offset=int(config.get("step_offset", 0)),
-    dihedral_augment=bool(config.get("dihedral_augment", False)),
-    reporter=reporter,
-    optimizer=callables.get("optimizer"),
-    components=components,
-  )
-
-  training_loop(
-    session,
-    inner_stop=callables.get("inner_stop"),
-    outer_stop=callables.get("outer_stop"),
-    on_round_end=callables.get("on_round_end"),
-  )
-  session.finish()
-
-
-def _run_adversarial(
-  config: dict,
-  callables: dict,
-  components: object | None,
-  maze_dir: Path,
-  checkpoint_dir: Path | None,
-  metrics_path: Path,
-  reporter: object,
-) -> None:
-  from src.train.adversarial_loop import adversarial_loop
-
-  arch = str(config["arch"])
-  hparams = config["hparams"]
-  if isinstance(hparams, dict) and not hparams:
-    hparams = None
-
-  adversarial_loop(
-    maze_dir=maze_dir,
-    n_rounds=int(config["n_rounds"]),
-    epochs_per_round=int(config["epochs_per_round"]),
-    batch_size=int(config["batch_size"]),
-    lr=float(config["lr"]),
-    seed=int(config["seed"]),
-    ga_generations=int(config["ga_generations"]),
-    ga_pop_size=int(config["ga_pop_size"]),
-    target_log_policy_wp=float(config["target_log_policy_wp"]),
-    ga_seeds_per_gs=int(config["ga_seeds_per_gs"]),
-    archive_bfs_bins=int(config["archive_bfs_bins"]),
-    archive_states_bins=int(config["archive_states_bins"]),
-    grid_sizes=config["grid_sizes"],
+    grid_sizes=config.get("grid_sizes", [6, 8, 10]),
+    ga_generations=int(config.get("ga_generations", 50)),
+    ga_pop_size=int(config.get("ga_pop_size", 64)),
+    target_log_policy_wp=float(config.get("target_log_policy_wp", -1.0)),
+    ga_seeds_per_gs=int(config.get("ga_seeds_per_gs", 100)),
+    archive_bfs_bins=int(config.get("archive_bfs_bins", 20)),
+    archive_states_bins=int(config.get("archive_states_bins", 20)),
     checkpoint_dir=checkpoint_dir or Path("checkpoints/adversarial"),
-    metrics_path=metrics_path,
-    arch=arch,
+    seed=int(config.get("seed", 0)),
     dihedral_augment=bool(config.get("dihedral_augment", False)),
-    wandb_project=config.get("wandb_project"),
-    hparams=hparams,
-    reporter=reporter,
+    n_rounds=int(config.get("n_rounds", 3)),
+    log_fn=session.log_fn,
   )
 
 
@@ -223,7 +201,6 @@ if __name__ == "__main__":
   try:
     main()
   except Exception as e:
-    # In subprocess mode, emit JSON error
     if "--subprocess=true" in sys.argv or "--subprocess=True" in sys.argv:
       sys.stdout.write(json.dumps({"type": "error", "message": str(e)}) + "\n")
       sys.stdout.flush()
