@@ -210,8 +210,9 @@ impl MarkovChain {
     }
 
     /// Solve (I-Q)x = win_absorb for per-state win probabilities.
+    /// Falls back to direct Gaussian elimination if Gauss-Seidel doesn't converge.
     pub fn solve_win_probs(&self) -> Result<Vec<f64>> {
-        self.solve_win_probs_tol(TOLERANCE, MAX_ITERATIONS)
+        self.solve_with_rhs(&self.win_absorb)
     }
 
     /// Solve (I-Q)x = win_absorb with custom convergence parameters.
@@ -244,6 +245,128 @@ impl MarkovChain {
             }
         }
         Err(MummyMazeError::ConvergenceFailure(max_iter))
+    }
+
+    /// Solve the adjoint system (I-Q^T)λ = e_start for per-state importance weights.
+    ///
+    /// λ[s] is the expected number of visits to state s starting from the start state
+    /// under the current policy. Used for computing dV_start/dπ in the surrogate
+    /// gradient trick (implicit differentiation).
+    pub fn solve_adjoint(&self) -> Result<Vec<f64>> {
+        let n = self.n_states();
+        let Some(start) = self.start_idx else {
+            return Ok(vec![0.0; n]);
+        };
+
+        // Build transposed adjacency: q_cols[j] = vec of (i, Q[i,j])
+        // so that Q^T[j,i] = Q[i,j] → row j of Q^T has entries from column j of Q.
+        let mut q_cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for (i, row) in self.q_rows.iter().enumerate() {
+            for &(j, qij) in row {
+                q_cols[j].push((i, qij));
+            }
+        }
+
+        // Gauss-Seidel: (I - Q^T)λ = e_start
+        // λ[j] = (e_start[j] + Σ_i Q^T[j,i] * λ[i]) / diag[j]
+        // Note: diag[j] = 1 - Q[j,j] = 1 - Q^T[j,j] (same diagonal)
+        let mut lam = vec![0.0f64; n];
+        for _ in 0..MAX_ITERATIONS {
+            let mut converged = true;
+            for j in 0..n {
+                if self.trapped[j] {
+                    continue;
+                }
+                let rhs = if j == start { 1.0 } else { 0.0 };
+                let mut sum = rhs;
+                for &(i, qij) in &q_cols[j] {
+                    sum += qij * lam[i]; // Q^T[j,i] = Q[i,j] = qij
+                }
+                let new_val = sum / self.diag[j];
+                let diff = (new_val - lam[j]).abs();
+                if diff > TOLERANCE && diff > TOLERANCE * new_val.abs() {
+                    converged = false;
+                }
+                lam[j] = new_val;
+            }
+            if converged {
+                return Ok(lam);
+            }
+        }
+
+        // Gauss-Seidel failed — fall back to direct solve on (I - Q^T).
+        self.solve_adjoint_direct()
+    }
+
+    /// Direct Gaussian elimination fallback for the adjoint system (I - Q^T) λ = e_start.
+    fn solve_adjoint_direct(&self) -> Result<Vec<f64>> {
+        let n = self.n_states();
+        let Some(start) = self.start_idx else {
+            return Ok(vec![0.0; n]);
+        };
+
+        // Build dense augmented matrix [(I - Q^T) | e_start] row by row.
+        let mut a = vec![vec![0.0f64; n + 1]; n];
+        for i in 0..n {
+            if self.trapped[i] {
+                a[i][i] = 1.0;
+                a[i][n] = 0.0;
+                continue;
+            }
+            a[i][i] = self.diag[i]; // 1 - Q[i,i] = 1 - Q^T[i,i]
+            // Off-diagonal: -(Q^T[i,j]) = -(Q[j,i])
+            // Iterate over all rows j, looking for entries that target column i.
+            for (j, row) in self.q_rows.iter().enumerate() {
+                for &(col, qjcol) in row {
+                    if col == i {
+                        a[i][j] -= qjcol; // Q^T[i,j] = Q[j,i] = qjcol
+                    }
+                }
+            }
+            a[i][n] = if i == start { 1.0 } else { 0.0 };
+        }
+
+        // Forward elimination with partial pivoting.
+        for col in 0..n {
+            let mut max_row = col;
+            let mut max_val = a[col][col].abs();
+            for row in (col + 1)..n {
+                let v = a[row][col].abs();
+                if v > max_val {
+                    max_val = v;
+                    max_row = row;
+                }
+            }
+            if max_val < PIVOT_ZERO {
+                continue;
+            }
+            a.swap(col, max_row);
+            let pivot = a[col][col];
+            for row in (col + 1)..n {
+                let factor = a[row][col] / pivot;
+                if factor == 0.0 {
+                    continue;
+                }
+                for j in col..=n {
+                    a[row][j] -= factor * a[col][j];
+                }
+            }
+        }
+
+        // Back substitution.
+        let mut lam = vec![0.0f64; n];
+        for i in (0..n).rev() {
+            if a[i][i].abs() < PIVOT_ZERO {
+                lam[i] = 0.0;
+                continue;
+            }
+            let mut sum = a[i][n];
+            for j in (i + 1)..n {
+                sum -= a[i][j] * lam[j];
+            }
+            lam[i] = sum / a[i][i];
+        }
+        Ok(lam)
     }
 
     /// Solve (I-Q)t = 1 for per-state expected steps to absorption.

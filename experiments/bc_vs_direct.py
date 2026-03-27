@@ -28,9 +28,9 @@ from src.train.eval import parse_rust_levels
 from src.train.loss import cross_entropy_loss, top1_accuracy
 from src.train.markov_jax import (
   GraphSkeleton,
+  PaddedSkeletonBatch,
   build_obs_indices,
   build_skeleton,
-  make_solve_surrogate,
   pad_and_stack,
   precompute_obs,
 )
@@ -273,31 +273,19 @@ def run_direct_arm(
   print(f"  LR: {direct_lr}, {n_levels} levels, {args.levels_per_step} per step")
   opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-  # Global max sizes for consistent padding (avoids JIT recompilation)
-  from src.train.markov_jax import _next_pow2
-
-  global_max_s = _next_pow2(max(s.n_states for s in skeletons))
-  global_max_e = _next_pow2(max(s.n_edges for s in skeletons))
-  global_max_w = _next_pow2(max(s.n_win_edges for s in skeletons))
-  print(
-    f"  Fixed padding: states={global_max_s} edges={global_max_e} win={global_max_w}"
-  )
-
   # Pre-compute observations (eliminates redundant obs computation each step)
   print("  Pre-computing observations...")
   t0 = time.time()
   obs_bank, obs_offsets = precompute_obs(skeletons, GRID_SIZE, ds.bank, make_batch_obs)
   print(f"  obs_bank: {obs_bank.shape} ({time.time() - t0:.1f}s)")
 
-  # Surrogate solver with warm-start support
-  solve = make_solve_surrogate(args.vi_iters, args.vi_iters)
+  # Rust level objects for the solver (indexed same as skeletons list)
+  rust_levels = [skel.rust_level for skel in skeletons]
 
-  # V/lam cache: per-level numpy arrays, warm-start the next solve
-  v_cache: dict[int, np.ndarray] = {}
-  lam_cache: dict[int, np.ndarray] = {}
-
+  # JIT'd surrogate gradient step — no VI, just NN forward + surrogate backward.
+  # V and λ are pre-computed by Rust and passed in as stopped constants.
   @eqx.filter_jit
-  def train_step(  # noqa: ANN001, ANN202
+  def surrogate_step(  # noqa: ANN001, ANN202
     model,  # noqa: ANN001
     opt_state,  # noqa: ANN001
     optimizer,  # noqa: ANN001
@@ -311,91 +299,139 @@ def run_direct_arm(
     win_action,  # noqa: ANN001
     win_mask,  # noqa: ANN001
     start_idx,  # noqa: ANN001
-    V_init,  # noqa: ANN001
-    lam_init,  # noqa: ANN001
-  ):  # JIT'd closure — types are dynamic JAX arrays
+    V,  # noqa: ANN001
+    lam,  # noqa: ANN001
+  ):  # JIT'd: NN forward + surrogate gradient, no VI
     n_lvl, max_s = action_mask.shape[:2]
 
     def _loss(m):  # noqa: ANN001, ANN202
       logits_flat = jax.vmap(m)(obs_flat)
       logits = logits_flat.reshape(n_lvl, max_s, 5)
-      vs, V_new, lam_new = jax.vmap(solve)(
-        logits,
-        action_mask,
-        edge_src,
-        edge_action,
-        edge_dst,
-        edge_mask,
-        win_src,
-        win_action,
-        win_mask,
-        start_idx,
-        V_init,
-        lam_init,
+      probs = jax.vmap(_policy_from_logits)(logits, action_mask)
+      return -jnp.mean(
+        jax.vmap(_surrogate_loss)(
+          probs,
+          action_mask,
+          edge_src,
+          edge_action,
+          edge_dst,
+          edge_mask,
+          win_src,
+          win_action,
+          win_mask,
+          start_idx,
+          V,
+          lam,
+        )
       )
-      return -jnp.mean(vs), (V_new, lam_new)
 
-    (loss, (V_new, lam_new)), grads = eqx.filter_value_and_grad(_loss, has_aux=True)(
-      model
-    )
+    loss, grads = eqx.filter_value_and_grad(_loss)(model)
     updates, new_opt_state = optimizer.update(grads, opt_state, model)
     new_model = eqx.apply_updates(model, updates)
-    return new_model, new_opt_state, loss, V_new, lam_new
+    return new_model, new_opt_state, loss
 
-  def _build_batch(
-    level_idxs: list[int],
-  ) -> tuple:
-    """Build padded batch + obs + V/lam init from cache."""
-    batch_skels = [skeletons[i] for i in level_idxs]
-    batch = pad_and_stack(
-      batch_skels,
-      fixed_max_states=global_max_s,
-      fixed_max_edges=global_max_e,
-      fixed_max_win_edges=global_max_w,
+  def _surrogate_loss(  # noqa: ANN202
+    probs,  # noqa: ANN001
+    action_mask,  # noqa: ANN001
+    edge_src,  # noqa: ANN001
+    edge_action,  # noqa: ANN001
+    edge_dst,  # noqa: ANN001
+    edge_mask,  # noqa: ANN001
+    win_src,  # noqa: ANN001
+    win_action,  # noqa: ANN001
+    win_mask,  # noqa: ANN001
+    start_idx,  # noqa: ANN001
+    V,  # noqa: ANN001
+    lam,  # noqa: ANN001
+  ) -> jax.Array:  # noqa: ANN001
+    """Surrogate for a single level: value = V[start], grad = d(V[start])/d(probs)."""
+    edge_w = lam[edge_src] * V[edge_dst] * edge_mask
+    win_w = lam[win_src] * win_mask
+    surrogate = jnp.sum(probs[edge_src, edge_action] * edge_w) + jnp.sum(
+      probs[win_src, win_action] * win_w
     )
+    V_start = V[start_idx]
+    return V_start + (surrogate - jax.lax.stop_gradient(surrogate))
+
+  from src.train.markov_jax import _next_pow2, _policy_from_logits
+
+  global_max_s = _next_pow2(max(s.n_states for s in skeletons))
+  global_max_e = _next_pow2(max(s.n_edges for s in skeletons))
+  global_max_w = _next_pow2(max(s.n_win_edges for s in skeletons))
+
+  def _solve_batch_rust(
+    level_idxs: list[int],
+    obs_flat: jax.Array,
+    batch: PaddedSkeletonBatch,
+  ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NN forward (no grad) → Rust Gauss-Seidel solve → padded V, λ."""
+    L = len(level_idxs)
     S = batch.max_states
 
-    # Obs from precomputed bank
-    oi = build_obs_indices(skeletons, obs_offsets, level_idxs, S)
-    obs_flat = obs_bank[jnp.array(oi.reshape(-1))]
+    # NN forward (no grad) to get probs for Rust
+    logits_flat = np.array(jax.vmap(model)(obs_flat))
+    logits = logits_flat.reshape(L, S, 5)
+    am_np = np.array(batch.action_mask)
+    # Masked softmax in numpy
+    masked = np.where(am_np, logits, -1e30)
+    exp = np.exp(masked - masked.max(axis=-1, keepdims=True))
+    probs = (exp / exp.sum(axis=-1, keepdims=True)).astype(np.float32)
 
-    # V/lam from cache (zeros if not cached)
-    V_init = np.zeros((len(level_idxs), S), dtype=np.float32)
-    lam_init = np.zeros((len(level_idxs), S), dtype=np.float32)
-    for i, li in enumerate(level_idxs):
-      if li in v_cache:
-        v = v_cache[li]
-        V_init[i, : len(v)] = v
-      if li in lam_cache:
-        la = lam_cache[li]
-        lam_init[i, : len(la)] = la
-
-    return batch, obs_flat, jnp.array(V_init), jnp.array(lam_init)
-
-  def _update_cache(
-    level_idxs: list[int],
-    V_new: jax.Array,
-    lam_new: jax.Array,
-  ) -> None:
-    """Store converged V/lam back into the cache."""
-    V_np = np.array(V_new)
-    lam_np = np.array(lam_new)
+    # Flatten real states for Rust (unpadded)
+    all_st: list[np.ndarray] = []
+    all_probs: list[np.ndarray] = []
+    batch_levels = []
+    offsets = [0]
     for i, li in enumerate(level_idxs):
       n = skeletons[li].n_states
-      v_cache[li] = V_np[i, :n]
-      lam_cache[li] = lam_np[i, :n]
+      all_st.append(np.array(batch.state_tuples[i, :n]))
+      all_probs.append(probs[i, :n])
+      batch_levels.append(rust_levels[li])
+      offsets.append(offsets[-1] + n)
+
+    flat_st = np.concatenate(all_st, axis=0).astype(np.int32)
+    flat_probs = np.concatenate(all_probs, axis=0)
+
+    # Rust solve (rayon-parallel, Gauss-Seidel, exact)
+    V_flat, lam_flat = mummymaze_rust.solve_v_and_adjoint_batch(
+      batch_levels, flat_st, flat_probs, offsets
+    )
+
+    # Pad back to (L, S)
+    V_padded = np.zeros((L, S), dtype=np.float32)
+    lam_padded = np.zeros((L, S), dtype=np.float32)
+    for i, li in enumerate(level_idxs):
+      n = skeletons[li].n_states
+      s, e = offsets[i], offsets[i + 1]
+      V_padded[i, :n] = V_flat[s:e]
+      lam_padded[i, :n] = lam_flat[s:e]
+
+    return jnp.array(V_padded), jnp.array(lam_padded)
+
+  def _build_obs_flat(level_idxs: list[int], max_states: int) -> jax.Array:
+    """Look up precomputed obs for a batch of levels."""
+    oi = build_obs_indices(skeletons, obs_offsets, level_idxs, max_states)
+    return obs_bank[jnp.array(oi.reshape(-1))]
 
   # --- JIT warmup ---
-  print("  JIT warmup (compiling surrogate solver)...")
+  print("  JIT warmup (compiling surrogate step — no VI)...")
   warmup_t0 = time.time()
   key, warmup_key = jr.split(key)
   warmup_idxs_jax = jr.choice(
     warmup_key, n_levels, shape=(args.levels_per_step,), replace=False
   )
   warmup_idxs = [int(i) for i in warmup_idxs_jax]
-  warmup_batch, warmup_obs, warmup_V, warmup_lam = _build_batch(warmup_idxs)
+  warmup_skels = [skeletons[i] for i in warmup_idxs]
+  warmup_batch = pad_and_stack(
+    warmup_skels,
+    fixed_max_states=global_max_s,
+    fixed_max_edges=global_max_e,
+    fixed_max_win_edges=global_max_w,
+  )
+  warmup_obs = _build_obs_flat(warmup_idxs, global_max_s)
+  warmup_V, warmup_lam = _solve_batch_rust(warmup_idxs, warmup_obs, warmup_batch)
 
-  result = train_step(
+  result = surrogate_step(
     model,
     opt_state,
     optimizer,
@@ -431,9 +467,20 @@ def run_direct_arm(
       sample_key, n_levels, shape=(args.levels_per_step,), replace=False
     )
     level_idxs = [int(i) for i in level_idxs_jax]
-    batch, obs_flat, V_init, lam_init = _build_batch(level_idxs)
+    batch_skels = [skeletons[i] for i in level_idxs]
+    batch = pad_and_stack(
+      batch_skels,
+      fixed_max_states=global_max_s,
+      fixed_max_edges=global_max_e,
+      fixed_max_win_edges=global_max_w,
+    )
+    obs_flat = _build_obs_flat(level_idxs, global_max_s)
 
-    model, opt_state, loss, V_new, lam_new = train_step(
+    # Rust solve: exact V, λ via Gauss-Seidel (no JAX VI)
+    V, lam = _solve_batch_rust(level_idxs, obs_flat, batch)
+
+    # Surrogate gradient step (JIT'd, just NN + surrogate)
+    model, opt_state, loss = surrogate_step(
       model,
       opt_state,
       optimizer,
@@ -447,10 +494,9 @@ def run_direct_arm(
       batch.win_action,
       batch.win_mask,
       batch.start_idx,
-      V_init,
-      lam_init,
+      V,
+      lam,
     )
-    _update_cache(level_idxs, V_new, lam_new)
     global_step += 1
 
     # Evaluate periodically (wall-time based)

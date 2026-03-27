@@ -400,6 +400,100 @@ fn policy_win_prob_batch(
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
+/// Solve for V (win probabilities) and λ (adjoint) under an arbitrary policy.
+///
+/// Returns (V_flat, lambda_flat) as numpy f32 arrays of shape (total_states,),
+/// in the same order as the input state_tuples. Non-winnable states get 0.
+/// Uses rayon for parallelism across levels.
+///
+/// Args:
+///     levels: list of Level objects
+///     state_tuples: numpy (total_states, 12) i32 — all levels concatenated
+///     action_probs: numpy (total_states, 5) f32
+///     offsets: list of n_levels+1 ints slicing into the flat arrays
+#[pyfunction]
+#[pyo3(signature = (levels, state_tuples, action_probs, offsets))]
+fn solve_v_and_adjoint_batch(
+    py: Python<'_>,
+    levels: Vec<PyRef<'_, PyLevel>>,
+    state_tuples: PyReadonlyArray2<i32>,
+    action_probs: PyReadonlyArray2<f32>,
+    offsets: Vec<usize>,
+) -> PyResult<(PyObject, PyObject)> {
+    use crate::markov::MarkovChain;
+    use numpy::PyArray1;
+    use rayon::prelude::*;
+    use rustc_hash::FxHashMap;
+
+    let (st_vec, ap_vec) = extract_policy_arrays(&state_tuples, &action_probs);
+    let n_levels = levels.len();
+    let total_states = st_vec.len();
+
+    // Per-level solve (parallel)
+    let level_refs: Vec<&Level> = levels.iter().map(|l| &l.inner).collect();
+    let results: Vec<Result<Vec<(f32, f32)>, String>> = py.allow_threads(|| {
+        (0..n_levels)
+            .into_par_iter()
+            .map(|li| {
+                let start = offsets[li];
+                let end = offsets[li + 1];
+                let n = end - start;
+
+                // Build policy HashMap
+                let mut policy: FxHashMap<State, [f64; 5]> =
+                    FxHashMap::with_capacity_and_hasher(n, Default::default());
+                for k in start..end {
+                    let state = State::from_i32_array(&st_vec[k]);
+                    policy.insert(state, ap_vec[k].map(|p| p as f64));
+                }
+
+                // Build graph and chain
+                let graph = crate::graph::build_graph(level_refs[li]);
+                let chain = MarkovChain::from_graph_with_policy(&graph, &policy);
+
+                // Solve V and λ
+                let v_all = chain.solve_win_probs().map_err(|e| e.to_string())?;
+                let lam_all = chain.solve_adjoint().map_err(|e| e.to_string())?;
+
+                // Build state→chain_idx lookup from chain's idx_to_state
+                let mut state_to_chain: FxHashMap<State, usize> =
+                    FxHashMap::with_capacity_and_hasher(chain.n_states(), Default::default());
+                for (ci, s) in chain.idx_to_state.iter().enumerate() {
+                    state_to_chain.insert(*s, ci);
+                }
+
+                // Map back to input ordering
+                let mut out = Vec::with_capacity(n);
+                for k in start..end {
+                    let state = State::from_i32_array(&st_vec[k]);
+                    if let Some(&ci) = state_to_chain.get(&state) {
+                        out.push((v_all[ci] as f32, lam_all[ci] as f32));
+                    } else {
+                        out.push((0.0, 0.0)); // non-winnable state
+                    }
+                }
+                Ok(out)
+            })
+            .collect()
+    });
+
+    // Flatten into output arrays
+    let mut v_flat = vec![0.0f32; total_states];
+    let mut lam_flat = vec![0.0f32; total_states];
+    for (li, result) in results.into_iter().enumerate() {
+        let pairs = result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        let start = offsets[li];
+        for (k, (v, l)) in pairs.into_iter().enumerate() {
+            v_flat[start + k] = v;
+            lam_flat[start + k] = l;
+        }
+    }
+
+    let v_np = PyArray1::from_vec(py, v_flat);
+    let lam_np = PyArray1::from_vec(py, lam_flat);
+    Ok((v_np.into_any().unbind(), lam_np.into_any().unbind()))
+}
+
 /// Analyze all levels in a directory. Releases the GIL, uses rayon internally.
 #[pyfunction]
 #[pyo3(signature = (maze_dir, jobs=0))]
@@ -946,6 +1040,7 @@ fn mummymaze_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
     m.add_function(wrap_pyfunction!(policy_win_prob, m)?)?;
     m.add_function(wrap_pyfunction!(policy_win_prob_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_v_and_adjoint_batch, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_all, m)?)?;
     m.add_function(wrap_pyfunction!(solve_all_actions, m)?)?;
     m.add_function(wrap_pyfunction!(best_actions_all, m)?)?;
