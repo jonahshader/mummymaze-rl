@@ -48,18 +48,27 @@ def main() -> None:
   parser.add_argument("--batch-size", type=int, default=1024)
   parser.add_argument("--lr", type=float, default=3e-4)
   parser.add_argument("--arch", type=str, default="cnn")
+  parser.add_argument("--hparams", type=str, default=None, help="JSON hparams dict")
+  parser.add_argument(
+    "--checkpoint", type=Path, default=None, help="Resume from checkpoint"
+  )
   parser.add_argument("--checkpoint-dir", type=Path, default=None)
   parser.add_argument("--wandb-project", type=str, default=None)
   args = parser.parse_args()
 
+  import json as _json
+
   grid_size = 6
   total_round_epochs = args.n_rounds * args.max_epochs_per_round
+  hparams = _json.loads(args.hparams) if args.hparams else None
 
   # --- Setup ---
   print(f"Setting up curriculum training (gs={grid_size}, {args.n_rounds} rounds)")
   session = setup_training(
     maze_dir=args.maze_dir,
     arch=args.arch,
+    hparams=hparams,
+    checkpoint=args.checkpoint,
     epochs=args.epochs_per_eval,
     batch_size=args.batch_size,
     lr=args.lr,
@@ -77,19 +86,51 @@ def main() -> None:
   val_levels_gs6 = _get_val_levels(datasets, sources, grid_size, args.maze_dir)
   print(f"Validation set: {len(val_levels_gs6)} real gs={grid_size} levels")
 
-  # --- Generate initial random levels ---
-  n_rand = args.n_random_levels
-  print(f"\nGenerating {n_rand} random solvable levels (gs={grid_size})...")
-  t0 = time.time()
-  random_levels = mummymaze_rust.generate_random_solvable(
-    args.n_random_levels,
-    grid_size=grid_size,
-    seed=args.seed,
-  )
-  print(f"  Generated in {time.time() - t0:.1f}s")
+  # --- Initial levels: GA-generated when resuming, random otherwise ---
+  if args.checkpoint is not None:
+    # Warm model — go straight to GA for initial level generation
+    print("\nResuming from checkpoint — running GA for initial levels...")
+    obs_fwd = make_obs_and_forward(state.model)
+    fitness_expr = f"-abs(log_policy_win_prob - ({args.target_log_wp}))"
 
-  # Augment dataset with initial random levels
-  datasets = augment_dataset(datasets, random_levels)
+    seed_levels = mummymaze_rust.generate_random_solvable(
+      args.n_random_levels,
+      grid_size=grid_size,
+      seed=args.seed,
+    )
+    archive = MapElitesArchive(
+      bfs_range=(1, 50),
+      states_range=(1, 500),
+      bfs_bins=20,
+      states_bins=20,
+      target_log_wp=args.target_log_wp,
+    )
+    _population, archive = run_ga(
+      seed_levels,
+      obs_and_forward=obs_fwd,
+      pop_size=args.ga_pop_size,
+      generations=args.ga_generations,
+      fitness_expr=fitness_expr,
+      seed=args.seed,
+      archive=archive,
+    )
+    assert archive is not None
+    initial_levels = [ind.level for ind in archive.all_individuals()]
+    occupied, total = archive.occupancy()
+    print(f"  GA: {len(initial_levels)} levels, {occupied}/{total} cells")
+  else:
+    # Cold start — random levels
+    n_rand = args.n_random_levels
+    print(f"\nGenerating {n_rand} random solvable levels (gs={grid_size})...")
+    t0 = time.time()
+    initial_levels = mummymaze_rust.generate_random_solvable(
+      args.n_random_levels,
+      grid_size=grid_size,
+      seed=args.seed,
+    )
+    print(f"  Generated in {time.time() - t0:.1f}s")
+
+  datasets = augment_dataset(datasets, initial_levels)
   n_states = datasets[grid_size].n_states
   print(f"  Dataset after augment: {n_states} states (gs={grid_size})")
 
@@ -159,15 +200,12 @@ def main() -> None:
     obs_fwd = make_obs_and_forward(state.model)
     fitness_expr = f"-abs(log_policy_win_prob - ({args.target_log_wp}))"
 
-    # Use previous round's generated levels as seeds, or random if round 0
-    if round_idx == 0:
-      seed_levels = random_levels
-    else:
-      seed_levels = mummymaze_rust.generate_random_solvable(
-        args.n_random_levels,
-        grid_size=grid_size,
-        seed=args.seed + round_idx + 1000,
-      )
+    # Fresh random seeds for GA each round
+    seed_levels = mummymaze_rust.generate_random_solvable(
+      args.n_random_levels,
+      grid_size=grid_size,
+      seed=args.seed + round_idx + 1000,
+    )
 
     archive = MapElitesArchive(
       bfs_range=(1, 50),
