@@ -353,11 +353,19 @@ def run_direct_arm(
     V_start = V[start_idx]
     return V_start + (surrogate - jax.lax.stop_gradient(surrogate))
 
-  from src.train.markov_jax import _next_pow2, _policy_from_logits
+  from src.train.markov_jax import (
+    _next_pow2,
+    _policy_from_logits,
+    make_solve_surrogate,
+  )
 
   global_max_s = _next_pow2(max(s.n_states for s in skeletons))
   global_max_e = _next_pow2(max(s.n_edges for s in skeletons))
   global_max_w = _next_pow2(max(s.n_win_edges for s in skeletons))
+
+  # V/lam cache for JAX warm-start path
+  v_cache: dict[int, np.ndarray] = {}
+  lam_cache: dict[int, np.ndarray] = {}
 
   def _solve_batch_rust(
     level_idxs: list[int],
@@ -408,6 +416,92 @@ def run_direct_arm(
 
     return jnp.array(V_padded), jnp.array(lam_padded)
 
+  jax_solve = make_solve_surrogate(args.vi_iters, args.vi_iters)
+
+  @jax.jit
+  def _jax_solve_vmapped(  # noqa: ANN202
+    logits: jax.Array,  # noqa: ANN001
+    action_mask: jax.Array,  # noqa: ANN001
+    edge_src: jax.Array,  # noqa: ANN001
+    edge_action: jax.Array,  # noqa: ANN001
+    edge_dst: jax.Array,  # noqa: ANN001
+    edge_mask: jax.Array,  # noqa: ANN001
+    win_src: jax.Array,  # noqa: ANN001
+    win_action: jax.Array,  # noqa: ANN001
+    win_mask: jax.Array,  # noqa: ANN001
+    start_idx: jax.Array,  # noqa: ANN001
+    V_init: jax.Array,  # noqa: ANN001
+    lam_init: jax.Array,  # noqa: ANN001
+  ):
+    return jax.vmap(jax_solve)(
+      logits,
+      action_mask,
+      edge_src,
+      edge_action,
+      edge_dst,
+      edge_mask,
+      win_src,
+      win_action,
+      win_mask,
+      start_idx,
+      V_init,
+      lam_init,
+    )
+
+  def _solve_batch_jax(
+    level_idxs: list[int],
+    obs_flat: jax.Array,
+    batch: PaddedSkeletonBatch,
+  ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NN forward (no grad) → JAX warm-started VI → padded V, λ."""
+    L = len(level_idxs)
+    S = batch.max_states
+
+    logits_flat = jax.vmap(model)(obs_flat)
+    logits = logits_flat.reshape(L, S, 5)
+
+    # Build V/lam init from cache
+    V_init = np.zeros((L, S), dtype=np.float32)
+    lam_init = np.zeros((L, S), dtype=np.float32)
+    for i, li in enumerate(level_idxs):
+      if li in v_cache:
+        v = v_cache[li]
+        V_init[i, : len(v)] = v
+      if li in lam_cache:
+        la = lam_cache[li]
+        lam_init[i, : len(la)] = la
+
+    _, V_new, lam_new = _jax_solve_vmapped(
+      logits,
+      batch.action_mask,
+      batch.edge_src,
+      batch.edge_action,
+      batch.edge_dst,
+      batch.edge_mask,
+      batch.win_src,
+      batch.win_action,
+      batch.win_mask,
+      batch.start_idx,
+      jnp.array(V_init),
+      jnp.array(lam_init),
+    )
+
+    # Update cache
+    V_np = np.array(V_new)
+    lam_np = np.array(lam_new)
+    for i, li in enumerate(level_idxs):
+      n = skeletons[li].n_states
+      v_cache[li] = V_np[i, :n]
+      lam_cache[li] = lam_np[i, :n]
+
+    return V_new, lam_new
+
+  # Select solver
+  use_rust = args.solver == "rust"
+  solve_batch = _solve_batch_rust if use_rust else _solve_batch_jax
+  vi_info = f" ({args.vi_iters} iters)" if not use_rust else ""
+  print(f"  Solver: {args.solver}{vi_info}")
+
   def _build_obs_flat(level_idxs: list[int], max_states: int) -> jax.Array:
     """Look up precomputed obs for a batch of levels."""
     oi = build_obs_indices(skeletons, obs_offsets, level_idxs, max_states)
@@ -429,7 +523,7 @@ def run_direct_arm(
     fixed_max_win_edges=global_max_w,
   )
   warmup_obs = _build_obs_flat(warmup_idxs, global_max_s)
-  warmup_V, warmup_lam = _solve_batch_rust(warmup_idxs, warmup_obs, warmup_batch)
+  warmup_V, warmup_lam = solve_batch(warmup_idxs, warmup_obs, warmup_batch)
 
   result = surrogate_step(
     model,
@@ -476,8 +570,7 @@ def run_direct_arm(
     )
     obs_flat = _build_obs_flat(level_idxs, global_max_s)
 
-    # Rust solve: exact V, λ via Gauss-Seidel (no JAX VI)
-    V, lam = _solve_batch_rust(level_idxs, obs_flat, batch)
+    V, lam = solve_batch(level_idxs, obs_flat, batch)
 
     # Surrogate gradient step (JIT'd, just NN + surrogate)
     model, opt_state, loss = surrogate_step(
@@ -556,10 +649,17 @@ def main() -> None:
     help="Evaluate every N seconds of wall time",
   )
   parser.add_argument(
+    "--solver",
+    type=str,
+    default="rust",
+    choices=["rust", "jax"],
+    help="Markov solver: rust (exact Gauss-Seidel) or jax (warm-started VI)",
+  )
+  parser.add_argument(
     "--vi-iters",
     type=int,
     default=50,
-    help="Value iteration steps per solve (warm-started from cache)",
+    help="JAX solver: VI steps per solve (warm-started from cache)",
   )
   parser.add_argument(
     "--direct-lr",
