@@ -611,6 +611,90 @@ def precompute_obs(
   return obs_bank, offsets
 
 
+def compute_lambda_weights(
+  model: object,
+  ds: object,
+  skeletons: list[GraphSkeleton],
+  obs_bank: jax.Array,
+  obs_offsets: list[int],
+  batch_size: int = 2048,
+) -> np.ndarray:
+  """Compute per-state λ weights for the BCDataset using the Rust solver.
+
+  Returns (n_states,) float32 array aligned with ds.state_tuples.
+  States not found in the skeleton graph get weight 0.
+  """
+  import mummymaze_rust
+
+  n_ds_states = ds.n_states
+  ds_level_idx = np.array(ds.level_idx)
+
+  # Build skeleton lookup: for each skeleton, map state_tuple → (skel_idx, local_idx)
+  # We key by (bank_idx, tuple_bytes) for fast lookup.
+  skel_by_bank: dict[int, list[int]] = {}
+  for si, sk in enumerate(skeletons):
+    skel_by_bank.setdefault(sk.bank_idx, []).append(si)
+
+  # Build state→skel_state_idx lookup per skeleton
+  skel_state_maps: list[dict[bytes, int]] = []
+  for sk in skeletons:
+    m: dict[bytes, int] = {}
+    for local_idx in range(sk.n_states):
+      key = sk.state_tuples[local_idx].tobytes()
+      m[key] = local_idx
+    skel_state_maps.append(m)
+
+  # NN forward on ALL skeleton states at once (batched)
+  total = sum(sk.n_states for sk in skeletons)
+  logits_parts: list[np.ndarray] = []
+  for start in range(0, total, batch_size):
+    end = min(start + batch_size, total)
+    logits_parts.append(np.array(jax.vmap(model)(obs_bank[start:end])))
+  flat_logits = np.concatenate(logits_parts, axis=0)
+
+  # Masked softmax (all states at once)
+  flat_am = np.concatenate([sk.action_mask for sk in skeletons], axis=0)
+  masked = np.where(flat_am, flat_logits, -1e30)
+  exp = np.exp(masked - masked.max(axis=-1, keepdims=True))
+  flat_probs = (exp / exp.sum(axis=-1, keepdims=True)).astype(np.float32)
+
+  # Call Rust solver
+  all_st = [sk.state_tuples for sk in skeletons]
+  flat_st = np.concatenate(all_st, axis=0).astype(np.int32)
+  offsets = [0]
+  rust_levels = []
+  for sk in skeletons:
+    offsets.append(offsets[-1] + sk.n_states)
+    rust_levels.append(sk.rust_level)
+
+  _, lam_flat = mummymaze_rust.solve_v_and_adjoint_batch(
+    rust_levels, flat_st, flat_probs, offsets
+  )
+
+  # Split λ back per skeleton
+  skel_lam: list[np.ndarray] = []
+  for si, sk in enumerate(skeletons):
+    s, e = offsets[si], offsets[si + 1]
+    skel_lam.append(np.array(lam_flat[s:e]))
+
+  # Map λ to BCDataset state ordering
+  ds_tuples = np.array(ds.state_tuples)
+  weights = np.zeros(n_ds_states, dtype=np.float32)
+
+  for ds_idx in range(n_ds_states):
+    bank_idx = int(ds_level_idx[ds_idx])
+    if bank_idx not in skel_by_bank:
+      continue
+    state_key = ds_tuples[ds_idx].tobytes()
+    for si in skel_by_bank[bank_idx]:
+      local_idx = skel_state_maps[si].get(state_key)
+      if local_idx is not None:
+        weights[ds_idx] = skel_lam[si][local_idx]
+        break
+
+  return weights
+
+
 def build_obs_indices(
   skeletons: list[GraphSkeleton],
   offsets: list[int],

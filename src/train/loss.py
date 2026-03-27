@@ -14,6 +14,17 @@ def cross_entropy_loss(
   return -jnp.mean(jnp.sum(targets * log_probs, axis=-1))
 
 
+def weighted_cross_entropy_loss(
+  logits: Float[Array, "B 5"],
+  targets: Float[Array, "B 5"],
+  weights: Float[Array, "B"],
+) -> Float[Array, ""]:
+  """Cross-entropy against soft targets, weighted per state."""
+  log_probs = jax.nn.log_softmax(logits, axis=-1)
+  per_state = -jnp.sum(targets * log_probs, axis=-1)
+  return jnp.sum(weights * per_state) / jnp.sum(weights)
+
+
 def top1_accuracy(
   logits: Float[Array, "B 5"],
   targets: Float[Array, "B 5"],

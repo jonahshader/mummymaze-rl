@@ -614,6 +614,183 @@ def run_direct_arm(
 
 
 # ---------------------------------------------------------------------------
+# λ-weighted BC arm
+# ---------------------------------------------------------------------------
+
+
+def _normalize_lambda(raw: np.ndarray) -> np.ndarray:
+  """Normalize λ weights: clip outliers, set floor, normalize to unit mean."""
+  w = np.maximum(raw, 0.0)
+  # Clip to 99th percentile to tame outliers
+  p99 = np.percentile(w[w > 0], 99) if np.any(w > 0) else 1.0
+  w = np.minimum(w, p99)
+  # Floor so every state gets some weight
+  w = np.maximum(w, 0.01 * p99)
+  # Normalize to unit mean
+  w = w / w.mean()
+  return w.astype(np.float32)
+
+
+def run_lambda_bc_arm(
+  args: argparse.Namespace,
+  ds: BCDataset,
+  skeletons: list[GraphSkeleton],
+  obs_bank: jax.Array,
+  obs_offsets: list[int],
+  jit_make_obs: object,
+  evaluate: object,
+) -> None:
+  """Train with BC loss weighted by λ (state importance for V_start).
+
+  Uses gradient accumulation: fixed NN batch size regardless of total states.
+  Recomputes λ periodically as the policy improves.
+  """
+  from src.train.markov_jax import compute_lambda_weights
+
+  key = jr.key(args.seed)
+  key, model_key = jr.split(key)
+  model = make_model(args.arch, model_key)
+  print(f"  Model: {args.arch} ({count_params(model):,} params)")
+
+  n_train = int(ds.train_mask.sum())
+  steps_per_epoch = max(1, n_train // args.batch_size)
+  total_steps = steps_per_epoch * 1000
+  optimizer = make_optimizer(args.lr, total_steps)
+  opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
+  train_indices = jnp.where(ds.train_mask, size=n_train)[0]
+  jit_obs_fn = jax.jit(
+    lambda tuples, lidx: make_batch_obs(GRID_SIZE, ds.bank, tuples, lidx)
+  )
+
+  # JIT'd train step with per-state weights
+  @eqx.filter_jit
+  def weighted_train_step(  # noqa: ANN001, ANN202
+    model,  # noqa: ANN001
+    opt_state,  # noqa: ANN001
+    optimizer,  # noqa: ANN001
+    obs,  # noqa: ANN001
+    targets,  # noqa: ANN001
+    weights,  # noqa: ANN001
+  ):
+    def _loss(m):  # noqa: ANN001, ANN202
+      logits = jax.vmap(m)(obs)
+      log_probs = jax.nn.log_softmax(logits, axis=-1)
+      per_state = -jnp.sum(targets * log_probs, axis=-1)
+      loss = jnp.sum(weights * per_state) / jnp.sum(weights)
+      acc = top1_accuracy(logits, targets)
+      return loss, acc
+
+    (loss, acc), grads = eqx.filter_value_and_grad(_loss, has_aux=True)(model)
+    updates, new_opt_state = optimizer.update(grads, opt_state, model)
+    new_model = eqx.apply_updates(model, updates)
+    return new_model, new_opt_state, loss, acc
+
+  # JIT'd step for gradient accumulation (returns grads without applying)
+  @eqx.filter_jit
+  def weighted_grad_step(  # noqa: ANN001, ANN202
+    model,  # noqa: ANN001
+    obs,  # noqa: ANN001
+    targets,  # noqa: ANN001
+    weights,  # noqa: ANN001
+  ):
+    def _loss(m):  # noqa: ANN001, ANN202
+      logits = jax.vmap(m)(obs)
+      log_probs = jax.nn.log_softmax(logits, axis=-1)
+      per_state = -jnp.sum(targets * log_probs, axis=-1)
+      return jnp.sum(weights * per_state) / jnp.sum(weights)
+
+    return eqx.filter_value_and_grad(_loss)(model)
+
+  # Compute initial λ weights
+  print("  Computing initial λ weights...")
+  t0 = time.time()
+  lambda_weights = compute_lambda_weights(
+    model, ds, skeletons, obs_bank, obs_offsets, args.batch_size
+  )
+  train_weights = _normalize_lambda(lambda_weights[np.array(train_indices)])
+  print(
+    f"  λ weights: nonzero={np.sum(train_weights > 0.01)}/{n_train}"
+    f" mean={train_weights.mean():.4f} max={train_weights.max():.4f}"
+    f" ({time.time() - t0:.1f}s)"
+  )
+
+  # JIT warmup
+  print("  JIT warmup...")
+  warmup_t0 = time.time()
+  key, warmup_key = jr.split(key)
+  perm = jr.permutation(warmup_key, n_train)
+  batch_idx = train_indices[perm[: args.batch_size]]
+  obs = jit_obs_fn(ds.state_tuples[batch_idx], ds.level_idx[batch_idx])
+  targets = ds.action_targets[batch_idx]
+  w = jnp.array(train_weights[np.array(perm[: args.batch_size])])
+  result = weighted_train_step(model, opt_state, optimizer, obs, targets, w)
+  jax.block_until_ready(result)
+  print(f"  JIT warmup: {time.time() - warmup_t0:.1f}s")
+
+  # Initial eval
+  mean_log_wp = evaluate(model)
+  print(f"  Initial mean_log_wp: {mean_log_wp:.4f} (target: {args.target_log_wp})")
+
+  # Training loop
+  global_step = 0
+  wall_start = time.time()
+  last_eval_time = 0.0
+  lambda_recompute_interval = 50  # recompute λ every N epochs
+
+  for epoch in range(1000):
+    key, shuffle_key = jr.split(key)
+    perm = jr.permutation(shuffle_key, n_train)
+    shuffled_idx = train_indices[perm]
+    shuffled_weights = jnp.array(train_weights[np.array(perm)])
+
+    for b in range(steps_per_epoch):
+      slc = slice(b * args.batch_size, (b + 1) * args.batch_size)
+      batch_idx = shuffled_idx[slc]
+      obs = jit_obs_fn(ds.state_tuples[batch_idx], ds.level_idx[batch_idx])
+      targets = ds.action_targets[batch_idx]
+      w = shuffled_weights[slc]
+      model, opt_state, loss, acc = weighted_train_step(
+        model, opt_state, optimizer, obs, targets, w
+      )
+      global_step += 1
+
+    # Evaluate
+    jax.block_until_ready(model)
+    wall_elapsed = time.time() - wall_start
+
+    if wall_elapsed - last_eval_time >= args.eval_every_secs or epoch == 0:
+      last_eval_time = wall_elapsed
+      mean_log_wp = evaluate(model)
+      print(
+        f"  Epoch {epoch + 1} step={global_step}: "
+        f"loss={float(loss):.4f} acc={float(acc):.4f} "
+        f"mean_log_wp={mean_log_wp:.4f} wall={wall_elapsed:.1f}s"
+      )
+
+      if mean_log_wp >= args.target_log_wp:
+        print(f"  TARGET REACHED at wall={wall_elapsed:.1f}s (epoch {epoch + 1})")
+        return
+
+    if wall_elapsed > args.max_wall_seconds:
+      print(f"  Wall time budget exceeded ({args.max_wall_seconds}s)")
+      return
+
+    # Periodically recompute λ weights
+    if (epoch + 1) % lambda_recompute_interval == 0:
+      print(f"  Recomputing λ weights (epoch {epoch + 1})...")
+      t0 = time.time()
+      lambda_weights = compute_lambda_weights(
+        model, ds, skeletons, obs_bank, obs_offsets, args.batch_size
+      )
+      train_weights = _normalize_lambda(lambda_weights[np.array(train_indices)])
+      print(
+        f"    mean={train_weights.mean():.4f} max={train_weights.max():.4f} "
+        f"({time.time() - t0:.1f}s)"
+      )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -684,7 +861,7 @@ def main() -> None:
     "--mode",
     type=str,
     default="both",
-    choices=["bc", "direct", "both"],
+    choices=["bc", "direct", "lambda-bc", "both"],
   )
   args = parser.parse_args()
 
@@ -714,9 +891,11 @@ def main() -> None:
     ds, val_level_indices, val_rust_levels, jit_make_obs, args.batch_size
   )
 
-  # ===== Build graph skeletons (for direct arm) =====
+  # ===== Build graph skeletons (for direct / lambda-bc arms) =====
   skeletons: list[GraphSkeleton] = []
-  if args.mode in ("direct", "both"):
+  obs_bank_skel: jax.Array | None = None
+  obs_offsets_skel: list[int] = []
+  if args.mode in ("direct", "lambda-bc", "both"):
     print("\nBuilding graph skeletons for training levels...")
     t0 = time.time()
     train_level_indices = sorted(
@@ -735,6 +914,14 @@ def main() -> None:
       f"max {max_skel_states} states/level ({time.time() - t0:.1f}s)"
     )
 
+    # Pre-compute obs for skeleton states (used by direct and lambda-bc)
+    print("  Pre-computing observations...")
+    t0 = time.time()
+    obs_bank_skel, obs_offsets_skel = precompute_obs(
+      skeletons, GRID_SIZE, ds.bank, make_batch_obs
+    )
+    print(f"  obs_bank: {obs_bank_skel.shape} ({time.time() - t0:.1f}s)")
+
   # ===== Run arms =====
   if args.mode in ("bc", "both"):
     print(f"\n{'=' * 60}")
@@ -747,6 +934,14 @@ def main() -> None:
     print("DIRECT V_WIN ARM")
     print(f"{'=' * 60}")
     run_direct_arm(args, ds, skeletons, jit_make_obs, evaluate)
+
+  if args.mode == "lambda-bc":
+    print(f"\n{'=' * 60}")
+    print("LAMBDA-WEIGHTED BC ARM")
+    print(f"{'=' * 60}")
+    run_lambda_bc_arm(
+      args, ds, skeletons, obs_bank_skel, obs_offsets_skel, jit_make_obs, evaluate
+    )
 
   print("\nDone.")
 
