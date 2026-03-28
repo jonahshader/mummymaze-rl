@@ -64,6 +64,15 @@ def main() -> None:
   hparams = _json.loads(args.hparams) if args.hparams else None
 
   # --- Setup ---
+  # Constant LR for curriculum: dataset size changes each round so cosine
+  # schedule (which needs total_steps upfront) doesn't apply.
+  import optax
+
+  constant_optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),
+    optax.adam(args.lr),
+  )
+
   print(f"Setting up curriculum training (gs={grid_size}, {args.n_rounds} rounds)")
   session = setup_training(
     maze_dir=args.maze_dir,
@@ -77,6 +86,7 @@ def main() -> None:
     wandb_project=args.wandb_project,
     checkpoint_dir=args.checkpoint_dir,
     schedule_epochs=total_round_epochs,
+    optimizer=constant_optimizer,
   )
 
   state = session.state
