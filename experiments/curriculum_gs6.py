@@ -140,13 +140,16 @@ def main() -> None:
   print(f"  Dataset after augment: {n_states} states (gs={grid_size})")
 
   # --- Curriculum loop ---
+  # Track current round's levels for threshold evaluation
+  round_levels: list[mummymaze_rust.Level] = list(initial_levels)
+
   for round_idx in range(args.n_rounds):
     round_t0 = time.time()
     print(f"\n{'=' * 60}")
     print(f"Round {round_idx}/{args.n_rounds - 1}")
     print(f"{'=' * 60}")
 
-    # Train until win-prob threshold or max epochs
+    # Train until model masters current round's levels or max epochs
     for epoch_in_round in range(args.max_epochs_per_round):
       state = train_epochs(
         state,
@@ -160,24 +163,27 @@ def main() -> None:
       )
       state.epoch_offset += args.epochs_per_eval
 
-      # Evaluate win prob on real validation levels
-      log_wps = compute_policy_win_probs_batched(
+      # Threshold check: win prob on THIS ROUND'S levels only
+      round_log_wps = compute_policy_win_probs_batched(
+        round_levels,
+        state.model,
+        grid_size,
+      )
+      round_wps = [10**lwp for lwp in round_log_wps if lwp > float("-inf")]
+      round_mean = float(np.mean(round_wps)) if round_wps else 0.0
+
+      # Monitoring: win prob on real validation levels (not used for stopping)
+      val_log_wps = compute_policy_win_probs_batched(
         val_levels_gs6,
         state.model,
         grid_size,
       )
-      valid_wps = [10**lwp for lwp in log_wps if lwp > float("-inf")]
-
-      if valid_wps:
-        mean_wp = float(np.mean(valid_wps))
-        median_wp = float(np.median(valid_wps))
-      else:
-        mean_wp = 0.0
-        median_wp = 0.0
+      val_wps = [10**lwp for lwp in val_log_wps if lwp > float("-inf")]
+      val_mean = float(np.mean(val_wps)) if val_wps else 0.0
 
       print(
         f"  Epoch {epoch_in_round + 1}: "
-        f"mean_wp={mean_wp:.4f} median_wp={median_wp:.4f} "
+        f"round_wp={round_mean:.4f} val_wp={val_mean:.4f} "
         f"(threshold={args.win_prob_threshold})"
       )
 
@@ -185,18 +191,23 @@ def main() -> None:
         session.log_fn(
           state.global_step,
           {
-            "curriculum/mean_win_prob": mean_wp,
-            "curriculum/median_win_prob": median_wp,
+            "curriculum/round_mean_win_prob": round_mean,
+            "curriculum/val_mean_win_prob": val_mean,
             "curriculum/round": float(round_idx),
             "curriculum/epoch_in_round": float(epoch_in_round),
+            "curriculum/n_round_levels": float(len(round_levels)),
+            "curriculum/n_total_states": float(datasets[grid_size].n_states),
           },
         )
 
-      if mean_wp >= args.win_prob_threshold:
+      if round_mean >= args.win_prob_threshold:
         print(f"  Threshold reached after {epoch_in_round + 1} epochs")
         break
     else:
-      print(f"  Max epochs ({args.max_epochs_per_round}) reached without threshold")
+      print(
+        f"  Max epochs ({args.max_epochs_per_round}) reached "
+        f"(round_wp={round_mean:.4f})"
+      )
 
     # Skip GA on last round
     if round_idx == args.n_rounds - 1:
@@ -221,7 +232,7 @@ def main() -> None:
       )
 
     ga_t0 = time.time()
-    _population, archive = run_ga(
+    _population, _ = run_ga(
       seed_levels,
       model=state.model,
       grid_size=grid_size,
@@ -233,12 +244,12 @@ def main() -> None:
     )
     ga_time = time.time() - ga_t0
 
-    new_levels = [ind.level for ind in _population]
-    n_new = len(new_levels)
+    round_levels = [ind.level for ind in _population]
+    n_new = len(round_levels)
     print(f"  GA: {n_new} levels ({ga_time:.1f}s)")
 
-    if new_levels:
-      datasets = augment_dataset(datasets, new_levels)
+    if round_levels:
+      datasets = augment_dataset(datasets, round_levels)
       n_train = int(datasets[grid_size].train_mask.sum())
       print(f"  Dataset after augment: {n_train} train states (gs={grid_size})")
 
