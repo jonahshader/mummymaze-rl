@@ -150,16 +150,9 @@ def compute_policy_win_probs(
   *,
   max_batch_size: int = 4096,
 ) -> list[float]:
-  """Compute policy win probability for each level using in-process JAX model.
+  """Compute policy win probability for each level (sequential per-level).
 
-  Args:
-    levels: Rust Level objects (must be solvable).
-    obs_and_forward: JIT'd closure (grid_size, LevelData, EnvState) → logits.
-      Implicitly captures a trained JAX model.
-    max_batch_size: Max states per inference batch.
-
-  Returns:
-    List of log10(policy_win_prob) per level.
+  For batch inference across levels, use compute_policy_win_probs_batched.
   """
   # Build graphs and state arrays for all levels
   graphs = [mummymaze_rust.build_graph(lev) for lev in levels]
@@ -225,6 +218,115 @@ def compute_policy_win_probs(
   return [math.log10(wp) if wp > 0 else float("-inf") for wp in win_probs]
 
 
+def compute_policy_win_probs_batched(
+  levels: list[mummymaze_rust.Level],
+  model: object,
+  grid_size: int,
+  *,
+  batch_size: int = 4096,
+) -> list[float]:
+  """Compute policy win probability with batched inference across all levels.
+
+  Builds a temporary LevelBank, concatenates all state tuples, then runs
+  obs + NN forward in fixed-size chunks (no per-level calls). Rust Markov
+  solve runs in parallel across levels.
+  """
+  import jax
+
+  from src.train.dataset import make_batch_obs
+
+  if not levels:
+    return []
+
+  # Build all graphs and collect state arrays
+  graphs = [mummymaze_rust.build_graph(lev) for lev in levels]
+
+  all_states: list[np.ndarray] = []
+  all_level_idx: list[np.ndarray] = []
+  offsets = [0]
+
+  for li, graph in enumerate(graphs):
+    state_tuples = graph["states"]
+    n = len(state_tuples)
+    if n == 0:
+      offsets.append(offsets[-1])
+      continue
+    states_np = np.array([[int(x) for x in s] for s in state_tuples], dtype=np.int32)
+    all_states.append(states_np)
+    all_level_idx.append(np.full(n, li, dtype=np.int32))
+    offsets.append(offsets[-1] + n)
+
+  if not all_states:
+    return []
+
+  flat_states = np.concatenate(all_states, axis=0)
+  flat_level_idx = jnp.array(np.concatenate(all_level_idx, axis=0))
+  flat_tuples = jnp.array(flat_states)
+  total = flat_states.shape[0]
+
+  # Build temporary LevelBank from GA levels
+  bank = _build_temp_bank(levels, grid_size)
+
+  # Obs + NN forward in chunks (obs computed on-the-fly, not materialized)
+  jit_obs_fwd = jax.jit(lambda t, li: make_batch_obs(grid_size, bank, t, li))
+  logits_parts: list[np.ndarray] = []
+  for start in range(0, total, batch_size):
+    end = min(start + batch_size, total)
+    obs = jit_obs_fwd(flat_tuples[start:end], flat_level_idx[start:end])
+    logits_parts.append(np.array(jax.vmap(model)(obs)))
+
+  flat_logits = np.concatenate(logits_parts, axis=0)
+  flat_probs = scipy_softmax(flat_logits, axis=-1).astype(np.float32)
+
+  # Batch Markov solve (rayon-parallel in Rust)
+  win_probs = mummymaze_rust.policy_win_prob_batch(
+    levels, flat_states, flat_probs, offsets
+  )
+
+  return [math.log10(wp) if wp > 0 else float("-inf") for wp in win_probs]
+
+
+def _build_temp_bank(
+  levels: list[mummymaze_rust.Level],
+  grid_size: int,
+) -> "LevelBank":
+  """Build a temporary LevelBank from Rust levels (for obs computation)."""
+  from src.env.level_bank import LevelBank
+  from src.train.augment import _level_to_bank_arrays
+
+  arrays = [_level_to_bank_arrays(lev) for lev in levels]
+  n = len(arrays)
+
+  fields_nd = [
+    "h_walls_base",
+    "v_walls_base",
+    "trap_pos",
+    "trap_active",
+    "key_pos",
+    "exit_cell",
+    "initial_player",
+    "initial_mummy_pos",
+    "initial_mummy_alive",
+    "initial_scorpion_pos",
+    "initial_scorpion_alive",
+  ]
+  fields_1d = ["is_red", "has_key_gate", "gate_row", "gate_col"]
+
+  stacked = {}
+  for f in fields_nd:
+    stacked[f] = jnp.array(np.stack([a[f] for a in arrays]))
+  for f in fields_1d:
+    stacked[f] = jnp.array(np.array([a[f] for a in arrays]))
+
+  return LevelBank(
+    grid_size=grid_size,
+    n_levels=n,
+    **stacked,
+    train_indices=jnp.arange(n, dtype=jnp.int32),
+    val_indices=jnp.zeros(0, dtype=jnp.int32),
+  )
+
+
 # ---------------------------------------------------------------------------
 # GA generation result
 # ---------------------------------------------------------------------------
@@ -278,9 +380,12 @@ def _recompute_fitness(
 def run_ga(
   seed_levels: list[mummymaze_rust.Level],
   *,
-  obs_and_forward: Callable,
+  obs_and_forward: Callable | None = None,
+  model: object | None = None,
+  grid_size: int = 6,
   pop_size: int = 64,
   generations: int = 50,
+  min_fitness: float | None = None,
   elite_frac: float = 0.1,
   crossover_rate: float = 0.2,
   crossover_mode: str = "swap_entities",
@@ -303,8 +408,10 @@ def run_ga(
 
   Args:
     seed_levels: Initial population of levels.
-    obs_and_forward: JIT'd closure (grid_size, LevelData, EnvState) → logits.
-      Implicitly captures a trained JAX model.
+    obs_and_forward: JIT'd closure for per-level inference (legacy).
+    model: Equinox model for batched inference (preferred over obs_and_forward).
+    grid_size: Grid size for batched inference (only used with model).
+    min_fitness: Stop early when best fitness >= this value.
     archive: Optional MAP-Elites archive to populate.
     on_generation: Callback for per-generation results.
     on_status: Callback for status messages.
@@ -331,6 +438,17 @@ def run_ga(
     if on_status:
       on_status(msg)
 
+  def _eval_policy(lvls: list[mummymaze_rust.Level]) -> list[float]:
+    """Policy win prob evaluation — batched if model provided."""
+    if model is not None:
+      return compute_policy_win_probs_batched(
+        lvls, model, grid_size, batch_size=max_batch_size
+      )
+    assert obs_and_forward is not None
+    return compute_policy_win_probs(
+      lvls, obs_and_forward, max_batch_size=max_batch_size
+    )
+
   # --- Evaluate seed levels ---
   _status(f"Evaluating {len(seed_levels)} seed levels...")
   evals = mummymaze_rust.ga_evaluate_batch(seed_levels, fitness_expr=fitness_expr)
@@ -351,11 +469,7 @@ def run_ga(
   # Policy evaluation for seeds
   if needs_policy and eval_levels:
     _status(f"Policy inference: {len(eval_levels)} levels...")
-    log_pwps = compute_policy_win_probs(
-      eval_levels,
-      obs_and_forward,
-      max_batch_size=max_batch_size,
-    )
+    log_pwps = _eval_policy(eval_levels)
     for ind, lwp in zip(population, log_pwps):
       _recompute_fitness(ind, lwp, fitness_expr)
 
@@ -428,11 +542,7 @@ def run_ga(
 
     # Policy evaluation for new offspring
     if needs_policy and new_levels:
-      log_pwps = compute_policy_win_probs(
-        new_levels,
-        obs_and_forward,
-        max_batch_size=max_batch_size,
-      )
+      log_pwps = _eval_policy(new_levels)
       for ind, lwp in zip(new_individuals, log_pwps):
         _recompute_fitness(ind, lwp, fitness_expr)
 
@@ -464,6 +574,10 @@ def run_ga(
     )
     if on_generation:
       on_generation(gen_result)
+
+    # Early stopping: best individual meets fitness threshold
+    if min_fitness is not None and best_ever.fitness >= min_fitness:
+      break
 
   return population, archive
 

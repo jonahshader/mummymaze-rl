@@ -20,9 +20,10 @@ import mummymaze_rust
 import numpy as np
 
 from src.train.augment import augment_dataset
-from src.train.ga import MapElitesArchive, run_ga
-from src.train.inference import make_obs_and_forward
-from src.train.ga import compute_policy_win_probs
+from src.train.ga import (
+  compute_policy_win_probs_batched,
+  run_ga,
+)
 from src.train.session import setup_training
 from src.train.stopping import stop_after
 from src.train.train_bc import train_epochs
@@ -90,7 +91,6 @@ def main() -> None:
   if args.checkpoint is not None:
     # Warm model — go straight to GA for initial level generation
     print("\nResuming from checkpoint — running GA for initial levels...")
-    obs_fwd = make_obs_and_forward(state.model)
     fitness_expr = f"-abs(log_policy_win_prob - ({args.target_log_wp}))"
 
     seed_levels = mummymaze_rust.generate_random_solvable(
@@ -98,26 +98,17 @@ def main() -> None:
       grid_size=grid_size,
       seed=args.seed,
     )
-    archive = MapElitesArchive(
-      bfs_range=(1, 50),
-      states_range=(1, 500),
-      bfs_bins=20,
-      states_bins=20,
-      target_log_wp=args.target_log_wp,
-    )
-    _population, archive = run_ga(
+    _population, _ = run_ga(
       seed_levels,
-      obs_and_forward=obs_fwd,
+      model=state.model,
+      grid_size=grid_size,
       pop_size=args.ga_pop_size,
       generations=args.ga_generations,
       fitness_expr=fitness_expr,
       seed=args.seed,
-      archive=archive,
     )
-    assert archive is not None
-    initial_levels = [ind.level for ind in archive.all_individuals()]
-    occupied, total = archive.occupancy()
-    print(f"  GA: {len(initial_levels)} levels, {occupied}/{total} cells")
+    initial_levels = [ind.level for ind in _population]
+    print(f"  GA: {len(initial_levels)} levels")
   else:
     # Cold start — random levels
     n_rand = args.n_random_levels
@@ -156,8 +147,11 @@ def main() -> None:
       state.epoch_offset += args.epochs_per_eval
 
       # Evaluate win prob on real validation levels
-      obs_fwd = make_obs_and_forward(state.model)
-      log_wps = compute_policy_win_probs(val_levels_gs6, obs_fwd)
+      log_wps = compute_policy_win_probs_batched(
+        val_levels_gs6,
+        state.model,
+        grid_size,
+      )
       valid_wps = [10**lwp for lwp in log_wps if lwp > float("-inf")]
 
       if valid_wps:
@@ -197,7 +191,6 @@ def main() -> None:
 
     # --- GA phase: generate new challenging levels ---
     print(f"\n--- GA Phase (targeting log_wp={args.target_log_wp}) ---")
-    obs_fwd = make_obs_and_forward(state.model)
     fitness_expr = f"-abs(log_policy_win_prob - ({args.target_log_wp}))"
 
     # Fresh random seeds for GA each round
@@ -205,14 +198,6 @@ def main() -> None:
       args.n_random_levels,
       grid_size=grid_size,
       seed=args.seed + round_idx + 1000,
-    )
-
-    archive = MapElitesArchive(
-      bfs_range=(1, 50),
-      states_range=(1, 500),
-      bfs_bins=20,
-      states_bins=20,
-      target_log_wp=args.target_log_wp,
     )
 
     def _on_gen(r):  # noqa: ANN001
@@ -224,21 +209,19 @@ def main() -> None:
     ga_t0 = time.time()
     _population, archive = run_ga(
       seed_levels,
-      obs_and_forward=obs_fwd,
+      model=state.model,
+      grid_size=grid_size,
       pop_size=args.ga_pop_size,
       generations=args.ga_generations,
       fitness_expr=fitness_expr,
       seed=args.seed + round_idx + 1,
-      archive=archive,
       on_generation=_on_gen,
     )
     ga_time = time.time() - ga_t0
 
-    assert archive is not None
-    new_levels = [ind.level for ind in archive.all_individuals()]
-    occupied, total = archive.occupancy()
+    new_levels = [ind.level for ind in _population]
     n_new = len(new_levels)
-    print(f"  Archive: {n_new} levels, {occupied}/{total} cells ({ga_time:.1f}s)")
+    print(f"  GA: {n_new} levels ({ga_time:.1f}s)")
 
     if new_levels:
       datasets = augment_dataset(datasets, new_levels)
