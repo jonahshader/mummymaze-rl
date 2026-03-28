@@ -80,12 +80,16 @@ def main() -> None:
   )
 
   state = session.state
-  datasets = session.datasets
-  sources = session.sources
 
-  # Filter to grid_size 6 only for validation
-  val_levels_gs6 = _get_val_levels(datasets, sources, grid_size, args.maze_dir)
+  # Extract gs=6 validation levels from real data, then discard real training data.
+  # Curriculum trains ONLY on GA-generated levels.
+  val_levels_gs6 = _get_val_levels(
+    session.datasets, session.sources, grid_size, args.maze_dir
+  )
   print(f"Validation set: {len(val_levels_gs6)} real gs={grid_size} levels")
+
+  datasets = _empty_curriculum_datasets(session.datasets, grid_size)
+  sources = {grid_size: []}
 
   # --- Initial levels: GA-generated when resuming, random otherwise ---
   if args.checkpoint is not None:
@@ -268,6 +272,37 @@ def _get_val_levels(
       continue
 
   return levels
+
+
+def _empty_curriculum_datasets(
+  real_datasets: dict,
+  grid_size: int,
+) -> dict:
+  """Build a gs=6-only dataset dict with zero training states.
+
+  Keeps the LevelBank (needed for obs computation when augment_dataset
+  appends GA levels) but clears all state arrays and masks. The first
+  augment_dataset call populates it with GA-generated training data.
+  """
+  import jax.numpy as jnp
+
+  from src.train.dataset import BCDataset
+
+  real_ds = real_datasets[grid_size]
+  bank = real_ds.bank
+
+  empty = BCDataset(
+    grid_size=grid_size,
+    n_levels=bank.n_levels,
+    n_states=0,
+    bank=bank,
+    state_tuples=jnp.zeros((0, 12), dtype=jnp.int32),
+    action_targets=jnp.zeros((0, 5), dtype=jnp.float32),
+    level_idx=jnp.zeros(0, dtype=jnp.int32),
+    train_mask=jnp.zeros(0, dtype=jnp.bool_),
+    val_mask=jnp.zeros(0, dtype=jnp.bool_),
+  )
+  return {grid_size: empty}
 
 
 if __name__ == "__main__":
