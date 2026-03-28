@@ -20,9 +20,11 @@
   - `stopping.py` — stop-condition combinators: `stop_after`, `stop_at_step`, `any_of`, `all_of`
   - `callbacks.py` — `LogFn`, `CheckpointFn` types and factory functions (wandb, directory checkpoints)
   - `inference.py` — shared `make_obs_and_forward` JIT'd closure
-  - `loss.py` — `cross_entropy_loss`, `top1_accuracy`
+  - `loss.py` — `cross_entropy_loss`, `weighted_cross_entropy_loss`, `top1_accuracy`
   - `optim.py` — `make_optimizer`, `count_params`
   - `eval.py` — `compute_level_metrics`, `compute_markov_win_probs`, `parse_rust_levels`
+  - `markov_jax.py` — differentiable Markov solver (surrogate gradient trick), GraphSkeleton, obs precomputation
+  - `ga.py` — GA loop with batched inference (`compute_policy_win_probs_batched`), MAP-Elites archive
   - `model.py` — model architectures (equinox, `@register_model` decorator)
   - `dataset.py` — dataset construction from Rust solver
   - `augment.py` — dataset augmentation (GA levels, dihedral variants, `load_augment_levels`)

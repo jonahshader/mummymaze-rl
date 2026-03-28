@@ -17,6 +17,10 @@ Training an RL agent to play Mummy Maze Deluxe using JAX. See `docs/IDEAS.md` fo
 - Both engines (Python/JAX and Rust) must agree exactly. The JAX env is verified against 9,814 BFS solutions via `tests/test_jax_solutions.py`.
 - Game rules are subtle — see `docs/GAME_RULES.md` for the full verified spec. Do not change game logic without re-running the solution replay test.
 
+## Code Style Preferences
+
+- Use callbacks/lambdas for side effects (logging, checkpointing, evaluation) rather than threading config values through function signatures. Let the caller construct the callable with whatever it needs captured in the closure.
+
 ## Documentation Hygiene
 
 Keep docs accurate — when changing code, update any docs that reference it. Prefer pointing to source of truth (code, tests) over duplicating details that go stale. If a document has served its purpose (e.g., a planning doc for completed work), suggest deleting it.
