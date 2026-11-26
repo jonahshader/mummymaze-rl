@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 def build_levels_dict(
@@ -47,6 +47,7 @@ def write_level_metrics(
   metrics_path.write_text(json.dumps(output, indent=2))
 
 
+@runtime_checkable
 class MetricsReporter(Protocol):
   """Protocol for reporting training progress and metrics."""
 

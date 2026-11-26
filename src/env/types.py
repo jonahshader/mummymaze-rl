@@ -8,7 +8,12 @@ Design:
   - LevelData holds per-level config (walls, positions, masks). Vmappable.
   - EnvState holds per-episode dynamic state. Vmappable.
   - Both are registered as JAX pytrees for jit/vmap compatibility.
+  - Field shapes carry a leading `*batch`: the same classes hold one level or
+    state, or a stacked/vmapped batch of them.
 """
+
+from collections.abc import Sequence
+from typing import Any
 
 import jax
 from jaxtyping import Array, Bool, Int
@@ -27,47 +32,47 @@ class LevelData:
   """
 
   # Walls with gate closed
-  h_walls_base: Bool[Array, "Np1 N"]
-  v_walls_base: Bool[Array, "N Np1"]
+  h_walls_base: Bool[Array, "*batch Np1 N"]
+  v_walls_base: Bool[Array, "*batch N Np1"]
 
   # Level flags (runtime bools)
-  is_red: Bool[Array, ""]
-  has_key_gate: Bool[Array, ""]
+  is_red: Bool[Array, "*batch"]
+  has_key_gate: Bool[Array, "*batch"]
 
   # Gate cell position (valid index even if no gate — use (0,0))
-  gate_row: Int[Array, ""]
-  gate_col: Int[Array, ""]
+  gate_row: Int[Array, "*batch"]
+  gate_col: Int[Array, "*batch"]
 
   # Entity positions and masks
-  trap_pos: Int[Array, "2 2"]
-  trap_active: Bool[Array, "2"]
-  key_pos: Int[Array, "2"]
-  exit_cell: Int[Array, "2"]
+  trap_pos: Int[Array, "*batch 2 2"]
+  trap_active: Bool[Array, "*batch 2"]
+  key_pos: Int[Array, "*batch 2"]
+  exit_cell: Int[Array, "*batch 2"]
 
   # Initial positions for reset
-  initial_player: Int[Array, "2"]
-  initial_mummy_pos: Int[Array, "2 2"]
-  initial_mummy_alive: Bool[Array, "2"]
-  initial_scorpion_pos: Int[Array, "1 2"]
-  initial_scorpion_alive: Bool[Array, "1"]
+  initial_player: Int[Array, "*batch 2"]
+  initial_mummy_pos: Int[Array, "*batch 2 2"]
+  initial_mummy_alive: Bool[Array, "*batch 2"]
+  initial_scorpion_pos: Int[Array, "*batch 1 2"]
+  initial_scorpion_alive: Bool[Array, "*batch 1"]
 
   def __init__(
     self,
-    h_walls_base: Bool[Array, "Np1 N"],
-    v_walls_base: Bool[Array, "N Np1"],
-    is_red: Bool[Array, ""],
-    has_key_gate: Bool[Array, ""],
-    gate_row: Int[Array, ""],
-    gate_col: Int[Array, ""],
-    trap_pos: Int[Array, "2 2"],
-    trap_active: Bool[Array, "2"],
-    key_pos: Int[Array, "2"],
-    exit_cell: Int[Array, "2"],
-    initial_player: Int[Array, "2"],
-    initial_mummy_pos: Int[Array, "2 2"],
-    initial_mummy_alive: Bool[Array, "2"],
-    initial_scorpion_pos: Int[Array, "1 2"],
-    initial_scorpion_alive: Bool[Array, "1"],
+    h_walls_base: Bool[Array, "*batch Np1 N"],
+    v_walls_base: Bool[Array, "*batch N Np1"],
+    is_red: Bool[Array, "*batch"],
+    has_key_gate: Bool[Array, "*batch"],
+    gate_row: Int[Array, "*batch"],
+    gate_col: Int[Array, "*batch"],
+    trap_pos: Int[Array, "*batch 2 2"],
+    trap_active: Bool[Array, "*batch 2"],
+    key_pos: Int[Array, "*batch 2"],
+    exit_cell: Int[Array, "*batch 2"],
+    initial_player: Int[Array, "*batch 2"],
+    initial_mummy_pos: Int[Array, "*batch 2 2"],
+    initial_mummy_alive: Bool[Array, "*batch 2"],
+    initial_scorpion_pos: Int[Array, "*batch 1 2"],
+    initial_scorpion_alive: Bool[Array, "*batch 1"],
   ) -> None:
     self.h_walls_base = h_walls_base
     self.v_walls_base = v_walls_base
@@ -89,27 +94,27 @@ class LevelData:
 class EnvState:
   """Dynamic game state. Vmapped across batches."""
 
-  player: Int[Array, "2"]
-  mummy_pos: Int[Array, "2 2"]
-  mummy_alive: Bool[Array, "2"]
-  scorpion_pos: Int[Array, "1 2"]
-  scorpion_alive: Bool[Array, "1"]
-  gate_open: Bool[Array, ""]
-  done: Bool[Array, ""]
-  won: Bool[Array, ""]
-  turn: Int[Array, ""]
+  player: Int[Array, "*batch 2"]
+  mummy_pos: Int[Array, "*batch 2 2"]
+  mummy_alive: Bool[Array, "*batch 2"]
+  scorpion_pos: Int[Array, "*batch 1 2"]
+  scorpion_alive: Bool[Array, "*batch 1"]
+  gate_open: Bool[Array, "*batch"]
+  done: Bool[Array, "*batch"]
+  won: Bool[Array, "*batch"]
+  turn: Int[Array, "*batch"]
 
   def __init__(
     self,
-    player: Int[Array, "2"],
-    mummy_pos: Int[Array, "2 2"],
-    mummy_alive: Bool[Array, "2"],
-    scorpion_pos: Int[Array, "1 2"],
-    scorpion_alive: Bool[Array, "1"],
-    gate_open: Bool[Array, ""],
-    done: Bool[Array, ""],
-    won: Bool[Array, ""],
-    turn: Int[Array, ""],
+    player: Int[Array, "*batch 2"],
+    mummy_pos: Int[Array, "*batch 2 2"],
+    mummy_alive: Bool[Array, "*batch 2"],
+    scorpion_pos: Int[Array, "*batch 1 2"],
+    scorpion_alive: Bool[Array, "*batch 1"],
+    gate_open: Bool[Array, "*batch"],
+    done: Bool[Array, "*batch"],
+    won: Bool[Array, "*batch"],
+    turn: Int[Array, "*batch"],
   ) -> None:
     self.player = player
     self.mummy_pos = mummy_pos
@@ -161,7 +166,7 @@ def _register_pytrees() -> None:
   def _flatten_ld(ld: LevelData) -> tuple[list[Array], None]:
     return ([getattr(ld, f) for f in _LEVEL_DATA_FIELDS], None)
 
-  def _unflatten_ld(_aux: None, children: list[Array]) -> LevelData:
+  def _unflatten_ld(_aux: None, children: Sequence[Any]) -> LevelData:
     return LevelData(**dict(zip(_LEVEL_DATA_FIELDS, children, strict=True)))
 
   jax.tree_util.register_pytree_node(LevelData, _flatten_ld, _unflatten_ld)
@@ -169,15 +174,10 @@ def _register_pytrees() -> None:
   def _flatten_es(s: EnvState) -> tuple[list[Array], None]:
     return ([getattr(s, f) for f in _ENV_STATE_FIELDS], None)
 
-  def _unflatten_es(_aux: None, children: list[Array]) -> EnvState:
+  def _unflatten_es(_aux: None, children: Sequence[Any]) -> EnvState:
     return EnvState(**dict(zip(_ENV_STATE_FIELDS, children, strict=True)))
 
   jax.tree_util.register_pytree_node(EnvState, _flatten_es, _unflatten_es)
 
 
 _register_pytrees()
-
-
-def replace_state(state: EnvState, **kwargs: Array) -> EnvState:
-  """Create a new EnvState with specified fields replaced."""
-  return EnvState(**{f: kwargs.get(f, getattr(state, f)) for f in _ENV_STATE_FIELDS})

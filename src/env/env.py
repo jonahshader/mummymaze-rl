@@ -1,6 +1,8 @@
 """MummyMazeEnv — gymnax-style functional RL environment wrapper."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -16,9 +18,9 @@ class EnvOut:
   """Output from a single environment step."""
 
   state: EnvState
-  obs: Float[Array, "10 Np1 Np1"]
-  reward: Float[Array, ""]
-  done: Bool[Array, ""]
+  obs: Float[Array, "*batch 10 Np1 Np1"]
+  reward: Float[Array, "*batch"]
+  done: Bool[Array, "*batch"]
 
 
 def _flatten_envout(
@@ -27,12 +29,12 @@ def _flatten_envout(
   return ([out.state, out.obs, out.reward, out.done], None)
 
 
-def _unflatten_envout(_aux: None, children: list[object]) -> "EnvOut":
+def _unflatten_envout(_aux: None, children: Sequence[Any]) -> "EnvOut":
   return EnvOut(
-    state=children[0],  # type: ignore[arg-type]
-    obs=children[1],  # type: ignore[arg-type]
-    reward=children[2],  # type: ignore[arg-type]
-    done=children[3],  # type: ignore[arg-type]
+    state=children[0],
+    obs=children[1],
+    reward=children[2],
+    done=children[3],
   )
 
 
