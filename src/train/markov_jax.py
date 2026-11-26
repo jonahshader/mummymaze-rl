@@ -1,11 +1,27 @@
 """Differentiable Markov win-probability via JAX.
 
-Two solvers:
-  - value_iteration: unrolled scan, simple but slow convergence (Jacobi).
-    Gradients via BPTT through the scan — memory O(n_iters).
-  - solve_win_prob: implicit differentiation via adjoint linear system.
-    Forward/backward each do independent value iteration.
-    Exact gradients with O(1) memory w.r.t. iteration count.
+`make_solve_surrogate` builds the solver: given policy logits over a level's
+state graph it returns V[start], the exact win probability under that policy,
+with a gradient w.r.t. the logits. V solves V = b + P V and the gradient needs
+the adjoint lam = e_start + P^T lam; both are found by fixed-point iteration,
+so the result is only as good as the iteration count.
+
+How many iterations a level needs depends on the policy, not the solver.
+Measured on 36 levels (grid sizes 6/8/10, 5 to 2,034 states), iterations
+from zero until V[start] is within 1%:
+  - near-expert policy: median 50, worst 101
+  - uniform policy: median 332, worst 1,587
+  - random-logit policy: median 2,522, over 20,000 in 7 of 36
+Starting from zero with fewer iterations than the distance to a win returns
+0 with a zero gradient. Warm-starting from the previous step's V and lam is
+what makes a small count work: at 20 iterations per step, with every logit
+moving by about 0.01 per step, the gradient stayed within 10% of exact on
+35/35 near-expert and 35/36 uniform cases, and on 10/36 random-logit ones.
+So direct win-probability training needs a policy that already wins sometimes
+(a BC warm-up) and a cache that persists across steps.
+
+`tests/test_markov_surrogate.py` checks value and gradient against a dense
+float64 solve.
 
 Also provides:
   - GraphSkeleton: pre-computed graph structure for one level (numpy arrays)
@@ -15,6 +31,7 @@ Also provides:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -58,7 +75,7 @@ class GraphSkeleton:
   n_edges: int
   n_win_edges: int
   bank_idx: int  # index into LevelBank (for computing observations)
-  rust_level: object  # mummymaze_rust.Level — for reference eval via Rust
+  rust_level: mummymaze_rust.Level  # for reference eval via Rust
 
 
 def build_skeleton(level: mummymaze_rust.Level, bank_idx: int) -> GraphSkeleton:
@@ -310,184 +327,6 @@ def _adjoint_vi(
 
 
 # ---------------------------------------------------------------------------
-# Simple scan-based solver (BPTT gradients)
-# ---------------------------------------------------------------------------
-
-
-def value_iteration(
-  logits: Float[Array, "N 5"],
-  action_mask: Bool[Array, "N 5"],
-  edge_src: Int[Array, "E"],
-  edge_action: Int[Array, "E"],
-  edge_dst: Int[Array, "E"],
-  edge_mask: Bool[Array, "E"],
-  win_src: Int[Array, "W"],
-  win_action: Int[Array, "W"],
-  win_mask: Bool[Array, "W"],
-  start_idx: Int[Array, ""],
-  n_iters: int = 50,
-) -> Float[Array, ""]:
-  """Differentiable win probability via unrolled value iteration (BPTT).
-
-  Simple but: (1) Jacobi convergence can be slow, (2) backward memory is O(n_iters).
-  Prefer solve_win_prob for training. This is useful for quick tests.
-  """
-  probs = _policy_from_logits(logits, action_mask)
-  p_values, win_absorb = _build_markov(
-    probs, edge_src, edge_action, edge_dst, edge_mask, win_src, win_action, win_mask
-  )
-  V = _forward_vi(p_values, win_absorb, edge_src, edge_dst, n_iters)
-  return V[start_idx]
-
-
-# ---------------------------------------------------------------------------
-# Implicit-diff solver (adjoint method, O(1) memory)
-# ---------------------------------------------------------------------------
-
-
-def _make_solve_single(n_fwd_iters: int, n_bwd_iters: int) -> object:
-  """Build a single-level differentiable solver with implicit differentiation.
-
-  The forward solves (I - P^pi) V = win_absorb via value iteration.
-  The backward solves the adjoint (I - P^pi^T) lambda = e_start,
-  then chains through the softmax Jacobian. Memory is O(N) regardless
-  of iteration count.
-  """
-
-  @jax.custom_vjp
-  def _solve(
-    logits: Float[Array, "N 5"],
-    action_mask: Bool[Array, "N 5"],
-    edge_src: Int[Array, "E"],
-    edge_action: Int[Array, "E"],
-    edge_dst: Int[Array, "E"],
-    edge_mask: Bool[Array, "E"],
-    win_src: Int[Array, "W"],
-    win_action: Int[Array, "W"],
-    win_mask: Bool[Array, "W"],
-    start_idx: Int[Array, ""],
-  ) -> Float[Array, ""]:
-    probs = _policy_from_logits(logits, action_mask)
-    p_values, win_absorb = _build_markov(
-      probs,
-      edge_src,
-      edge_action,
-      edge_dst,
-      edge_mask,
-      win_src,
-      win_action,
-      win_mask,
-    )
-    V = _forward_vi(p_values, win_absorb, edge_src, edge_dst, n_fwd_iters)
-    return V[start_idx]
-
-  def _solve_fwd(  # noqa: ANN202
-    logits,  # noqa: ANN001
-    action_mask,  # noqa: ANN001
-    edge_src,  # noqa: ANN001
-    edge_action,  # noqa: ANN001
-    edge_dst,  # noqa: ANN001
-    edge_mask,  # noqa: ANN001
-    win_src,  # noqa: ANN001
-    win_action,  # noqa: ANN001
-    win_mask,  # noqa: ANN001
-    start_idx,  # noqa: ANN001
-  ):  # custom_vjp fwd — signature mirrors _solve
-    probs = _policy_from_logits(logits, action_mask)
-    p_values, win_absorb = _build_markov(
-      probs,
-      edge_src,
-      edge_action,
-      edge_dst,
-      edge_mask,
-      win_src,
-      win_action,
-      win_mask,
-    )
-    V = _forward_vi(p_values, win_absorb, edge_src, edge_dst, n_fwd_iters)
-    result = V[start_idx]
-    # Residuals: everything needed for the backward pass.
-    residuals = (
-      V,
-      probs,
-      action_mask,
-      edge_src,
-      edge_action,
-      edge_dst,
-      edge_mask,
-      win_src,
-      win_action,
-      win_mask,
-      start_idx,
-    )
-    return result, residuals
-
-  def _solve_bwd(residuals, g):  # noqa: ANN001, ANN202
-    (
-      V,
-      probs,
-      action_mask,
-      edge_src,
-      edge_action,
-      edge_dst,
-      edge_mask,
-      win_src,
-      win_action,
-      win_mask,
-      start_idx,
-    ) = residuals
-
-    N = V.shape[0]
-    p_values = probs[edge_src, edge_action] * edge_mask
-
-    # --- Adjoint solve: (I - P^T) lambda = e_start ---
-    # Iteration: lambda <- e_start + P^T @ lambda
-    # P^T @ lambda: for edge (src, dst, p), scatter p * lambda[src] into [dst]
-    e_start = jnp.zeros(N, dtype=jnp.float32).at[start_idx].set(1.0)
-
-    def _adj_step(lam, _):  # noqa: ANN001, ANN202
-      PT_lam = (
-        jnp.zeros(N, dtype=jnp.float32).at[edge_dst].add(p_values * lam[edge_src])
-      )
-      return e_start + PT_lam, None
-
-    lam, _ = jax.lax.scan(
-      _adj_step, jnp.zeros(N, dtype=jnp.float32), None, length=n_bwd_iters
-    )
-
-    # --- Gradient w.r.t. action probabilities ---
-    # dV_start/d pi(a|s) = lambda[s] * V_next(s,a)
-    # where V_next = V[dst] for transient edges, 1.0 for WIN edges.
-    grad_probs = jnp.zeros_like(probs)
-    grad_probs = grad_probs.at[edge_src, edge_action].add(
-      lam[edge_src] * V[edge_dst] * edge_mask
-    )
-    grad_probs = grad_probs.at[win_src, win_action].add(lam[win_src] * win_mask)
-
-    # --- Chain through softmax Jacobian ---
-    # d/d logits[s,a] = pi(a|s) * (grad_probs[s,a] - <grad_probs[s,:], pi(s,:)>)
-    dot = jnp.sum(probs * grad_probs, axis=-1, keepdims=True)
-    grad_logits = probs * (grad_probs - dot)
-    grad_logits = jnp.where(action_mask, grad_logits, 0.0)
-    grad_logits = g * grad_logits
-
-    # Non-differentiable inputs get zero cotangents of matching dtype.
-    z_am = jnp.zeros_like(action_mask, dtype=jnp.float32)
-    z_e = jnp.zeros_like(edge_src, dtype=jnp.float32)
-    z_w = jnp.zeros_like(win_src, dtype=jnp.float32)
-    z_si = jnp.zeros_like(start_idx, dtype=jnp.float32)
-    return (grad_logits, z_am, z_e, z_e, z_e, z_e, z_w, z_w, z_w, z_si)
-
-  _solve.defvjp(_solve_fwd, _solve_bwd)
-  return _solve
-
-
-# Default solver: 500 forward + 500 adjoint iterations.
-# Converges to ~1e-6 for typical gs=6 levels.
-solve_win_prob = _make_solve_single(n_fwd_iters=500, n_bwd_iters=500)
-
-
-# ---------------------------------------------------------------------------
 # Surrogate solver — supports warm-start caching, no custom_vjp needed
 # ---------------------------------------------------------------------------
 
@@ -495,7 +334,7 @@ solve_win_prob = _make_solve_single(n_fwd_iters=500, n_bwd_iters=500)
 def make_solve_surrogate(
   n_fwd_iters: int = 20,
   n_bwd_iters: int = 20,
-) -> object:
+) -> Callable[..., tuple[Array, Array, Array]]:
   """Build a differentiable solver using the surrogate gradient trick.
 
   Both forward (V) and adjoint (lambda) solves run under stop_gradient.

@@ -8,7 +8,7 @@
   - One entry point, `python -m src.train config/foo.py --key=val`. A config is a `.py` file that is `exec()`'d, plus `--key=value` overrides (`configurator.py`, nanoGPT-style).
   - Every mode runs `setup_training()` (`session.py`) then `training_loop(inner_stop, outer_stop, on_round_end)` (`loop.py`). BC is one round; adversarial training is several rounds with a GA callback as `on_round_end` (`adversarial_loop.py`). Stop conditions are combinators in `stopping.py`.
   - `ga.py` is the GA loop with in-process batched policy inference (`run_ga`, `run_multi_ga`, MAP-Elites archive). Rust does the mutation, crossover, BFS and Markov solves.
-  - `markov_jax.py` is a differentiable Markov solver (surrogate gradient trick).
+  - `markov_jax.py` is the differentiable Markov solver (surrogate gradient trick). Its docstring says how many iterations a policy needs and why it must be warm-started.
   - `ws_server.py` is the JSON-over-WebSocket server the viewer connects to, wrapping `model_server.py`.
   - Models are equinox modules registered with `@register_model` in `model.py`.
 - `baselines/random_agent.py` — random policy baseline
