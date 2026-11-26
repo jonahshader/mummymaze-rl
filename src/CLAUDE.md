@@ -2,37 +2,15 @@
 
 ## Layout
 
-- `game.py` — Pure Python game engine (mutable, reference implementation)
-- `env/` — JAX port (immutable pytrees, jit/vmap compatible)
-  - `types.py` — `LevelData` and `EnvState` pytree definitions
-  - `mechanics.py` — wall checks, gate blocking, enemy movement
-  - `step.py` — full turn pipeline (the core game logic)
-  - `obs.py` — CNN observation encoder (10-channel grid)
-  - `env.py` — gymnax-style functional RL wrapper
-  - `level_load.py` / `level_bank.py` — level loading and batched storage
-- `train/` — behavioral cloning pipeline
-  - `__main__.py` — unified entry point: `python -m src.train config/foo.py --key=val`
-  - `configurator.py` — nanoGPT-style config loader: `exec()` .py files + `--key=value` overrides
-  - `loop.py` — unified `training_loop` with inner/outer stop conditions and round-end callbacks
-  - `train_bc.py` — `train_epochs` inner loop, `make_train_step`/`make_eval_step` closure factories
-  - `session.py` — `TrainingSession` dataclass and `setup_training()` factory
-  - `config.py` — `TrainConfig`, `TrainState`, `TrainComponents` (swappable loss/metric/obs)
-  - `stopping.py` — stop-condition combinators: `stop_after`, `stop_at_step`, `any_of`, `all_of`
-  - `callbacks.py` — `LogFn`, `CheckpointFn` types and factory functions (wandb, directory checkpoints)
-  - `inference.py` — shared `make_obs_and_forward` JIT'd closure
-  - `loss.py` — `cross_entropy_loss`, `weighted_cross_entropy_loss`, `top1_accuracy`
-  - `optim.py` — `make_optimizer`, `count_params`
-  - `eval.py` — `compute_level_metrics`, `compute_markov_win_probs`, `parse_rust_levels`
-  - `markov_jax.py` — differentiable Markov solver (surrogate gradient trick), GraphSkeleton, obs precomputation
-  - `ga.py` — GA loop with batched inference (`compute_policy_win_probs_batched`), MAP-Elites archive
-  - `model.py` — model architectures (equinox, `@register_model` decorator)
-  - `dataset.py` — dataset construction from Rust solver
-  - `augment.py` — dataset augmentation (GA levels, dihedral variants, `load_augment_levels`)
-  - `reporter.py` — metrics reporting (level_metrics.json, WebSocket, stdio)
-  - `wire.py` — shared state conversion helpers (`state_tuples_to_env_states`)
-  - `checkpoint.py` — checkpoint save/load
-  - `adversarial_loop.py` — MAP-Elites adversarial training loop
-  - `model_server.py` — in-process model server for inference + training
+- `game.py` — pure Python game engine (mutable, reference implementation)
+- `env/` — JAX port: immutable pytrees, jit/vmap compatible. `step.py` is the full turn pipeline (the core game logic), `mechanics.py` the wall, gate and enemy-movement rules, `obs.py` the 10-channel CNN observation, `env.py` the gymnax-style functional wrapper, and `level_load.py` / `level_bank.py` level loading and batched storage.
+- `train/` — training. What holds it together:
+  - One entry point, `python -m src.train config/foo.py --key=val`. A config is a `.py` file that is `exec()`'d, plus `--key=value` overrides (`configurator.py`, nanoGPT-style).
+  - Every mode runs `setup_training()` (`session.py`) then `training_loop(inner_stop, outer_stop, on_round_end)` (`loop.py`). BC is one round; adversarial training is several rounds with a GA callback as `on_round_end` (`adversarial_loop.py`). Stop conditions are combinators in `stopping.py`.
+  - `ga.py` is the GA loop with in-process batched policy inference (`run_ga`, `run_multi_ga`, MAP-Elites archive). Rust does the mutation, crossover, BFS and Markov solves.
+  - `markov_jax.py` is a differentiable Markov solver (surrogate gradient trick).
+  - `ws_server.py` is the JSON-over-WebSocket server the viewer connects to, wrapping `model_server.py`.
+  - Models are equinox modules registered with `@register_model` in `model.py`.
 - `baselines/random_agent.py` — random policy baseline
 - `tui.py` — terminal UI
 

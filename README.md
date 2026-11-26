@@ -19,9 +19,10 @@ This installs all Python dependencies and builds the Rust PyO3 crate (`mummymaze
 
 ### Python
 
-**`src/train/train_bc.py`** — Behavioral cloning training. Trains a CNN to predict
-optimal BFS actions from observations. Writes `level_metrics.json` (per-level
-accuracy/loss) after each epoch for the viewer's Training tab.
+**`python -m src.train <config>`** — Unified training entry point. A config is a
+`.py` file in `config/`, with `--key=value` overrides. Behavioral cloning trains a
+model to predict optimal BFS actions from observations; adversarial training adds
+rounds of GA level generation against the current policy.
 
 ```bash
 # Basic training (10 epochs, default config)
@@ -35,6 +36,23 @@ uv run python -m src.train config/bc_default.py --epochs=20 --batch_size=2048 --
 
 # Adversarial training
 uv run python -m src.train config/adversarial_default.py
+```
+
+**`src/train/ws_server.py`** — JSON-over-WebSocket server for inference, training
+and adversarial loops. The viewer connects to it for its Training and Adversarial
+tabs and the agent probability overlay.
+
+```bash
+uv run python -m src.train.ws_server --mazes mazes/ [--port 8765]
+```
+
+**`experiments/`** — One-off experiment scripts. `curriculum_gs6.py` trains on
+GA-generated levels of increasing difficulty (`docs/CURRICULUM_TRAINING.md`);
+`bc_vs_direct.py` compares BC against direct win-probability training.
+
+```bash
+uv run python experiments/curriculum_gs6.py
+uv run python -m experiments.bc_vs_direct
 ```
 
 **`solve_all.py`** — Batch BFS solver. Solves all 10,100 sublevels via the Rust engine
@@ -72,7 +90,13 @@ and playing levels with arrow keys.
 ```bash
 # Build and run (from repo root)
 cargo run --manifest-path crates/mummymaze-viewer/Cargo.toml --release -- mazes/
+
+# Also load GA-generated JSONL levels from a directory
+cargo run --manifest-path crates/mummymaze-viewer/Cargo.toml --release -- mazes/ --levels <dir>
 ```
+
+The model features need the WebSocket server running. The viewer reads its address
+from `MODEL_SERVER_URL` (default `ws://localhost:8765`).
 
 ## Tests
 
