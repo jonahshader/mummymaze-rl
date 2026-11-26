@@ -18,7 +18,7 @@
 
 Python 3.13, uv, ruff, ty. Deep learning: jax[cuda13], equinox, optax.
 
-Array shapes are annotated with jaxtyping. Nothing checks them at runtime: beartype is a dependency, but no import hook or decorator installs it.
+Runtime type and shape checking via jaxtyping + beartype: `src/__init__.py` installs the import hook, so every function and dataclass under `src/` is checked against its annotations on each call, with no per-function decorators. Under `jit` that is once per trace. An annotation is a claim that gets enforced, so it must be true: the pytrees in `env/types.py` carry a leading `*batch` because they are built both single and batched.
 
 `mummymaze_rust` is typed by a hand-written stub, `crates/mummymaze/mummymaze_rust.pyi` (`crates/CLAUDE.md`). Its dict returns are `TypedDict`s that exist only in the stub, so a module that names one in an annotation needs `from __future__ import annotations`.
 
@@ -36,6 +36,7 @@ After moderate/significant refactors:
 ```
 uv run vulture
 ```
+It scans `src/`, `experiments/`, `tests/` and `config/` and passes on a clean tree. A name that is used only by reflection or offered to config files goes in `ignore_names` in `pyproject.toml`, with its reason.
 
 After changes to game logic (`game.py`, `env/step.py`, `env/mechanics.py`):
 ```

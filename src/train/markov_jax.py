@@ -9,7 +9,7 @@ Two solvers:
 
 Also provides:
   - GraphSkeleton: pre-computed graph structure for one level (numpy arrays)
-  - build_skeleton / build_skeletons: convert Rust build_graph output
+  - build_skeleton: convert Rust build_graph output
   - pad_and_stack: batch variable-size skeletons into padded JAX arrays
 """
 
@@ -109,14 +109,6 @@ def build_skeleton(level: mummymaze_rust.Level, bank_idx: int) -> GraphSkeleton:
     bank_idx=bank_idx,
     rust_level=level,
   )
-
-
-def build_skeletons(
-  levels: list[mummymaze_rust.Level],
-  bank_indices: list[int],
-) -> list[GraphSkeleton]:
-  """Build skeletons for a list of levels."""
-  return [build_skeleton(lev, bi) for lev, bi in zip(levels, bank_indices)]
 
 
 # ---------------------------------------------------------------------------

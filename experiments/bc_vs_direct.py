@@ -692,22 +692,6 @@ def run_lambda_bc_arm(
     new_model = eqx.apply_updates(model, updates)
     return new_model, new_opt_state, loss, acc
 
-  # JIT'd step for gradient accumulation (returns grads without applying)
-  @eqx.filter_jit
-  def weighted_grad_step(  # noqa: ANN001, ANN202
-    model,  # noqa: ANN001
-    obs,  # noqa: ANN001
-    targets,  # noqa: ANN001
-    weights,  # noqa: ANN001
-  ):
-    def _loss(m):  # noqa: ANN001, ANN202
-      logits = jax.vmap(m)(obs)
-      log_probs = jax.nn.log_softmax(logits, axis=-1)
-      per_state = -jnp.sum(targets * log_probs, axis=-1)
-      return jnp.sum(weights * per_state) / jnp.sum(weights)
-
-    return eqx.filter_value_and_grad(_loss)(model)
-
   # Compute initial λ weights
   print("  Computing initial λ weights...")
   t0 = time.time()

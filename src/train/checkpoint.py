@@ -63,10 +63,6 @@ class CheckpointData:
   batch_size: int
   hparams: dict[str, object] = field(default_factory=dict)
 
-  @property
-  def has_optimizer(self) -> bool:
-    return self.opt_state is not None
-
 
 def load_checkpoint(
   path: Path,

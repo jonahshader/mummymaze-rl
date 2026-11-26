@@ -85,8 +85,25 @@ division-by-zero = "error"
 possibly-unresolved-reference = "error"
 
 [tool.vulture]
-paths = ["src"]
+# Everything that can use src/, so a function only an experiment calls is not "unused".
+paths = ["src", "experiments", "tests", "config"]
 min_confidence = 60
+ignore_names = [
+  # Reached through the @register_model registry, by name from a config.
+  "MazeResNet",
+  "MazeResNetAttn",
+  # Stop-condition combinators offered to config files.
+  "stop_at_step",
+  "all_of",
+  # Shape fields of PaddedSkeletonBatch.
+  "max_edges",
+  "max_win_edges",
+  # Alternative Markov solvers nothing calls today (docs/TODO.md).
+  "value_iteration",
+  "solve_win_prob",
+  # ModelServer's own stop path; the WebSocket server uses its own events (docs/TODO.md).
+  "stop_train",
+]
 
 [tool.uv.sources]
 mummy-maze-parser = { git = "https://github.com/jonahshader/mummy-maze-parser" }
