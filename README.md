@@ -2,7 +2,7 @@
 
 PopCap's Mummy Maze Deluxe as a JAX RL testbed.
 
-101 pyramid files (10,100 sublevels, 6,090 unique after dedup) with a verified game engine,
+100 pyramid files (10,000 sublevels, 6,090 unique after dedup) with a verified game engine,
 BFS solver, Markov analysis, and a gymnax-compatible RL environment.
 
 ## Setup
@@ -55,7 +55,7 @@ uv run python -m experiments.curriculum_gs6
 uv run python -m experiments.bc_vs_direct
 ```
 
-**`solve_all.py`** — Batch BFS solver. Solves all 10,100 sublevels via the Rust engine
+**`solve_all.py`** — Batch BFS solver. Solves all 10,000 sublevels via the Rust engine
 and prints summary stats. Used to populate solutions for the replay test.
 
 ```bash

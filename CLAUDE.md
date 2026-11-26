@@ -12,7 +12,7 @@ This file holds what nearly every session needs. Rules for one area go in that d
 - `config/` — training configs for `python -m src.train`
 - `experiments/` — one-off experiment scripts (curriculum, BC vs direct)
 - `tests/` — pytest suite; `notebooks/` — analysis notebooks
-- `mazes/` — `.dat` level files (101 pyramids, 10,100 sublevels)
+- `mazes/` — `.dat` level files (100 pyramids, 10,000 sublevels; `B-100.dat` is empty)
 - `docs/` — game rules, research ideas, binary analysis notes, `TODO.md`
 
 ## Key Design Constraints
