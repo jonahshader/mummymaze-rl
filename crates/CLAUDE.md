@@ -8,6 +8,8 @@ CLI: `src/bin/cli.rs` — batch solver and Markov analyzer.
 
 PyO3 bindings (`import mummymaze_rust`): see `src/python.rs` for the full API.
 
+The bindings are typed by a hand-written stub, `mummymaze_rust.pyi`, which maturin installs with the package. Update it in the same commit as any change to a signature or a returned dict in `python.rs`, then reinstall. `tests/test_rust_stubs.py` fails when an exported name or `Level` member is missing from either side, or when the installed stub is stale; it does not check argument or return types.
+
 Action indices match JAX env: N=0, S=1, E=2, W=3, Wait=4.
 
 ### Building
