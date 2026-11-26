@@ -161,6 +161,7 @@ def main() -> None:
     print(f"{'=' * 60}")
 
     # Train until model masters current round's levels or max epochs
+    round_mean = 0.0
     for epoch_in_round in range(args.max_epochs_per_round):
       with timer("train"):
         state = train_epochs(

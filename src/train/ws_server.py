@@ -61,7 +61,7 @@ class WsHandler:
     self._ga_stop = threading.Event()
     # Background task for long-running operations (train/adversarial/GA).
     # Only one can run at a time; the message loop stays responsive for stop commands.
-    self._bg_task: asyncio.Task | None = None  # type: ignore[type-arg]
+    self._bg_task: asyncio.Task | None = None
 
   async def handle(self, ws: ServerConnection) -> None:
     log.info("client connected: %s", ws.remote_address)

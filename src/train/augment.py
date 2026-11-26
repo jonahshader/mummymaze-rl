@@ -1,5 +1,7 @@
 """Dataset augmentation: merge GA-generated levels into BC datasets."""
 
+from __future__ import annotations
+
 import json
 import time
 from collections import defaultdict
@@ -41,7 +43,7 @@ def dihedral_variants(
 
 def solve_levels(
   levels: list[mummymaze_rust.Level],
-) -> dict[int, list[dict]]:
+) -> dict[int, list[mummymaze_rust.LevelBestActions]]:
   """BFS-solve GA levels via Rust, grouped by grid_size.
 
   Returns {grid_size: [entry_dicts]} where each entry has
@@ -49,7 +51,7 @@ def solve_levels(
   """
   results = mummymaze_rust.best_actions_for_levels(levels)
 
-  by_gs: dict[int, list[dict]] = {}
+  by_gs: dict[int, list[mummymaze_rust.LevelBestActions]] = {}
   for entry in results:
     gs = entry["grid_size"]
     if gs not in by_gs:
@@ -59,7 +61,9 @@ def solve_levels(
   return by_gs
 
 
-def _level_to_bank_arrays(level: mummymaze_rust.Level) -> dict[str, np.ndarray]:
+def _level_to_bank_arrays(
+  level: mummymaze_rust.Level,
+) -> dict[str, np.ndarray | bool | int]:
   """Convert a Rust Level to numpy arrays matching LevelBank fields."""
   d = level.to_dict()
   n = d["grid_size"]
@@ -68,10 +72,10 @@ def _level_to_bank_arrays(level: mummymaze_rust.Level) -> dict[str, np.ndarray]:
   v_walls = np.array(d["v_walls"], dtype=np.bool_).reshape(n, n + 1)
 
   is_red = d["flip"]
-  has_gate = d["gate"] is not None and d["key"] is not None
-
-  gate_r, gate_c = d["gate"] if has_gate else (0, 0)
-  key_r, key_c = d["key"] if has_gate else (0, 0)
+  gate, key = d["gate"], d["key"]
+  has_gate = gate is not None and key is not None
+  gate_r, gate_c = gate if gate is not None and has_gate else (0, 0)
+  key_r, key_c = key if key is not None and has_gate else (0, 0)
 
   traps = d["traps"]
   trap_arr = np.zeros((MAX_TRAPS, 2), dtype=np.int32)

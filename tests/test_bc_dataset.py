@@ -39,7 +39,7 @@ SAMPLE_LEVELS = [
 
 
 def _build_dist_to_win(
-  graph_data: dict,
+  graph_data: "mummymaze_rust.Graph",
 ) -> tuple[dict[tuple, int], list[tuple]]:
   """Backward BFS from WIN using a Rust build_graph result.
 

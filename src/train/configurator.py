@@ -11,13 +11,14 @@ Usage:
 import ast
 import sys
 import types
+from typing import Any
 
 
 def load_config(
   config_file: str | None = None,
   overrides: list[str] | None = None,
-  defaults: dict[str, object] | None = None,
-) -> dict[str, object]:
+  defaults: dict[str, Any] | None = None,
+) -> dict[str, Any]:
   """Load config from a .py file + CLI --key=value overrides.
 
   1. Start with defaults (if provided)
@@ -27,7 +28,7 @@ def load_config(
   Unknown keys in overrides raise ValueError. Config files can introduce
   new keys freely.
   """
-  config: dict[str, object] = dict(defaults) if defaults else {}
+  config: dict[str, Any] = dict(defaults) if defaults else {}
 
   # Step 2: exec config file
   if config_file is not None:

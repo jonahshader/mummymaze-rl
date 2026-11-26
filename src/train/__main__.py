@@ -16,11 +16,15 @@ Usage:
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
+from src.train.config import TrainComponents
 from src.train.configurator import load_config, parse_argv
+from src.train.loop import RoundEndFn, training_loop
+from src.train.session import TrainingSession, setup_training
 
 # Default config values. Config files and CLI overrides add to or replace these.
-DEFAULTS: dict[str, object] = {
+DEFAULTS: dict[str, Any] = {
   "maze_dir": "mazes",
   # Training
   "epochs": 10,
@@ -103,9 +107,6 @@ def main() -> None:
   epochs = int(config["epochs"])
   schedule_epochs = epochs * n_rounds if n_rounds > 1 else None
 
-  from src.train.loop import training_loop
-  from src.train.session import setup_training
-
   session = setup_training(
     maze_dir=maze_dir,
     epochs=epochs,
@@ -155,12 +156,11 @@ def main() -> None:
   session.finish()
 
 
-def _build_components(callables: dict) -> object | None:
+def _build_components(callables: dict[str, Any]) -> TrainComponents | None:
   """Build TrainComponents from config callables, or None for defaults."""
   if not any(k in callables for k in ("loss_fn", "metric_fn", "make_obs_fn")):
     return None
 
-  from src.train.config import TrainComponents
   from src.train.dataset import make_batch_obs
   from src.train.loss import cross_entropy_loss, top1_accuracy
 
@@ -175,8 +175,8 @@ def _build_ga_round_end(
   config: dict,
   maze_dir: Path,
   checkpoint_dir: Path | None,
-  session: object,
-) -> object:
+  session: TrainingSession,
+) -> RoundEndFn:
   """Auto-construct GA round-end callback from config params."""
   from src.train.adversarial_loop import make_ga_round_end
 

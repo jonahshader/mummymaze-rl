@@ -3,13 +3,14 @@
 Used by model_server.py and ga.py for JAX inference batching.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 from src.env.types import EnvState
 
 
-def state_tuples_to_env_states(tuples: np.ndarray) -> EnvState:
+def state_tuples_to_env_states(tuples: np.ndarray | jax.Array) -> EnvState:
   """Convert (N, 12) i32 state tuples to batched EnvState.
 
   Gate polarity inverted: Rust gate_open=True means blocking,

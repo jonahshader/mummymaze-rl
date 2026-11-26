@@ -45,10 +45,10 @@ def test_generate_random_solvable_entity_probs():
   )
   assert len(levels) == 50
 
-  n_mummy2 = sum(1 for l in levels if l.to_dict()["mummy2"] is not None)
-  n_scorpion = sum(1 for l in levels if l.to_dict()["scorpion"] is not None)
-  n_gate = sum(1 for l in levels if l.to_dict()["gate"] is not None)
-  n_traps = sum(1 for l in levels if len(l.to_dict()["traps"]) > 0)
+  n_mummy2 = sum(1 for lev in levels if lev.to_dict()["mummy2"] is not None)
+  n_scorpion = sum(1 for lev in levels if lev.to_dict()["scorpion"] is not None)
+  n_gate = sum(1 for lev in levels if lev.to_dict()["gate"] is not None)
+  n_traps = sum(1 for lev in levels if len(lev.to_dict()["traps"]) > 0)
 
   # With 90% probs, at least some should have each entity type
   assert n_mummy2 > 10, f"Expected many mummy2s, got {n_mummy2}/50"

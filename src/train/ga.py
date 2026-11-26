@@ -28,6 +28,8 @@ from src.train.wire import next_power_of_2, state_tuples_to_env_states
 if TYPE_CHECKING:
   from collections.abc import Callable
 
+  from src.env.level_bank import LevelBank
+
 
 # ---------------------------------------------------------------------------
 # Level conversion: mummymaze_rust.Level → JAX LevelData
@@ -289,7 +291,7 @@ def compute_policy_win_probs_batched(
 def _build_temp_bank(
   levels: list[mummymaze_rust.Level],
   grid_size: int,
-) -> "LevelBank":
+) -> LevelBank:
   """Build a temporary LevelBank from Rust levels (for obs computation)."""
   from src.env.level_bank import LevelBank
   from src.train.augment import _level_to_bank_arrays
@@ -341,7 +343,7 @@ class GenerationResult:
   pop_size: int
 
 
-def _individual_from_eval(e: dict) -> Individual:
+def _individual_from_eval(e: mummymaze_rust.GaEval) -> Individual:
   """Build an Individual from a ga_evaluate_batch result dict."""
   return Individual(
     level=e["level"],

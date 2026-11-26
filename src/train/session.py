@@ -6,6 +6,7 @@ from pathlib import Path
 
 import equinox as eqx
 import jax.random as jr
+import optax
 
 from src.train.callbacks import (
   CheckpointFn,
@@ -88,7 +89,7 @@ def setup_training(
   # Optimizer schedule override (e.g. adversarial: epochs_per_round * n_rounds)
   schedule_epochs: int | None = None,
   # Swappable components
-  optimizer: object | None = None,  # optax.GradientTransformation; skip make_optimizer
+  optimizer: optax.GradientTransformation | None = None,  # skip make_optimizer
   components: TrainComponents | None = None,
 ) -> TrainingSession:
   """Set up a training run: load data, init model, create optimizer, build callbacks.

@@ -18,7 +18,9 @@
 
 Python 3.13, uv, ruff, ty. Deep learning: jax[cuda13], equinox, optax.
 
-Runtime shape validation via jaxtyping + beartype. The import hook applies beartype automatically to all modules — no per-function decorators needed.
+Array shapes are annotated with jaxtyping. Nothing checks them at runtime: beartype is a dependency, but no import hook or decorator installs it.
+
+`mummymaze_rust` is typed by a hand-written stub, `crates/mummymaze/mummymaze_rust.pyi` (`crates/CLAUDE.md`). Its dict returns are `TypedDict`s that exist only in the stub, so a module that names one in an annotation needs `from __future__ import annotations`.
 
 Avoid `__init__.py` re-exports — vulture can't trace them, causing false negatives. Import directly from submodules.
 
@@ -28,6 +30,7 @@ After any code changes:
 ```
 uv run ruff check --fix && uv run ruff format && uv run ty check
 ```
+All three pass on a clean tree, so any output is yours. Notebooks are outside the format and type checks (`pyproject.toml`).
 
 After moderate/significant refactors:
 ```

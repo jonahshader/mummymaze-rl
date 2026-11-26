@@ -119,7 +119,7 @@ class ResNetStem(eqx.Module):
   def __init__(
     self,
     n_blocks: int,
-    keys: list,
+    keys: PRNGKeyArray,
     *,
     channels: int = 64,
     attn_res: bool = False,

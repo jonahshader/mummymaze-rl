@@ -53,6 +53,10 @@ ignore = [
   "ANN401", # Any is needed for dtype parameters (no good JAX dtype type)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Notebooks are exploratory: no annotation, line-length or one-statement rules.
+"notebooks/*" = ["ANN", "E501", "E701", "E702", "E741"]
+
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = false
 ignore-fully-untyped = false
@@ -60,6 +64,12 @@ suppress-none-returning = true
 
 [tool.ruff.format]
 indent-style = "space"
+# Notebooks keep their own 4-space style; formatting them rewrites every cell.
+exclude = ["*.ipynb"]
+
+[tool.ty.src]
+# Notebooks need the optional `notebooks` dependency group and aren't typed.
+exclude = ["notebooks"]
 
 [tool.ty.rules]
 # Upgrade warnings to errors for strict mode

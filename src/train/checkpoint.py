@@ -12,6 +12,7 @@ from pathlib import Path
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import optax
 
 from src.train.model import DEFAULT_ARCH, make_model
@@ -100,9 +101,7 @@ def load_checkpoint(
 
   key = None
   if "rng_key" in state:
-    import numpy as np
-
-    key_data = np.array(state["rng_key"], dtype=np.uint32)
+    key_data = jnp.asarray(state["rng_key"], dtype=jnp.uint32)
     key = jax.random.wrap_key_data(key_data)
 
   return CheckpointData(

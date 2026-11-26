@@ -16,12 +16,20 @@ Also provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import mummymaze_rust
 import numpy as np
 from jaxtyping import Array, Bool, Float, Int
+
+if TYPE_CHECKING:
+  import equinox as eqx
+
+  from src.env.level_bank import LevelBank
+  from src.train.config import MakeObsFn
+  from src.train.dataset import BCDataset
 
 _ACTION_MAP = {"N": 0, "S": 1, "E": 2, "W": 3, "wait": 4}
 
@@ -574,8 +582,8 @@ def make_solve_surrogate(
 def precompute_obs(
   skeletons: list[GraphSkeleton],
   grid_size: int,
-  bank: object,
-  make_obs_fn: object,
+  bank: LevelBank,
+  make_obs_fn: MakeObsFn,
   batch_size: int = 4096,
 ) -> tuple[jax.Array, list[int]]:
   """Pre-compute observations for all states across all skeletons.
@@ -612,8 +620,8 @@ def precompute_obs(
 
 
 def compute_lambda_weights(
-  model: object,
-  ds: object,
+  model: eqx.Module,
+  ds: BCDataset,
   skeletons: list[GraphSkeleton],
   obs_bank: jax.Array,
   obs_offsets: list[int],

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import equinox as eqx
@@ -40,6 +41,9 @@ from src.train.train_bc import make_train_step
 
 GRID_SIZE = 6
 
+# model -> mean log10(win_prob) on the validation levels
+Evaluator = Callable[[eqx.Module], float]
+
 
 # ---------------------------------------------------------------------------
 # Evaluation — shared between both arms
@@ -50,9 +54,9 @@ def make_evaluator(
   ds: BCDataset,
   val_level_indices: list[int],
   val_rust_levels: list[mummymaze_rust.Level],
-  jit_make_obs: object,
+  jit_make_obs: Callable[..., jax.Array],
   batch_size: int,
-) -> object:
+) -> Evaluator:
   """Build a reusable evaluate(model) -> mean_log10_win_prob closure."""
   val_mask_np = np.array(ds.val_mask)
   val_indices = jnp.where(ds.val_mask, size=int(ds.val_mask.sum()))[0]
@@ -103,8 +107,8 @@ def make_evaluator(
 def run_bc_arm(
   args: argparse.Namespace,
   ds: BCDataset,
-  jit_make_obs: object,
-  evaluate: object,
+  jit_make_obs: Callable[..., jax.Array],
+  evaluate: Evaluator,
 ) -> None:
   """Train via behavioral cloning (cross-entropy on expert actions)."""
   key = jr.key(args.seed)
@@ -142,6 +146,7 @@ def run_bc_arm(
   global_step = 0
   wall_start = time.time()
   last_eval_time = 0.0
+  loss = acc = jnp.array(jnp.nan)  # stays NaN if an epoch has no steps
 
   for epoch in range(1000):
     key, shuffle_key = jr.split(key)
@@ -189,11 +194,11 @@ def _run_bc_warmup(
   model: eqx.Module,
   key: jax.Array,
   ds: BCDataset,
-  jit_make_obs: object,
+  jit_make_obs: Callable[..., jax.Array],
   batch_size: int,
   lr: float,
   n_epochs: int,
-  evaluate: object,
+  evaluate: Evaluator,
 ) -> tuple[eqx.Module, jax.Array]:
   """Run a few BC epochs to warmstart the model. Returns (model, key)."""
 
@@ -205,6 +210,7 @@ def _run_bc_warmup(
 
   _train_step = make_train_step(cross_entropy_loss, top1_accuracy)
   train_indices = jnp.where(ds.train_mask, size=n_train)[0]
+  loss = acc = jnp.array(jnp.nan)  # stays NaN if an epoch has no steps
 
   for epoch in range(n_epochs):
     key, shuffle_key = jr.split(key)
@@ -234,8 +240,8 @@ def run_direct_arm(
   args: argparse.Namespace,
   ds: BCDataset,
   skeletons: list[GraphSkeleton],
-  jit_make_obs: object,
-  evaluate: object,
+  jit_make_obs: Callable[..., jax.Array],
+  evaluate: Evaluator,
 ) -> None:
   """Train by directly optimizing win probability via differentiable Markov solve."""
   key = jr.key(args.seed)
@@ -637,8 +643,8 @@ def run_lambda_bc_arm(
   skeletons: list[GraphSkeleton],
   obs_bank: jax.Array,
   obs_offsets: list[int],
-  jit_make_obs: object,
-  evaluate: object,
+  jit_make_obs: Callable[..., jax.Array],
+  evaluate: Evaluator,
 ) -> None:
   """Train with BC loss weighted by λ (state importance for V_start).
 
@@ -737,6 +743,7 @@ def run_lambda_bc_arm(
   wall_start = time.time()
   last_eval_time = 0.0
   lambda_recompute_interval = 50  # recompute λ every N epochs
+  loss = acc = jnp.array(jnp.nan)  # stays NaN if an epoch has no steps
 
   for epoch in range(1000):
     key, shuffle_key = jr.split(key)
@@ -939,6 +946,7 @@ def main() -> None:
     print(f"\n{'=' * 60}")
     print("LAMBDA-WEIGHTED BC ARM")
     print(f"{'=' * 60}")
+    assert obs_bank_skel is not None
     run_lambda_bc_arm(
       args, ds, skeletons, obs_bank_skel, obs_offsets_skel, jit_make_obs, evaluate
     )

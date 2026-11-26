@@ -94,7 +94,9 @@ def _run_batch(
   batch_state = _stack_pytree(states)
 
   # scan body: step one action across all levels
-  def scan_body(carry: EnvState, action_col: jnp.ndarray) -> tuple[EnvState, EnvState]:
+  def scan_body(
+    carry: tuple[LevelData, EnvState], action_col: jnp.ndarray
+  ) -> tuple[tuple[LevelData, EnvState], EnvState]:
     new_state = jax.vmap(lambda lv, s, a: jax_step(grid_size, lv, s, a))(
       carry[0], carry[1], action_col
     )
@@ -102,7 +104,9 @@ def _run_batch(
 
   # JIT the scan over all timesteps
   @jax.jit
-  def run_scan(level: LevelData, state: EnvState, actions: jnp.ndarray) -> EnvState:
+  def run_scan(
+    level: LevelData, state: EnvState, actions: jnp.ndarray
+  ) -> tuple[EnvState, EnvState]:
     # actions: (n, max_steps) -> transpose to (max_steps, n) for scan
     actions_t = actions.T
     (_, final_state), all_states = jax.lax.scan(scan_body, (level, state), actions_t)
