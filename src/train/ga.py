@@ -590,3 +590,251 @@ def _tournament_select(
   """Pick k random individuals, return the fittest."""
   candidates = rng.sample(population, min(k, len(population)))
   return max(candidates, key=lambda x: x.fitness)
+
+
+# ---------------------------------------------------------------------------
+# Multi-GA with batched inference
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MultiGAGenerationResult:
+  generation: int
+  best_per_run: list[Individual]
+  best_overall: Individual
+  avg_fitness: float
+  solvable_rate: float
+  total_pop: int
+
+
+@dataclass
+class _RunState:
+  population: list[Individual]
+  rng: random.Random
+  best_ever: Individual | None
+
+
+def run_multi_ga(
+  n_runs: int,
+  seed_levels: list[mummymaze_rust.Level],
+  *,
+  model: object,
+  grid_size: int,
+  pop_size: int = 16,
+  generations: int = 50,
+  fitness_expr: str = "-log_policy_win_prob",
+  seed: int = 42,
+  batch_size: int = 4096,
+  elite_frac: float = 0.1,
+  crossover_rate: float = 0.2,
+  crossover_mode: str = "swap_entities",
+  w_wall: float = 5.0,
+  w_move_entity: float = 3.0,
+  w_move_player: float = 2.0,
+  w_add_entity: float = 1.0,
+  w_remove_entity: float = 1.0,
+  w_move_exit: float = 1.0,
+  extra_wall_prob: float = 0.3,
+  on_generation: Callable[[MultiGAGenerationResult], None] | None = None,
+  stop_flag: threading.Event | None = None,
+) -> list[Individual]:
+  """Run N independent GAs with batched inference across all populations.
+
+  Each generation, all populations produce offspring independently, then
+  all offspring are evaluated in a single batched BFS + GPU inference pass.
+  Returns the best individual from each run for maximum diversity.
+  """
+  import bisect
+
+  mutation_kwargs = dict(
+    w_wall=w_wall,
+    w_move_entity=w_move_entity,
+    w_move_player=w_move_player,
+    w_add_entity=w_add_entity,
+    w_remove_entity=w_remove_entity,
+    w_move_exit=w_move_exit,
+    extra_wall_prob=extra_wall_prob,
+  )
+
+  needs_policy = (
+    "policy_win_prob" in fitness_expr or "log_policy_win_prob" in fitness_expr
+  )
+
+  # --- Distribute seeds across runs (round-robin) ---
+  per_run_seeds: list[list[mummymaze_rust.Level]] = [[] for _ in range(n_runs)]
+  for i, lev in enumerate(seed_levels):
+    per_run_seeds[i % n_runs].append(lev)
+
+  # Pad each run to pop_size by mutating its own seeds
+  for run_idx, seeds in enumerate(per_run_seeds):
+    if not seeds:
+      continue
+    run_rng = random.Random(seed + run_idx)
+    while len(seeds) < pop_size:
+      parent = seeds[run_rng.randint(0, len(seeds) - 1)]
+      seeds.append(
+        mummymaze_rust.mutate(parent, seed=run_rng.randint(0, 2**63), **mutation_kwargs)
+      )
+
+  # --- Initial evaluation (batched across all runs) ---
+  all_initial: list[mummymaze_rust.Level] = []
+  init_offsets = [0]
+  for seeds in per_run_seeds:
+    all_initial.extend(seeds)
+    init_offsets.append(len(all_initial))
+
+  evals = mummymaze_rust.ga_evaluate_batch(all_initial, fitness_expr=fitness_expr)
+
+  # Scatter eval results to per-run populations
+  runs: list[_RunState] = [
+    _RunState(population=[], rng=random.Random(seed + i), best_ever=None)
+    for i in range(n_runs)
+  ]
+  for e in evals:
+    run_idx = bisect.bisect_right(init_offsets, e["level_idx"]) - 1
+    runs[run_idx].population.append(_individual_from_eval(e))
+
+  # Batched policy inference for all initial solvable levels
+  if needs_policy:
+    all_init_levels: list[mummymaze_rust.Level] = []
+    init_map: list[tuple[int, int]] = []
+    for ri, run in enumerate(runs):
+      for li, ind in enumerate(run.population):
+        all_init_levels.append(ind.level)
+        init_map.append((ri, li))
+
+    if all_init_levels:
+      log_pwps = compute_policy_win_probs_batched(
+        all_init_levels, model, grid_size, batch_size=batch_size
+      )
+      for (ri, li), lwp in zip(init_map, log_pwps):
+        _recompute_fitness(runs[ri].population[li], lwp, fitness_expr)
+
+  # Sort, truncate, set best_ever
+  for run in runs:
+    run.population.sort(key=lambda x: x.fitness, reverse=True)
+    run.population = run.population[:pop_size]
+    if run.population:
+      run.best_ever = run.population[0]
+
+  # Report generation 0
+  _report_multi_gen(0, runs, 1.0, on_generation)
+
+  # --- Generation loop ---
+  for generation in range(1, generations + 1):
+    if stop_flag is not None and stop_flag.is_set():
+      break
+
+    n_elite = max(1, int(pop_size * elite_frac + 0.5))
+
+    # Phase 1: Each run produces offspring independently (CPU only)
+    all_offspring: list[mummymaze_rust.Level] = []
+    offspring_offsets = [0]
+    per_run_n_elite: list[int] = []
+
+    for run in runs:
+      if not run.population:
+        per_run_n_elite.append(0)
+        offspring_offsets.append(len(all_offspring))
+        continue
+
+      run.population.sort(key=lambda x: x.fitness, reverse=True)
+      actual_elite = min(n_elite, len(run.population))
+      per_run_n_elite.append(actual_elite)
+
+      n_needed = pop_size - actual_elite
+      for _ in range(n_needed):
+        if run.rng.random() < crossover_rate and len(run.population) >= 2:
+          p1 = _tournament_select(run.population, run.rng, k=3)
+          p2 = _tournament_select(run.population, run.rng, k=3)
+          child = mummymaze_rust.ga_crossover(
+            p1.level,
+            p2.level,
+            mode=crossover_mode,
+            seed=run.rng.randint(0, 2**63),
+          )
+        else:
+          parent = _tournament_select(run.population, run.rng, k=3)
+          child = mummymaze_rust.mutate(
+            parent.level,
+            seed=run.rng.randint(0, 2**63),
+            **mutation_kwargs,
+          )
+        all_offspring.append(child)
+
+      offspring_offsets.append(len(all_offspring))
+
+    # Phase 2: Batched BFS + Markov eval (one Rust call)
+    total_offspring = len(all_offspring)
+    evals = mummymaze_rust.ga_evaluate_batch(all_offspring, fitness_expr=fitness_expr)
+
+    # Phase 3: Scatter eval results back to per-run groups
+    per_run_new: list[list[Individual]] = [[] for _ in range(n_runs)]
+    all_solvable: list[mummymaze_rust.Level] = []
+    solvable_map: list[tuple[int, int]] = []
+
+    for e in evals:
+      run_idx = bisect.bisect_right(offspring_offsets, e["level_idx"]) - 1
+      ind = _individual_from_eval(e)
+      li = len(per_run_new[run_idx])
+      per_run_new[run_idx].append(ind)
+      all_solvable.append(e["level"])
+      solvable_map.append((run_idx, li))
+
+    # Phase 4: Batched GPU inference (one call, chunked internally)
+    if needs_policy and all_solvable:
+      log_pwps = compute_policy_win_probs_batched(
+        all_solvable, model, grid_size, batch_size=batch_size
+      )
+      for (ri, li), lwp in zip(solvable_map, log_pwps):
+        _recompute_fitness(per_run_new[ri][li], lwp, fitness_expr)
+
+    # Phase 5: Per-run merge and selection
+    total_solvable = len(all_solvable)
+    for ri, run in enumerate(runs):
+      actual_elite = per_run_n_elite[ri]
+      elites = run.population[:actual_elite]
+      new_pop = elites + per_run_new[ri]
+
+      if not new_pop and run.best_ever is not None:
+        new_pop = [run.best_ever]
+
+      new_pop.sort(key=lambda x: x.fitness, reverse=True)
+      run.population = new_pop
+
+      if run.population and (
+        run.best_ever is None or run.population[0].fitness > run.best_ever.fitness
+      ):
+        run.best_ever = run.population[0]
+
+    solvable_rate = total_solvable / total_offspring if total_offspring > 0 else 1.0
+    _report_multi_gen(generation, runs, solvable_rate, on_generation)
+
+  return [run.best_ever for run in runs if run.best_ever is not None]
+
+
+def _report_multi_gen(
+  generation: int,
+  runs: list[_RunState],
+  solvable_rate: float,
+  on_generation: Callable[[MultiGAGenerationResult], None] | None,
+) -> None:
+  """Build and emit a MultiGAGenerationResult."""
+  bests = [run.best_ever for run in runs if run.best_ever is not None]
+  if not bests:
+    return
+  best_overall = max(bests, key=lambda x: x.fitness)
+  all_fitnesses = [ind.fitness for run in runs for ind in run.population]
+  avg = sum(all_fitnesses) / len(all_fitnesses) if all_fitnesses else 0.0
+  total_pop = sum(len(run.population) for run in runs)
+
+  result = MultiGAGenerationResult(
+    generation=generation,
+    best_per_run=bests,
+    best_overall=best_overall,
+    avg_fitness=avg,
+    solvable_rate=solvable_rate,
+    total_pop=total_pop,
+  )
+  if on_generation:
+    on_generation(result)

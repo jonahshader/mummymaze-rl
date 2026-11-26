@@ -22,10 +22,11 @@ import numpy as np
 from src.train.augment import augment_dataset
 from src.train.ga import (
   compute_policy_win_probs_batched,
-  run_ga,
+  run_multi_ga,
 )
 from src.train.session import setup_training
 from src.train.stopping import stop_after
+from src.train.timer import SectionTimer
 from src.train.train_bc import train_epochs
 
 
@@ -45,7 +46,8 @@ def main() -> None:
   )
   parser.add_argument("--n-random-levels", type=int, default=100)
   parser.add_argument("--ga-generations", type=int, default=50)
-  parser.add_argument("--ga-pop-size", type=int, default=64)
+  parser.add_argument("--ga-pop-size", type=int, default=64, help="Per-run pop size")
+  parser.add_argument("--n-ga-runs", type=int, default=32)
   parser.add_argument("--batch-size", type=int, default=1024)
   parser.add_argument("--lr", type=float, default=3e-4)
   parser.add_argument("--arch", type=str, default="cnn")
@@ -104,7 +106,7 @@ def main() -> None:
   # --- Initial levels: GA-generated when resuming, random otherwise ---
   if args.checkpoint is not None:
     # Warm model — go straight to GA for initial level generation
-    print("\nResuming from checkpoint — running GA for initial levels...")
+    print("\nResuming from checkpoint — running multi-GA for initial levels...")
     fitness_expr = f"-abs(log_policy_win_prob - ({args.target_log_wp}))"
 
     seed_levels = mummymaze_rust.generate_random_solvable(
@@ -112,7 +114,8 @@ def main() -> None:
       grid_size=grid_size,
       seed=args.seed,
     )
-    _population, _ = run_ga(
+    best_per_run = run_multi_ga(
+      args.n_ga_runs,
       seed_levels,
       model=state.model,
       grid_size=grid_size,
@@ -121,8 +124,8 @@ def main() -> None:
       fitness_expr=fitness_expr,
       seed=args.seed,
     )
-    initial_levels = [ind.level for ind in _population]
-    print(f"  GA: {len(initial_levels)} levels")
+    initial_levels = [ind.level for ind in best_per_run]
+    print(f"  Multi-GA: {len(initial_levels)} levels")
   else:
     # Cold start — random levels
     n_rand = args.n_random_levels
@@ -139,45 +142,56 @@ def main() -> None:
   n_states = datasets[grid_size].n_states
   print(f"  Dataset after augment: {n_states} states (gs={grid_size})")
 
+  # Save initial levels
+  levels_dir = Path(args.checkpoint_dir) / "levels" if args.checkpoint_dir else None
+  if levels_dir:
+    levels_dir.mkdir(parents=True, exist_ok=True)
+    path = levels_dir / "round_initial.jsonl"
+    _save_levels_jsonl(path, initial_levels)
+    print(f"  Saved {len(initial_levels)} levels to {path}")
+
   # --- Curriculum loop ---
   # Track current round's levels for threshold evaluation
   round_levels: list[mummymaze_rust.Level] = list(initial_levels)
+  timer = SectionTimer()
 
   for round_idx in range(args.n_rounds):
-    round_t0 = time.time()
     print(f"\n{'=' * 60}")
     print(f"Round {round_idx}/{args.n_rounds - 1}")
     print(f"{'=' * 60}")
 
     # Train until model masters current round's levels or max epochs
     for epoch_in_round in range(args.max_epochs_per_round):
-      state = train_epochs(
-        state,
-        session.config,
-        datasets,
-        sources,
-        session.reporter,
-        log_fn=session.log_fn,
-        checkpoint_fn=session.checkpoint_fn,
-        inner_stop=stop_after(args.epochs_per_eval),
-      )
-      state.epoch_offset += args.epochs_per_eval
+      with timer("train"):
+        state = train_epochs(
+          state,
+          session.config,
+          datasets,
+          sources,
+          session.reporter,
+          log_fn=session.log_fn,
+          checkpoint_fn=session.checkpoint_fn,
+          inner_stop=stop_after(args.epochs_per_eval),
+        )
+        state.epoch_offset += args.epochs_per_eval
 
       # Threshold check: win prob on THIS ROUND'S levels only
-      round_log_wps = compute_policy_win_probs_batched(
-        round_levels,
-        state.model,
-        grid_size,
-      )
+      with timer("eval_round"):
+        round_log_wps = compute_policy_win_probs_batched(
+          round_levels,
+          state.model,
+          grid_size,
+        )
       round_wps = [10**lwp for lwp in round_log_wps if lwp > float("-inf")]
       round_mean = float(np.mean(round_wps)) if round_wps else 0.0
 
       # Monitoring: win prob on real validation levels (not used for stopping)
-      val_log_wps = compute_policy_win_probs_batched(
-        val_levels_gs6,
-        state.model,
-        grid_size,
-      )
+      with timer("eval_val"):
+        val_log_wps = compute_policy_win_probs_batched(
+          val_levels_gs6,
+          state.model,
+          grid_size,
+        )
       val_wps = [10**lwp for lwp in val_log_wps if lwp > float("-inf")]
       val_mean = float(np.mean(val_wps)) if val_wps else 0.0
 
@@ -215,7 +229,11 @@ def main() -> None:
       continue
 
     # --- GA phase: generate new challenging levels ---
-    print(f"\n--- GA Phase (targeting log_wp={args.target_log_wp}) ---")
+    print(
+      f"\n--- Multi-GA Phase "
+      f"({args.n_ga_runs} runs × {args.ga_pop_size}, "
+      f"targeting log_wp={args.target_log_wp}) ---"
+    )
     fitness_expr = f"-abs(log_policy_win_prob - ({args.target_log_wp}))"
 
     # Fresh random seeds for GA each round
@@ -227,37 +245,63 @@ def main() -> None:
 
     def _on_gen(r):  # noqa: ANN001
       print(
-        f"  Gen {r.generation}: best={r.best.fitness:.3f} "
-        f"avg={r.avg_fitness:.3f} pop={r.pop_size}"
+        f"  Gen {r.generation}: best={r.best_overall.fitness:.3f} "
+        f"avg={r.avg_fitness:.3f} pop={r.total_pop} "
+        f"solvable={r.solvable_rate:.0%}"
       )
 
-    ga_t0 = time.time()
-    _population, _ = run_ga(
-      seed_levels,
-      model=state.model,
-      grid_size=grid_size,
-      pop_size=args.ga_pop_size,
-      generations=args.ga_generations,
-      fitness_expr=fitness_expr,
-      seed=args.seed + round_idx + 1,
-      on_generation=_on_gen,
-    )
-    ga_time = time.time() - ga_t0
+    with timer("ga"):
+      best_per_run = run_multi_ga(
+        args.n_ga_runs,
+        seed_levels,
+        model=state.model,
+        grid_size=grid_size,
+        pop_size=args.ga_pop_size,
+        generations=args.ga_generations,
+        fitness_expr=fitness_expr,
+        seed=args.seed + round_idx + 1,
+        on_generation=_on_gen,
+      )
 
-    round_levels = [ind.level for ind in _population]
+    round_levels = [ind.level for ind in best_per_run]
     n_new = len(round_levels)
-    print(f"  GA: {n_new} levels ({ga_time:.1f}s)")
+    print(f"  Multi-GA: {n_new} levels (1 best per run)")
 
     if round_levels:
-      datasets = augment_dataset(datasets, round_levels)
+      with timer("augment"):
+        datasets = augment_dataset(datasets, round_levels)
       n_train = int(datasets[grid_size].train_mask.sum())
       print(f"  Dataset after augment: {n_train} train states (gs={grid_size})")
 
-    round_time = time.time() - round_t0
-    print(f"\nRound {round_idx} complete ({round_time:.1f}s)")
+      if levels_dir:
+        path = levels_dir / f"round_{round_idx:03d}.jsonl"
+        _save_levels_jsonl(path, round_levels)
+        print(f"  Saved {len(round_levels)} levels to {path}")
 
+    # Log per-round timing
+    round_times = timer.round_times()
+    timing_str = " | ".join(f"{k}={v:.1f}s" for k, v in round_times.items() if v > 0)
+    print(f"  Timing: {timing_str}")
+
+    if session.log_fn is not None:
+      session.log_fn(
+        state.global_step,
+        {f"timing/{k}": v for k, v in round_times.items()},
+      )
+
+  print(f"\n{timer.summary()}")
   session.finish()
   print("\nCurriculum training complete.")
+
+
+def _save_levels_jsonl(
+  path: Path,
+  levels: list[mummymaze_rust.Level],
+) -> None:
+  """Save levels as JSONL (one JSON-serialized level per line)."""
+  with open(path, "w") as f:
+    for level in levels:
+      f.write(level.to_json() + "\n")
 
 
 def _get_val_levels(

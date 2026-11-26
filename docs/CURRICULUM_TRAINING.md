@@ -27,7 +27,7 @@ The key insight: if we can get the model's validation win probability extremely 
 ### Curriculum loop
 ```
 Outer loop (rounds):
-  1. GA generates N hard levels (targeting ~10% policy win prob)
+  1. Multi-GA generates N hard levels (one best per independent GA run)
   2. Augment training set with new levels (accumulates across rounds)
 
   Inner loop (epochs):
@@ -40,21 +40,23 @@ Outer loop (rounds):
 ```
 
 ### Key design decisions
+- **Multi-GA for diversity** — N independent GA populations step in lockstep, with inference batched across all of them. Only the best individual from each run is kept, producing N genuinely diverse levels per round instead of N near-clones from a single converged population.
 - **Train only on GA levels** — real levels are held out entirely for validation
 - **Constant learning rate** — dataset size changes each round, cosine schedule doesn't apply
 - **Accumulate levels** — model trains on all past rounds to prevent catastrophic forgetting
 - **Threshold on current round only** — measures mastery of the new hard levels, not overall performance
-- **Batched GA inference** — temp LevelBank + chunked obs/NN forward for 1024-level populations
+- **Batched GA inference** — temp LevelBank + chunked obs/NN forward across all populations
 
 ### Infrastructure
 - `experiments/curriculum_gs6.py` — the experiment script
-- `src/train/ga.py` — GA with batched inference (`compute_policy_win_probs_batched`)
+- `src/train/ga.py` — `run_multi_ga` (N independent GAs, batched inference), `run_ga` (single GA)
 - `src/train/augment.py` — dataset augmentation from GA levels
+- `src/train/timer.py` — `SectionTimer` for per-section profiling (logged to wandb as `timing/*`)
 - Rust crate handles: level mutation/crossover, BFS solving, Markov win prob, state graph building
+- GA levels saved as JSONL in `<checkpoint-dir>/levels/` for later inspection
 
 ## Open questions
 
-- **Level diversity**: a single GA cycle may produce similar levels that all exploit the same model weakness. Smaller populations taken more frequently might provide better coverage.
 - **Target win probability**: -1.0 (10%) might be too hard. -0.3 (50%) could give more learnable signal.
 - **Dataset growth**: levels accumulate forever. May need a cap or pruning strategy (drop levels the model has mastered).
 - **Evaluation frequency**: computing win prob on GA levels every epoch is expensive. Could check every N epochs.
