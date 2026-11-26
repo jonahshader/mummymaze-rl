@@ -35,38 +35,53 @@ pub struct DataStore {
 
 impl DataStore {
     /// Tier 1: parse all .dat files + BFS solve each level.
-    pub fn load_levels(maze_dir: &Path) -> Self {
+    /// If `jsonl_dir` is provided, also load GA-generated levels from JSONL files.
+    pub fn load_levels(maze_dir: &Path, jsonl_dir: Option<&Path>) -> Self {
         let all_levels = batch::collect_levels(maze_dir).unwrap_or_default();
-        let total = all_levels.len();
+
+        let jsonl_levels = jsonl_dir
+            .map(|d| batch::collect_jsonl_levels(d).unwrap_or_default())
+            .unwrap_or_default();
+        let has_generated = !jsonl_levels.is_empty();
+
+        let total = all_levels.len() + jsonl_levels.len();
 
         let mut seen = HashSet::new();
         let mut seen_canonical = HashSet::new();
-        let rows: Vec<LevelRow> = all_levels
+
+        let mut make_row = |stem: String, sub: usize, lev: Level, is_generated: bool| {
+            let bfs = solver::solve(&lev).moves;
+            let fp = lev.fingerprint();
+            let is_duplicate = !seen.insert(fp);
+            let cfp = lev.canonical_fingerprint();
+            let is_rotation_duplicate = !is_duplicate && !seen_canonical.insert(cfp);
+            if is_duplicate {
+                seen_canonical.insert(cfp);
+            }
+            let search_text = format!("{stem} {sub}").to_lowercase();
+            LevelRow {
+                file_stem: stem,
+                sublevel: sub,
+                level: lev,
+                bfs_moves: bfs,
+                analysis: None,
+                is_duplicate,
+                is_rotation_duplicate,
+                is_generated,
+                search_text,
+            }
+        };
+
+        let mut rows: Vec<LevelRow> = all_levels
             .into_iter()
-            .map(|(stem, sub, lev)| {
-                let bfs = solver::solve(&lev).moves;
-                let fp = lev.fingerprint();
-                let is_duplicate = !seen.insert(fp);
-                // Canonical fingerprint: min over all dihedral symmetries.
-                // A rotation duplicate is a non-exact duplicate whose canonical
-                // form was already seen.
-                let cfp = lev.canonical_fingerprint();
-                let is_rotation_duplicate = !is_duplicate && !seen_canonical.insert(cfp);
-                // Also insert for exact duplicates so later rotations are caught
-                if is_duplicate { seen_canonical.insert(cfp); }
-                let search_text = format!("{stem} {sub}").to_lowercase();
-                LevelRow {
-                    file_stem: stem,
-                    sublevel: sub,
-                    level: lev,
-                    bfs_moves: bfs,
-                    analysis: None,
-                    is_duplicate,
-                    is_rotation_duplicate,
-                    search_text,
-                }
-            })
+            .map(|(stem, sub, lev)| make_row(stem, sub, lev, false))
             .collect();
+
+        rows.extend(
+            jsonl_levels
+                .into_iter()
+                .map(|(stem, sub, lev)| make_row(stem, sub, lev, true)),
+        );
 
         let row_index: HashMap<(String, usize), usize> = rows
             .iter()
@@ -78,12 +93,17 @@ impl DataStore {
 
         let training_metrics = None;
 
+        let mut filter = FilterState::default();
+        if has_generated {
+            filter.show_generated = true;
+        }
+
         let mut store = DataStore {
             rows,
             sorted_indices,
             sort_col: SortColumn::File,
             sort_dir: SortDir::Asc,
-            filter: FilterState::default(),
+            filter,
             analysis_progress: Some((0, total)),
             analysis_rx: None,
             row_index,
@@ -204,6 +224,9 @@ impl DataStore {
                     return false;
                 }
                 if !filter.show_rotation_duplicates && row.is_rotation_duplicate {
+                    return false;
+                }
+                if !filter.show_generated && row.is_generated {
                     return false;
                 }
                 true

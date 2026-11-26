@@ -52,8 +52,12 @@ struct App {
 }
 
 impl App {
-    fn new(maze_dir: &std::path::Path, cc: &eframe::CreationContext<'_>) -> Self {
-        let mut store = DataStore::load_levels(maze_dir);
+    fn new(
+        maze_dir: &std::path::Path,
+        jsonl_dir: Option<&std::path::Path>,
+        cc: &eframe::CreationContext<'_>,
+    ) -> Self {
+        let mut store = DataStore::load_levels(maze_dir, jsonl_dir);
         store.start_analysis();
 
         let graph_view = cc
@@ -638,16 +642,36 @@ fn bfs_path(graph: &StateGraph, from: mummymaze::game::State, to: mummymaze::gam
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let maze_dir = if args.len() > 1 {
-        std::path::PathBuf::from(&args[1])
-    } else {
-        std::path::PathBuf::from("mazes")
-    };
+    let mut maze_dir = std::path::PathBuf::from("mazes");
+    let mut jsonl_dir: Option<std::path::PathBuf> = None;
+
+    // Parse args: [MAZE_DIR] [--levels DIR]
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--levels" {
+            i += 1;
+            if i < args.len() {
+                jsonl_dir = Some(std::path::PathBuf::from(&args[i]));
+            } else {
+                eprintln!("--levels requires a directory argument");
+                std::process::exit(1);
+            }
+        } else if !args[i].starts_with('-') && i == 1 {
+            maze_dir = std::path::PathBuf::from(&args[i]);
+        }
+        i += 1;
+    }
 
     if !maze_dir.exists() {
         eprintln!("Maze directory not found: {}", maze_dir.display());
-        eprintln!("Usage: mummymaze-viewer [MAZE_DIR]");
+        eprintln!("Usage: mummymaze-viewer [MAZE_DIR] [--levels JSONL_DIR]");
         std::process::exit(1);
+    }
+    if let Some(ref d) = jsonl_dir {
+        if !d.exists() {
+            eprintln!("JSONL directory not found: {}", d.display());
+            std::process::exit(1);
+        }
     }
 
     let native_options = eframe::NativeOptions {
@@ -661,7 +685,13 @@ fn main() {
     eframe::run_native(
         "Mummy Maze Viewer",
         native_options,
-        Box::new(move |cc: &eframe::CreationContext<'_>| Ok(Box::new(App::new(&maze_dir, cc)))),
+        Box::new(move |cc: &eframe::CreationContext<'_>| {
+            Ok(Box::new(App::new(
+                &maze_dir,
+                jsonl_dir.as_deref(),
+                cc,
+            )))
+        }),
     )
     .expect("Failed to launch eframe");
 }

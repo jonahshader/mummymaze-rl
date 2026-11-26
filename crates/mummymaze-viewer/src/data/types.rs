@@ -9,6 +9,8 @@ pub struct LevelRow {
     pub analysis: Option<LevelAnalysis>,
     pub is_duplicate: bool,
     pub is_rotation_duplicate: bool,
+    /// Level was loaded from JSONL (GA-generated), not a .dat file.
+    pub is_generated: bool,
     /// Pre-computed lowercase "{file_stem} {sublevel}" for filter matching.
     pub search_text: String,
 }
@@ -62,6 +64,7 @@ pub struct FilterState {
     pub solvable_only: bool,
     pub show_duplicates: bool,
     pub show_rotation_duplicates: bool,
+    pub show_generated: bool,
 }
 
 impl Default for FilterState {
@@ -72,6 +75,7 @@ impl Default for FilterState {
             solvable_only: true,
             show_duplicates: false,
             show_rotation_duplicates: false,
+            show_generated: false,
         }
     }
 }

@@ -113,6 +113,41 @@ pub fn collect_levels(maze_dir: &Path) -> Result<Vec<(String, usize, Level)>> {
     Ok(all_levels)
 }
 
+/// Gather all levels from `.jsonl` files in a directory.
+///
+/// Each line is a JSON-serialised `Level` (from `level.to_json()` in Python).
+/// Uses the file stem as `file_stem` and the 0-based line index as `sublevel`.
+pub fn collect_jsonl_levels(dir: &Path) -> Result<Vec<(String, usize, Level)>> {
+    use std::io::BufRead;
+
+    let mut jsonl_files: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+    jsonl_files.sort();
+
+    let mut all_levels = Vec::new();
+    for path in &jsonl_files {
+        let stem = path.file_stem().unwrap().to_str().unwrap().to_string();
+        let reader = std::io::BufReader::new(std::fs::File::open(path)?);
+        for (i, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Level>(&line) {
+                Ok(lev) => all_levels.push((stem.clone(), i, lev)),
+                Err(e) => {
+                    eprintln!("JSONL parse error in {}:{}: {e}", path.display(), i + 1);
+                }
+            }
+        }
+    }
+
+    Ok(all_levels)
+}
+
 /// Analyze all levels in parallel using rayon.
 ///
 /// `jobs`: number of threads. 0 = use rayon default (all cores).

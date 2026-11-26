@@ -65,6 +65,12 @@ pub fn draw_filters(ui: &mut Ui, store: &mut DataStore) {
         {
             changed = true;
         }
+        if ui
+            .checkbox(&mut store.filter.show_generated, "Generated")
+            .changed()
+        {
+            changed = true;
+        }
     });
 
     if changed {
