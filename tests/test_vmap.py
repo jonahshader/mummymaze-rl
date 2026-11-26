@@ -210,7 +210,9 @@ class TestVmap:
 
 # --- Level bank tests ---
 
-DAT_DIR = os.environ.get("MUMMY_MAZE_DAT_DIR", "")
+DAT_DIR = os.environ.get(
+  "MUMMY_MAZE_DAT_DIR", str(Path(__file__).resolve().parent.parent / "mazes")
+)
 
 _banks_cache: dict[int, LevelBank] | None = None
 
@@ -225,7 +227,7 @@ def _get_banks() -> dict[int, LevelBank]:
 
 @pytest.mark.skipif(
   not DAT_DIR or not Path(DAT_DIR).exists(),
-  reason="Set MUMMY_MAZE_DAT_DIR to run level bank tests",
+  reason="No .dat files: mazes/ is missing and MUMMY_MAZE_DAT_DIR is unset",
 )
 class TestLevelBank:
   """Test level bank loading, dedup, and batched sampling."""

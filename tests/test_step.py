@@ -390,12 +390,14 @@ class TestScorpion:
 
 # --- Tests using .dat files (skipped if no data directory) ---
 
-DAT_DIR = os.environ.get("MUMMY_MAZE_DAT_DIR", "")
+DAT_DIR = os.environ.get(
+  "MUMMY_MAZE_DAT_DIR", str(Path(__file__).resolve().parent.parent / "mazes")
+)
 
 
 @pytest.mark.skipif(
   not DAT_DIR or not Path(DAT_DIR).exists(),
-  reason="Set MUMMY_MAZE_DAT_DIR to run .dat file tests",
+  reason="No .dat files: mazes/ is missing and MUMMY_MAZE_DAT_DIR is unset",
 )
 class TestDatFiles:
   """Run reference comparison on real .dat file levels."""
