@@ -147,7 +147,7 @@ def main() -> None:
     on_round_end=on_round_end,
     on_event=callables.get("on_event"),
     round_checkpoint_dir=(
-      (lambda r: str(checkpoint_dir / f"round{r:03d}"))
+      (lambda r: checkpoint_dir / f"round{r:03d}")
       if checkpoint_dir and n_rounds > 1
       else None
     ),

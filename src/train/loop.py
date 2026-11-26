@@ -7,6 +7,7 @@ Adversarial: training_loop(session, inner_stop=..., outer_stop=stop_after(3),
 
 import itertools
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from src.train.augment import augment_dataset
@@ -27,7 +28,7 @@ def training_loop(
   outer_stop: StopFn | None = None,
   on_round_end: RoundEndFn | None = None,
   on_event: Callable[[dict], None] | None = None,
-  round_checkpoint_dir: Callable[[int], str | None] | None = None,
+  round_checkpoint_dir: Callable[[int], Path | None] | None = None,
 ) -> TrainState:
   """Run training with optional outer (adversarial) loop.
 

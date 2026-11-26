@@ -338,7 +338,7 @@ def adversarial_loop(
     outer_stop=stop_after(n_rounds),
     on_round_end=ga_round_end,
     on_event=on_event,
-    round_checkpoint_dir=lambda r: str(checkpoint_dir / f"round{r:03d}"),
+    round_checkpoint_dir=lambda r: checkpoint_dir / f"round{r:03d}",
   )
 
   print("\nAdversarial loop complete.")
