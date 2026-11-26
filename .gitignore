@@ -28,3 +28,6 @@ cache/
 
 # Game data (private repo only)
 # mazes/
+
+# Run logs
+*.log
