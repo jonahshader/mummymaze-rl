@@ -8,8 +8,8 @@ Each round:
   4. Repeat
 
 Usage:
-  uv run python experiments/curriculum_gs6.py
-  uv run python experiments/curriculum_gs6.py --seed 42 --n-rounds 5
+  uv run python -m experiments.curriculum_gs6
+  uv run python -m experiments.curriculum_gs6 --seed 42 --n-rounds 5
 """
 
 import argparse

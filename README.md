@@ -51,7 +51,7 @@ GA-generated levels of increasing difficulty (`docs/CURRICULUM_TRAINING.md`);
 `bc_vs_direct.py` compares BC against direct win-probability training.
 
 ```bash
-uv run python experiments/curriculum_gs6.py
+uv run python -m experiments.curriculum_gs6
 uv run python -m experiments.bc_vs_direct
 ```
 
