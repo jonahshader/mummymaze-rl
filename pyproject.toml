@@ -98,8 +98,6 @@ ignore_names = [
   # Shape fields of PaddedSkeletonBatch.
   "max_edges",
   "max_win_edges",
-  # ModelServer's own stop path; the WebSocket server uses its own events (docs/TODO.md).
-  "stop_train",
 ]
 
 [tool.uv.sources]

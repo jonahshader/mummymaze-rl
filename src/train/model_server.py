@@ -6,7 +6,6 @@ by callers.
 """
 
 import logging
-import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -72,9 +71,6 @@ class ModelServer:
     self._level_index: dict[str, tuple[int, int]] | None = None
     # Cached LevelData per (stem, sub) — avoids re-parsing .dat files
     self._level_data_cache: dict[tuple[str, int], tuple[int, LevelData]] = {}
-
-    # Training stop event
-    self._stop_event = threading.Event()
 
   @property
   def obs_and_forward(self) -> Callable:
@@ -212,7 +208,6 @@ class ModelServer:
     augment_levels_path: str | None = None,
   ) -> None:
     """Run training loop with the given reporter for progress events."""
-    self._stop_event.clear()
     run_id = f"bc-{self.arch}-{seed}"
     key = jr.key(seed)
     datasets, sources = self.load_datasets()
@@ -301,8 +296,3 @@ class ModelServer:
       for p in checkpoint_dir.iterdir()
       if p.is_dir() and (p / "model.eqx").exists()
     )
-
-  def stop_train(self) -> None:
-    """Signal the training loop to stop after the current batch."""
-    log.info("stop_train requested")
-    self._stop_event.set()
